@@ -658,3 +658,182 @@ test.describe('new text inside a frame', () => {
     expect(o.errors).toEqual([])
   })
 })
+
+test.describe('frame panel and toolbar', () => {
+  const A = frameRec('A', 300, 200, 400, 300, 'Cover')
+  const nameField = (page: Page) => page.getByLabel('Name')
+  const itemCount = (page: Page) => page.getByTestId('frame-item-count')
+  const withContents = (page: Page) => page.getByRole('button', { name: 'Select with contents' })
+
+  test('the Frame button arms the tool, draws a frame, and releases itself', async ({ page }) => {
+    const o = await openLegacy(page, [image('i1', 300, 200)])
+    const button = page.getByRole('button', { name: 'Frame', exact: true })
+    await expect(button).toHaveAttribute('aria-pressed', 'false')
+    await button.click()
+    await expect(button).toHaveAttribute('aria-pressed', 'true')
+    await button.click() // clicking again puts it away
+    await expect(button).toHaveAttribute('aria-pressed', 'false')
+    await button.click()
+    await drag(page, o.at(600, 150), o.at(900, 400))
+    await expect(button).toHaveAttribute('aria-pressed', 'false') // single-use
+    await expect(title(page)).toHaveText('Frame')
+    await expect(nameField(page)).toHaveValue('Frame 1')
+    await expect(itemCount(page)).toHaveText('Nothing yet')
+    await expect(withContents(page)).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Delete frame' })).toBeVisible()
+    await storedWhen(page, (d) => (d.frames ?? []).length === 1)
+    expect(o.errors).toEqual([])
+  })
+
+  test('renaming in the panel: Enter commits, Esc reverts, blank falls back; one undo restores the old name', async ({ page }) => {
+    const o = await openFramed(page, [A], [])
+    const label = labelOf(o, A)
+    await page.mouse.click(label.x, label.y)
+    const name = nameField(page)
+    await expect(name).toHaveValue('Cover')
+
+    await name.fill('  Back   cover ')
+    await name.press('Enter')
+    await expect(name).toHaveValue('Back cover') // normalized, and shown as stored
+    let doc = await storedWhen(page, (d) => frameOf(d, 'A').name === 'Back cover')
+    expect(doc.frames).toEqual([{ ...A, name: 'Back cover' }]) // nothing but the name changed
+    await expect(title(page)).toHaveText('Frame') // still selected
+
+    await name.fill('Thrown away')
+    await name.press('Escape')
+    await expect(name).toHaveValue('Back cover')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(frameOf(await storedDoc(page), 'A').name).toBe('Back cover')
+
+    // Typing a name must not trigger canvas shortcuts (Delete, F, T ...).
+    await name.fill('Fit text')
+    await name.press('Delete')
+    await name.press('Enter')
+    doc = await storedWhen(page, (d) => frameOf(d, 'A').name === 'Fit text')
+    expect(doc.frames).toHaveLength(1)
+
+    await name.fill('   ')
+    await name.press('Enter')
+    await expect(name).toHaveValue('Frame')
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'Frame')
+
+    await undoButton(page).click()
+    await storedWhen(page, (d) => frameOf(d, 'A').name !== 'Frame')
+    expect(o.errors).toEqual([])
+  })
+
+  test('double-clicking a frame label puts the cursor in the name field', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('member', 350, 250, { frameId: 'A' })])
+    const label = labelOf(o, A)
+    await page.mouse.dblclick(label.x, label.y)
+    await expect(nameField(page)).toBeFocused()
+    await page.keyboard.type('Typed over it')
+    await page.keyboard.press('Enter')
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'Typed over it')
+    await expect(undoButton(page)).toBeEnabled()
+    await undoButton(page).click()
+    await expect(undoButton(page)).toBeDisabled() // the double-click itself moved nothing and recorded nothing
+    expect(o.errors).toEqual([])
+  })
+
+  test('the item count shows what a frame owns, not what merely sits inside it', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('owned', 320, 220, { frameId: 'A' }), image('guest', 480, 360)]) // both inside A
+    const label = labelOf(o, A)
+    await page.mouse.click(label.x, label.y)
+    await expect(itemCount(page)).toHaveText('1 item')
+    await withContents(page).click()
+    await expect(title(page)).toHaveText('2 objects') // the frame and the one thing it owns
+    await page.keyboard.press('Escape')
+
+    await drag(page, o.at(580, 420), o.at(585, 424)) // nudge the guest: now it belongs
+    await storedWhen(page, (d) => obj(d, 'guest').frameId === 'A')
+    await page.mouse.click(label.x, label.y)
+    await expect(itemCount(page)).toHaveText('2 items')
+    expect(o.errors).toEqual([])
+  })
+
+  test('Select with contents: frame, a rotated image and a text scale together proportionally, each exactly once', async ({ page }) => {
+    const view: View = { zoom: 0.5, panX: 100, panY: 60 }
+    const big = frameRec('A', 200, 200, 1000, 700)
+    const text = { type: 'text', id: 'txt', left: 300, top: 650, angle: 0, text: 'Caption', fontSize: 40, width: 400, frameId: 'A' }
+    const o = await openFramed(
+      page,
+      [big],
+      [image('tilted', 500, 350, { angle: 20, scaleX: 2, scaleY: 2, frameId: 'A' }), text, image('guest', 900, 300)], // "guest" sits inside A but is loose
+      view,
+    )
+    const before = await storedDoc(page)
+    const label = labelOf(o, big)
+    await page.mouse.click(label.x, label.y)
+    await expect(itemCount(page)).toHaveText('2 items')
+    await withContents(page).click()
+    await expect(title(page)).toHaveText('3 objects')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await storedDoc(page)).toEqual(before) // selecting records nothing
+    await expect(undoButton(page)).toBeDisabled()
+
+    // Bottom-right corner of the selection (the frame is its bounding box) dragged inward: 1000 -> 750 wide.
+    await drag(page, o.at(1200, 900), o.at(950, 725), { steps: 10 })
+    const scaled = await storedWhen(page, (d) => frameOf(d, 'A').width !== 1000)
+    const k = frameOf(scaled, 'A').width / 1000
+    expect(k).toBeGreaterThan(0.7)
+    expect(k).toBeLessThan(0.8)
+    const check = (doc: StoredBoard) => {
+      const f = frameOf(doc, 'A')
+      expect(f.left).toBe(200) // anchored at the selection's top-left corner
+      expect(f.top).toBe(200)
+      expect(f.height).toBeCloseTo(700 * k, 1) // proportional, although a frame alone would be free
+      const img = obj(doc, 'tilted')
+      expect(img.scaleX).toBeCloseTo(2 * k, 3) // once, not k squared
+      expect(img.scaleY).toBeCloseTo(2 * k, 3)
+      expect(img.angle).toBe(20)
+      expect(img.left).toBeCloseTo(200 + (500 - 200) * k, 1)
+      expect(img.top).toBeCloseTo(200 + (350 - 200) * k, 1)
+      const t = obj(doc, 'txt')
+      expect(t.fontSize).toBeCloseTo(40 * k, 1) // folded into the font size
+      expect(t.width).toBeCloseTo(400 * k, 1)
+      expect(t.left).toBeCloseTo(200 + (300 - 200) * k, 1)
+      expect(t.top).toBeCloseTo(200 + (650 - 200) * k, 1)
+      expect(img.frameId).toBe('A')
+      expect(t.frameId).toBe('A')
+      expect(obj(doc, 'guest')).toEqual(obj(before, 'guest')) // not part of it: untouched and still loose
+    }
+    check(scaled)
+    await waitSaved(page)
+
+    await page.keyboard.press('Escape') // deselecting changes nothing: scales were folded and baked
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await storedDoc(page)).toEqual(scaled)
+
+    await undoButton(page).click()
+    await storedWhen(page, (d) => frameOf(d, 'A').width === 1000)
+    expect((await storedDoc(page)).objects).toEqual(before.objects) // exact pre-gesture records
+    expect((await storedDoc(page)).frames).toEqual(before.frames)
+    await redoButton(page).click()
+    await storedWhen(page, (d) => frameOf(d, 'A').width !== 1000)
+    expect(await storedDoc(page)).toEqual(scaled)
+
+    await waitSaved(page)
+    await page.reload()
+    await expect(page.locator('.toolbar')).toBeVisible()
+    await expect(status(page)).toContainText('Saved on this device')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await storedDoc(page)).toEqual(scaled) // no drift from loading
+
+    // The same selection dragged: everything moves once; the loose guest stays.
+    const moved = labelOf(o, big)
+    await page.mouse.click(moved.x, moved.y)
+    await withContents(page).click()
+    await expect(title(page)).toHaveText('3 objects')
+    const grab = o.at(250, 250)
+    await drag(page, grab, { x: grab.x + 40, y: grab.y + 30 }) // 80 x 60 in the scene at zoom 0.5
+    const dragged = await storedWhen(page, (d) => frameOf(d, 'A').left === 280)
+    expect(frameOf(dragged, 'A')).toMatchObject({ left: 280, top: 260 })
+    expect(obj(dragged, 'tilted').left).toBeCloseTo(obj(scaled, 'tilted').left + 80, 1)
+    expect(obj(dragged, 'tilted').top).toBeCloseTo(obj(scaled, 'tilted').top + 60, 1)
+    expect(obj(dragged, 'txt').left).toBeCloseTo(obj(scaled, 'txt').left + 80, 1)
+    expect(obj(dragged, 'txt').top).toBeCloseTo(obj(scaled, 'txt').top + 60, 1)
+    expect(obj(dragged, 'guest')).toEqual(obj(before, 'guest'))
+    expect(o.errors).toEqual([])
+  })
+})

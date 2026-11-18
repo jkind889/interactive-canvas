@@ -34,6 +34,12 @@ describe('resolveShortcut: actions', () => {
     expect(resolveShortcut(key('h'), idle)).toBe('tool-hand')
     expect(resolveShortcut(key('t'), idle)).toBe('tool-text')
     expect(resolveShortcut(key('i'), idle)).toBe('add-image')
+    expect(resolveShortcut(key('f'), idle)).toBe('tool-frame')
+    expect(resolveShortcut(key('F'), idle)).toBe('tool-frame') // Caps Lock
+    expect(resolveShortcut(key('F', { shiftKey: true }), idle)).toBeNull()
+    expect(resolveShortcut(key('f', { ctrlKey: true }), idle)).toBeNull() // the browser's Find stays the browser's
+    expect(resolveShortcut(key('f', { altKey: true }), idle)).toBeNull()
+    expect(resolveShortcut(key('f'), { editingText: true })).toBeNull()
     expect(resolveShortcut(key('V', { shiftKey: true }), idle)).toBeNull() // Shift+V is not select
   })
 

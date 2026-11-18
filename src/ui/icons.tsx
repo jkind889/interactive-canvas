@@ -41,6 +41,17 @@ export const TextIcon = () => (
     <path d="M5 6.5V5h14v1.5M12 5v14M9.5 19h5" />
   </Svg>
 )
+export const FrameIcon = () => (
+  <Svg>
+    <path d="M7 3v18M17 3v18M3 7h18M3 17h18" />
+  </Svg>
+)
+export const SelectContentsIcon = () => (
+  <Svg>
+    <rect x="4" y="4" width="16" height="16" rx="2" strokeDasharray="3 3" />
+    <rect x="8.5" y="8.5" width="7" height="7" rx="1" />
+  </Svg>
+)
 export const UndoIcon = () => (
   <Svg>
     <path d="M9 7L4.5 11.5 9 16M5 11.5h9a5.5 5.5 0 010 11" transform="translate(0 -3)" />

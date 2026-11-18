@@ -122,6 +122,7 @@ test.describe('failed load is read-only and preserves the original document and 
     await expect(page.getByRole('button', { name: 'Select' })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Add image' })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Text' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Frame', exact: true })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Redo' })).toBeDisabled()
     await expect(page.locator('input[aria-label="Board title"]')).toBeDisabled()
@@ -136,6 +137,11 @@ test.describe('failed load is read-only and preserves the original document and 
     await page.keyboard.type('typing into a protected session')
     await page.keyboard.press('Escape')
     await page.keyboard.press('i')
+    await page.keyboard.press('f') // would arm the Frame tool
+    await page.mouse.move(300, 600)
+    await page.mouse.down()
+    await page.mouse.move(500, 700, { steps: 4 })
+    await page.mouse.up()
     await page.mouse.dblclick(100, 450) // would enter text editing on the stored text
     await page.keyboard.type('nope')
     await page.mouse.move(640, 400) // drag over the stored image

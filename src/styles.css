@@ -324,6 +324,43 @@ button:disabled {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
+.text-input {
+  width: 150px;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  text-overflow: ellipsis;
+}
+.text-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.inspector-value {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.inspector-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.inspector-btn:disabled {
+  opacity: 0.5;
+}
+.inspector-note {
+  margin: -4px 0 0;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--muted);
+}
 .danger-btn {
   display: inline-flex;
   align-items: center;
@@ -462,4 +499,8 @@ button:disabled {
 .readonly-banner strong {
   flex: none;
   color: #8a5a00;
+}
+.banner-btn {
+  flex: none;
+  align-self: center;
 }

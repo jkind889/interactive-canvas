@@ -62,7 +62,7 @@ export function Overlays({ editor }: { editor: Editor }) {
 
   const openPicker = () => fileInput.current?.click()
   const readOnly = state?.readOnly ?? null
-  const showEmpty = !!state && state.ready && readOnly === null && state.objectCount === 0 && !state.editingText
+  const showEmpty = !!state && state.ready && readOnly === null && state.objectCount === 0 && !state.editingText && state.tool !== 'frame'
   const notice = state?.notice ?? null
 
   return (
@@ -95,6 +95,11 @@ export function Overlays({ editor }: { editor: Editor }) {
         <div className="readonly-banner" role="status" data-testid="readonly-banner">
           <strong>Read-only</strong>
           <span>{readOnly}</span>
+          {state?.reloadSuggested && (
+            <button type="button" className="text-btn banner-btn" onClick={() => window.location.reload()}>
+              Reload
+            </button>
+          )}
         </div>
       )}
 

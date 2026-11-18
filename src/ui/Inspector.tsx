@@ -1,17 +1,90 @@
-import { useId } from 'react'
+import { useEffect, useId, useRef } from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { Editor, SelectionInfo } from '../editor/Editor.ts'
 import { MAX_FONT_SIZE, MIN_FONT_SIZE } from '../model/doc.ts'
 import { IconButton } from './IconButton.tsx'
-import { BackwardIcon, ForwardIcon, ToBackIcon, ToFrontIcon, TrashIcon } from './icons.tsx'
+import { BackwardIcon, ForwardIcon, SelectContentsIcon, ToBackIcon, ToFrontIcon, TrashIcon } from './icons.tsx'
 
 const heading = (s: SelectionInfo) =>
   s.kind === 'multiple' ? `${s.count} objects` : s.kind === 'text' ? 'Text' : s.kind === 'frame' ? 'Frame' : 'Image'
 
+const itemCount = (n: number) => (n === 0 ? 'Nothing yet' : n === 1 ? '1 item' : `${n} items`)
+
+/** Name, contents and "Select with contents" for a single selected frame. */
+function FramePanel({ editor, selection }: { editor: Editor; selection: SelectionInfo }) {
+  const nameId = useId()
+  const nameInput = useRef<HTMLInputElement>(null)
+  const name = selection.frameName ?? ''
+  const members = selection.memberCount ?? 0
+
+  // Double-clicking a frame's label on the canvas puts the cursor in this field.
+  useEffect(() => {
+    editor.setFrameRenamer(() => {
+      nameInput.current?.focus()
+      nameInput.current?.select()
+    })
+    return () => editor.setFrameRenamer(null)
+  }, [editor])
+
+  const commit = (input: HTMLInputElement) => {
+    // The editor normalizes the name (and refuses while it is busy or read-only): show what it really is.
+    input.value = editor.renameFrame(input.value) ?? name
+  }
+  const onKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') e.currentTarget.blur()
+    if (e.key === 'Escape') {
+      e.currentTarget.value = name
+      e.currentTarget.blur()
+    }
+  }
+
+  return (
+    <>
+      <div className="inspector-row">
+        <label htmlFor={nameId}>Name</label>
+        <input
+          id={nameId}
+          key={name}
+          ref={nameInput}
+          className="text-input"
+          defaultValue={name}
+          maxLength={80}
+          spellCheck={false}
+          onBlur={(e) => commit(e.currentTarget)}
+          onKeyDown={onKey}
+        />
+      </div>
+      <div className="inspector-row">
+        <span>Contents</span>
+        <span className="inspector-value" data-testid="frame-item-count">
+          {itemCount(members)}
+        </span>
+      </div>
+      <button
+        type="button"
+        className="secondary-btn inspector-btn"
+        disabled={members === 0}
+        title="Select this frame together with everything it owns, to move or scale them as one"
+        onClick={() => editor.selectFrameContents()}
+      >
+        <SelectContentsIcon />
+        <span>Select with contents</span>
+      </button>
+      <p className="inspector-note">
+        Something belongs to a frame once you move it into the frame. Moving or resizing the frame itself never picks things up.
+      </p>
+    </>
+  )
+}
+
 export function Inspector({ editor, selection }: { editor: Editor; selection: SelectionInfo }) {
   const sizeId = useId()
+  const isFrame = selection.kind === 'frame'
   return (
     <aside className="floating inspector" aria-label="Selection">
       <div className="inspector-title">{heading(selection)}</div>
+
+      {isFrame && <FramePanel editor={editor} selection={selection} />}
 
       {selection.kind === 'text' && selection.fontSize !== null && (
         <div className="inspector-row">
@@ -53,8 +126,9 @@ export function Inspector({ editor, selection }: { editor: Editor; selection: Se
 
       <button type="button" className="danger-btn" aria-keyshortcuts="Delete Backspace" onClick={() => editor.deleteSelection()}>
         <TrashIcon />
-        <span>Delete</span>
+        <span>{isFrame ? 'Delete frame' : 'Delete'}</span>
       </button>
+      {isFrame && <p className="inspector-note">Deleting a frame keeps its contents on the board.</p>}
     </aside>
   )
 }

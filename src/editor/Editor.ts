@@ -87,6 +87,8 @@ export interface EditorState {
    * nothing may be edited or saved). Holds the user-visible reason.
    */
   readOnly: string | null
+  /** The read-only state is one that reloading gets out of (another tab changed the board). */
+  reloadSuggested: boolean
   tool: Tool
   /** Hand tool is in effect (selected, or Space held). */
   handActive: boolean
@@ -206,6 +208,7 @@ export class Editor {
     this.state = {
       ready: false,
       readOnly: null,
+      reloadSuggested: false,
       tool: 'select',
       handActive: false,
       editingText: false,
@@ -223,7 +226,7 @@ export class Editor {
       store,
       getDoc: () => this.getDoc(),
       bytes: (id) => this.assets.bytes(id),
-      onConflict: (message) => this.enterReadOnly(message),
+      onConflict: (message) => this.enterReadOnly(message, true),
       onStatus: (save) => {
         const failedNow = save.kind === 'error' && this.state.save.kind !== 'error'
         this.setState({ save })
@@ -303,11 +306,11 @@ export class Editor {
    * here on. An unfinished gesture is undone, images still being imported are dropped,
    * and any text being typed stays visible but is not committed.
    */
-  private enterReadOnly(message: string) {
+  private enterReadOnly(message: string, reloadSuggested = false) {
     if (this.disposed) return
     this.autosaver.disable(message)
     this.cancelGesture()
-    this.setState({ readOnly: message, tool: 'hand' }) // not editable from here on, so leaving the edit below commits nothing
+    this.setState({ readOnly: message, reloadSuggested, tool: 'hand' }) // not editable from here on, so leaving the edit below commits nothing
     this.dropStagedImports()
     this.finishEditing()
     this.canvas.discardActiveObject()
@@ -600,6 +603,16 @@ export class Editor {
         setOwner(target, ownerAfterManipulation(ownerOf(target), centerOf(target), this.frameRecords(), NO_FRAMES))
       }
       this.commit()
+    })
+
+    // Double-clicking a frame's label (or outline) is "rename": the UI puts the cursor in the
+    // name field. Deferred, like everything else that follows from a canvas event.
+    c.on('mouse:dblclick', (opt) => {
+      const target = opt.target
+      if (!this.editable || this.busy || !target || !isFrame(target)) return
+      queueMicrotask(() => {
+        if (this.editable && !this.busy && c.getActiveObject() === target) this.frameRenamer?.()
+      })
     })
 
     c.on('mouse:up', (opt) => {
@@ -1148,6 +1161,13 @@ export class Editor {
   /** The UI registers the file picker it owns so the `i` shortcut can open it. */
   setImagePicker(open: (() => void) | null) {
     this.imagePicker = open
+  }
+
+  private frameRenamer: (() => void) | null = null
+
+  /** The UI registers how to put the cursor in the selected frame's name field (double-click on a label). */
+  setFrameRenamer(focus: (() => void) | null) {
+    this.frameRenamer = focus
   }
 
   // ---- tools ----------------------------------------------------------------------

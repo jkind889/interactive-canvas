@@ -878,6 +878,56 @@ describe('frame commands', () => {
   })
 })
 
+describe('hooks for the UI', () => {
+  it('double-clicking a frame asks the UI to rename it, after the canvas callback, and only for a selected frame on an editable board', async () => {
+    const b = await board([F('A', 0, 0)], [img('a1', 50, 50, 'A')])
+    const focus = vi.fn()
+    b.editor.setFrameRenamer(focus)
+    b.select('A')
+    b.canvas.fire('mouse:dblclick', { e: { button: 0 }, target: b.obj('A') })
+    expect(focus).not.toHaveBeenCalled() // not inside the callback
+    await tick()
+    expect(focus).toHaveBeenCalledTimes(1)
+
+    b.select('a1')
+    b.canvas.fire('mouse:dblclick', { e: { button: 0 }, target: b.obj('a1') }) // content: Fabric's own text editing, not ours
+    b.canvas.fire('mouse:dblclick', { e: { button: 0 } }) // empty board
+    b.canvas.fire('mouse:dblclick', { e: { button: 0 }, target: b.obj('A') }) // a frame that is not the selection
+    await tick()
+    expect(focus).toHaveBeenCalledTimes(1)
+
+    b.select('A')
+    const t = press(b.canvas, b.obj('A'))
+    b.canvas.fire('mouse:dblclick', { e: { button: 0 }, target: b.obj('A') }) // mid-gesture
+    await tick()
+    release(b.canvas, t)
+    await tick()
+    expect(focus).toHaveBeenCalledTimes(1)
+
+    b.editor.setFrameRenamer(null)
+    b.canvas.fire('mouse:dblclick', { e: { button: 0 }, target: b.obj('A') })
+    await tick()
+    expect(focus).toHaveBeenCalledTimes(1)
+  })
+
+  it('suggests a reload only when another tab changed the board, not for a board that failed to load', async () => {
+    const b = await board([F('A', 0, 0)], [img('a1', 50, 50, 'A')])
+    expect(b.editor.getState().reloadSuggested).toBe(false)
+    b.store.saveError = new BoardConflictError()
+    b.editor.setTitle('conflict')
+    await flush()
+    expect(b.editor.getState()).toMatchObject({ readOnly: CONFLICT_MESSAGE, reloadSuggested: true })
+
+    const store = new SpyStore({ doc: { ...createEmptyDoc(), objects: [img('gone', 0, 0)] }, assets: new Map() }) // its image bytes are missing
+    store.holdLoad = false
+    const broken = new Editor(host, store, new FakeAssets())
+    editors.push(broken)
+    await broken.init()
+    expect(broken.getState().readOnly).not.toBeNull()
+    expect(broken.getState().reloadSuggested).toBe(false)
+  })
+})
+
 describe('undoing an image deletion after another tab pruned its bytes', () => {
   it('stores the bytes again with the next save', async () => {
     const factory = new IDBFactory()
