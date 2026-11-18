@@ -7,6 +7,7 @@ import {
   AUTOSAVE_QUIET_MS,
   dbVersion,
   drag,
+  imageFile,
   openApp,
   openBlank,
   redoButton,
@@ -793,6 +794,368 @@ test.describe('frame panel and toolbar', () => {
     expect(obj(dragged, 'txt').left).toBeCloseTo(obj(scaled, 'txt').left + 80, 1)
     expect(obj(dragged, 'txt').top).toBeCloseTo(obj(scaled, 'txt').top + 60, 1)
     expect(obj(dragged, 'guest')).toEqual(obj(before, 'guest'))
+    expect(o.errors).toEqual([])
+  })
+})
+
+// =================================================================================================
+// Mixed selections, the single scale factor, and gestures on frames
+// =================================================================================================
+
+/** Reloads and waits until the board is editable again and nothing more is being written. */
+async function reloadSettled(page: Page) {
+  await waitSaved(page)
+  await page.reload()
+  await expect(page.locator('.toolbar')).toBeVisible()
+  await expect(status(page)).toContainText('Saved on this device')
+  await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+}
+
+/** Undo gives the exact earlier board, redo the exact later one, and a reload changes neither. */
+async function expectStableThroughUndoRedoReload(page: Page, before: StoredBoard, after: StoredBoard, changed: (d: StoredBoard) => boolean) {
+  await undoButton(page).click()
+  await storedWhen(page, (d) => !changed(d))
+  const undone = await storedDoc(page)
+  expect(undone.frames).toEqual(before.frames)
+  expect(undone.objects).toEqual(before.objects) // exact pre-gesture records
+  await redoButton(page).click()
+  await storedWhen(page, changed)
+  const redone = await storedDoc(page)
+  expect(redone.frames).toEqual(after.frames)
+  expect(redone.objects).toEqual(after.objects)
+  await reloadSettled(page)
+  const reloaded = await storedDoc(page)
+  expect(reloaded.frames).toEqual(after.frames)
+  expect(reloaded.objects).toEqual(after.objects) // no drift from loading
+}
+
+test.describe('a mixed selection', () => {
+  test('frame + member + text + a rotated loose image: each moves once, the follower is carried, and a Shift-held corner scale stays uniform with no drift', async ({ page }) => {
+    const A = frameRec('A', 300, 200, 500, 400)
+    const cap = { type: 'text', id: 'cap', left: 340, top: 470, angle: 0, text: 'Caption', fontSize: 24, width: 200, frameId: 'A' }
+    const o = await openFramed(page, [A], [
+      image('picked', 340, 240, { frameId: 'A' }),
+      image('carried', 560, 440, { scaleX: 0.5, scaleY: 0.5, frameId: 'A' }), // a member that is NOT selected
+      cap,
+      image('tilted', 900, 300, { angle: 30 }), // loose, outside the frame, rotated
+    ])
+    const selectFour = async (dx: number, dy: number) => {
+      const label = labelOf(o, { left: A.left + dx, top: A.top + dy })
+      await page.mouse.click(label.x, label.y)
+      await page.keyboard.down('Shift')
+      for (const [x, y] of [
+        [440, 300], // picked
+        [400, 482], // cap
+        [960, 420], // tilted (inside its rotated body)
+      ] as const) {
+        const p = o.at(x + dx, y + dy)
+        await page.mouse.click(p.x, p.y)
+      }
+      await page.keyboard.up('Shift')
+      await expect(title(page)).toHaveText('4 objects')
+    }
+    const before = await storedDoc(page)
+
+    await selectFour(0, 0)
+    const grab = o.at(440, 300)
+    await drag(page, grab, { x: grab.x + 40, y: grab.y + 20 })
+    const moved = await storedWhen(page, (d) => frameOf(d, 'A').left === 340)
+    expect(frameOf(moved, 'A')).toMatchObject({ left: 340, top: 220, width: 500, height: 400 })
+    expect(obj(moved, 'picked')).toMatchObject({ left: 380, top: 260, frameId: 'A' }) // once
+    expect(obj(moved, 'cap')).toMatchObject({ left: 380, top: 490, frameId: 'A' })
+    expect(obj(moved, 'carried')).toMatchObject({ left: 600, top: 460, frameId: 'A' }) // the follower, once
+    expect(obj(moved, 'tilted')).toMatchObject({ left: 940, top: 320, angle: 30 })
+    expect(obj(moved, 'tilted')).not.toHaveProperty('frameId') // moved together with A: stays loose
+
+    // The follower is a real object at its new place: it can be selected there.
+    await page.keyboard.press('Escape')
+    const follower = o.at(650, 490)
+    await page.mouse.click(follower.x, follower.y)
+    await expect(title(page)).toHaveText('Image')
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+
+    // Scale from the selection's top-left handle (the frame's corner) with Shift held.
+    await selectFour(40, 20)
+    const handle = o.at(340, 220)
+    await page.keyboard.down('Shift')
+    await drag(page, handle, { x: handle.x + 90, y: handle.y + 20 }, { steps: 10 })
+    await page.keyboard.up('Shift')
+    const scaled = await storedWhen(page, (d) => frameOf(d, 'A').width !== 500)
+    const k = frameOf(scaled, 'A').width / 500
+    expect(k).toBeGreaterThan(0.6)
+    expect(k).toBeLessThan(0.98)
+    const f = frameOf(scaled, 'A')
+    expect(f.height).toBeCloseTo(400 * k, 1) // uniform although Shift was held
+    expect(f.top + f.height).toBeCloseTo(620, 1) // the bottom edge (the anchor's y) did not move
+    expect(obj(scaled, 'picked').scaleX).toBeCloseTo(k, 3)
+    expect(obj(scaled, 'picked').scaleY).toBeCloseTo(k, 3)
+    expect(obj(scaled, 'picked').left - f.left).toBeCloseTo(40 * k, 1)
+    expect(obj(scaled, 'picked').top - f.top).toBeCloseTo(40 * k, 1)
+    expect(obj(scaled, 'cap').fontSize).toBeCloseTo(24 * k, 1)
+    expect(obj(scaled, 'cap').width).toBeCloseTo(200 * k, 1)
+    expect(obj(scaled, 'cap').left - f.left).toBeCloseTo(40 * k, 1)
+    expect(obj(scaled, 'cap').top - f.top).toBeCloseTo(270 * k, 1)
+    expect(obj(scaled, 'tilted').scaleX).toBeCloseTo(k, 3)
+    expect(obj(scaled, 'tilted').angle).toBe(30)
+    expect(obj(scaled, 'tilted').left - f.left).toBeCloseTo(600 * k, 1)
+    expect(obj(scaled, 'tilted').top - f.top).toBeCloseTo(100 * k, 1)
+    expect(obj(scaled, 'carried')).toEqual(obj(moved, 'carried')) // not selected: not scaled, still inside, still A's
+    expect(obj(scaled, 'picked').frameId).toBe('A')
+    expect(obj(scaled, 'cap').frameId).toBe('A')
+    expect(obj(scaled, 'tilted')).not.toHaveProperty('frameId')
+    await waitSaved(page)
+
+    await page.keyboard.press('Escape') // deselect: nothing changes
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await storedDoc(page)).toEqual(scaled)
+    await expectStableThroughUndoRedoReload(page, moved, scaled, (d) => frameOf(d, 'A').width !== 500)
+    expect(before.frames).toEqual([A])
+    expect(o.errors).toEqual([])
+  })
+})
+
+test.describe('gestures on a frame', () => {
+  const A = frameRec('A', 300, 200, 400, 300)
+
+  test('a save during a held frame drag stores the new title and the pre-drag frame and members; release stores the final ones', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('member', 350, 250, { frameId: 'A' })])
+    const before = await storedDoc(page)
+    const titleInput = page.locator('input[aria-label="Board title"]')
+    await titleInput.fill('Renamed mid-drag')
+    await titleInput.press('Enter')
+    const label = labelOf(o, A)
+    await drag(page, label, { x: label.x + 150, y: label.y + 90 }, { hold: true })
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    const during = await storedDoc(page)
+    expect(during.title).toBe('Renamed mid-drag')
+    expect(during.frames).toEqual(before.frames) // not the half-dragged frame
+    expect(during.objects).toEqual(before.objects) // nor its half-carried member
+
+    await page.mouse.up()
+    const after = await storedWhen(page, (d) => frameOf(d, 'A').left === 450)
+    expect(frameOf(after, 'A')).toMatchObject({ left: 450, top: 290 })
+    expect(obj(after, 'member')).toMatchObject({ left: 500, top: 340, frameId: 'A' })
+    expect(o.errors).toEqual([])
+  })
+
+  test('Esc during a frame drag puts the frame and its members back and records nothing', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('member', 350, 250, { frameId: 'A' })])
+    const before = await snapshotIdb(page)
+    const label = labelOf(o, A)
+    await drag(page, label, { x: label.x + 200, y: label.y + 120 }, { hold: true })
+    await page.keyboard.press('Escape')
+    await page.mouse.up()
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(before)
+    await expect(undoButton(page)).toBeDisabled()
+    // The member is back too: it is grabbed where it was.
+    await drag(page, o.at(450, 310), o.at(460, 310))
+    const doc = await storedWhen(page, (d) => obj(d, 'member').left === 360)
+    expect(obj(doc, 'member').frameId).toBe('A')
+    expect(o.errors).toEqual([])
+  })
+
+  test('a file chosen during a frame drag becomes its own undo step after the drag', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('member', 350, 250, { frameId: 'A' })])
+    const label = labelOf(o, A)
+    await page.mouse.move(label.x, label.y)
+    await page.mouse.down()
+    await page.mouse.move(label.x + 100, label.y + 40, { steps: 4 })
+    await page.setInputFiles('input[type=file]', [imageFile('late.png', 80, 60, 3)])
+    await page.waitForTimeout(400) // decoding ends while the pointer is still held
+    expect((await storedDoc(page)).objects).toHaveLength(1)
+    await page.mouse.up()
+    const both = await storedWhen(page, (d) => d.objects.length === 2 && frameOf(d, 'A').left === 400)
+    expect(obj(both, 'member')).toMatchObject({ left: 450, top: 290 })
+
+    await undoButton(page).click() // first: only the import
+    const noImport = await storedWhen(page, (d) => d.objects.length === 1)
+    expect(frameOf(noImport, 'A').left).toBe(400)
+    await undoButton(page).click() // second: the drag, frame and member together
+    const original = await storedWhen(page, (d) => frameOf(d, 'A').left === 300)
+    expect(obj(original, 'member')).toMatchObject({ left: 350, top: 250 })
+    await expect(undoButton(page)).toBeDisabled() // exactly two steps
+
+    const again = labelOf(o, A)
+    await drag(page, again, { x: again.x - 50, y: again.y }) // a following drag works
+    await storedWhen(page, (d) => frameOf(d, 'A').left === 250)
+    expect(o.errors).toEqual([])
+  })
+})
+
+test.describe('one scale factor for everything in a selection that contains a frame', () => {
+  test('text-limited enlargement: a 300px text stops the frame, the image and itself at exactly 400/300', async ({ page }) => {
+    const view: View = { zoom: 0.25, panX: 200, panY: 100 }
+    const F1 = frameRec('F', 400, 400, 1600, 1000)
+    const text = { type: 'text', id: 'txt', left: 500, top: 900, angle: 0, text: 'Big', fontSize: 300, width: 900, frameId: 'F' }
+    const o = await openFramed(page, [F1], [image('img', 500, 500, { scaleX: 2, scaleY: 2, frameId: 'F' }), text], view)
+    const before = await storedDoc(page)
+    await page.keyboard.press('Control+a')
+    await expect(title(page)).toHaveText('3 objects')
+    const handle = o.at(400, 400) // top-left of the selection, which is the frame; the anchor is its bottom-right (2000, 1400)
+    await drag(page, handle, { x: handle.x - 380, y: handle.y - 240 }, { steps: 12 }) // asks for about 2x
+    const after = await storedWhen(page, (d) => obj(d, 'txt').fontSize === 400)
+    const k = 400 / 300
+    expect(obj(after, 'txt')).toMatchObject({ fontSize: 400, frameId: 'F' }) // the limit, exactly
+    expect(obj(after, 'txt').width).toBeCloseTo(900 * k, 1)
+    expect(obj(after, 'txt').left).toBeCloseTo(2000 - 1500 * k, 1)
+    expect(obj(after, 'txt').top).toBeCloseTo(1400 - 500 * k, 1)
+    expect(obj(after, 'img').scaleX).toBeCloseTo(2 * k, 4) // the same factor, not 2x
+    expect(obj(after, 'img').scaleY).toBeCloseTo(2 * k, 4)
+    expect(obj(after, 'img').left).toBeCloseTo(2000 - 1500 * k, 1)
+    expect(obj(after, 'img').top).toBeCloseTo(1400 - 900 * k, 1)
+    const f = frameOf(after, 'F')
+    expect(f.width).toBeCloseTo(1600 * k, 1)
+    expect(f.height).toBeCloseTo(1000 * k, 1)
+    expect(f.left + f.width).toBeCloseTo(2000, 1) // the anchor corner stayed put
+    expect(f.top + f.height).toBeCloseTo(1400, 1)
+    await expectStableThroughUndoRedoReload(page, before, after, (d) => obj(d, 'txt').fontSize !== 300)
+    expect(o.errors).toEqual([])
+  })
+
+  test('frame-limited reduction: a 30-unit frame stops itself and its contents at exactly 24/30', async ({ page }) => {
+    const view: View = { zoom: 8, panX: -600, panY: -600 }
+    const small = frameRec('S', 100, 100, 30, 40)
+    const text = { type: 'text', id: 'txt', left: 105, top: 120, angle: 0, text: 'ab', fontSize: 8, width: 20, frameId: 'S' }
+    const o = await openFramed(page, [small], [image('img', 105, 105, { scaleX: 0.05, scaleY: 0.05, frameId: 'S' }), text], view)
+    const before = await storedDoc(page)
+    await page.keyboard.press('Control+a')
+    await expect(title(page)).toHaveText('3 objects')
+    const handle = o.at(130, 140) // bottom-right; the anchor is the top-left (100, 100)
+    await drag(page, handle, o.at(114, 119), { steps: 12 }) // asks for about half
+    const after = await storedWhen(page, (d) => frameOf(d, 'S').width !== 30)
+    const k = 24 / 30
+    expect(frameOf(after, 'S')).toEqual({ ...small, width: 24, height: 32 }) // exactly the minimum on its smaller side
+    expect(obj(after, 'img').scaleX).toBeCloseTo(0.05 * k, 5) // the contents stopped with it, not at one half
+    expect(obj(after, 'img').scaleY).toBeCloseTo(0.05 * k, 5)
+    expect(obj(after, 'img')).toMatchObject({ left: 104, top: 104, frameId: 'S' })
+    expect(obj(after, 'txt')).toMatchObject({ fontSize: 6.4, width: 16, left: 104, top: 116, frameId: 'S' })
+    await expectStableThroughUndoRedoReload(page, before, after, (d) => frameOf(d, 'S').width !== 30)
+    expect(o.errors).toEqual([])
+  })
+
+  test('an out-of-range 500px text: the selection may shrink (everything by the same factor) but not grow, and the text is never snapped to 400', async ({ page }) => {
+    const view: View = { zoom: 0.25, panX: 200, panY: 100 }
+    const F1 = frameRec('F', 400, 400, 2400, 1400)
+    const text = { type: 'text', id: 'txt', left: 500, top: 700, angle: 0, text: 'Huge', fontSize: 500, width: 2000, frameId: 'F' }
+    const o = await openFramed(page, [F1], [image('img', 500, 450, { frameId: 'F' }), text], view)
+    const before = await storedDoc(page)
+    const untouched = await snapshotIdb(page)
+    await page.keyboard.press('Control+a')
+    const handle = o.at(400, 400)
+
+    await drag(page, handle, { x: handle.x - 100, y: handle.y - 60 }, { steps: 10 }) // about 1.2x: not allowed at all
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(untouched) // nothing changed, nothing saved
+    await expect(undoButton(page)).toBeDisabled()
+
+    await drag(page, handle, { x: handle.x + 30, y: handle.y + 18 }, { steps: 10 }) // about 0.95x
+    const after = await storedWhen(page, (d) => obj(d, 'txt').fontSize !== 500)
+    const k = obj(after, 'txt').fontSize! / 500
+    expect(k).toBeGreaterThan(0.9)
+    expect(k).toBeLessThan(0.99)
+    expect(obj(after, 'txt').width).toBeCloseTo(2000 * k, 0)
+    expect(obj(after, 'img').scaleX).toBeCloseTo(k, 3)
+    expect(frameOf(after, 'F').width).toBeCloseTo(2400 * k, 0)
+    expect(frameOf(after, 'F').height).toBeCloseTo(1400 * k, 0)
+    await expectStableThroughUndoRedoReload(page, before, after, (d) => obj(d, 'txt').fontSize !== 500)
+    expect(o.errors).toEqual([])
+  })
+
+  test('a frame already below the minimum: the selection cannot shrink and is not snapped up, but it can grow; alone, its small side cannot shrink either', async ({ page }) => {
+    const view: View = { zoom: 4, panX: -200, panY: -300 }
+    const thin = frameRec('T', 100, 100, 10, 100)
+    const o = await openFramed(page, [thin], [image('img', 102, 110, { scaleX: 0.02, scaleY: 0.02, frameId: 'T' })], view)
+    const before = await storedDoc(page)
+    const untouched = await snapshotIdb(page)
+    await page.keyboard.press('Control+a')
+    await expect(title(page)).toHaveText('2 objects')
+    const handle = o.at(110, 200) // bottom-right; anchor top-left
+
+    await drag(page, handle, o.at(107, 170), { steps: 8 }) // shrink: blocked, and NOT pushed up to 24
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(untouched)
+
+    await drag(page, handle, o.at(115, 250), { steps: 8 }) // about 1.5x: fine
+    const grown = await storedWhen(page, (d) => frameOf(d, 'T').width !== 10)
+    const k = frameOf(grown, 'T').width / 10
+    expect(k).toBeGreaterThan(1.3)
+    expect(k).toBeLessThan(1.7)
+    expect(frameOf(grown, 'T').height).toBeCloseTo(100 * k, 1)
+    expect(obj(grown, 'img').scaleX).toBeCloseTo(0.02 * k, 4)
+    expect(obj(grown, 'img').left).toBeCloseTo(100 + 2 * k, 1)
+    expect(obj(grown, 'img').top).toBeCloseTo(100 + 10 * k, 1)
+    await expectStableThroughUndoRedoReload(page, before, grown, (d) => frameOf(d, 'T').width !== 10)
+
+    // Alone: its narrow side cannot shrink (and is not snapped up); its long side can, down to the minimum; and it can grow.
+    const width = frameOf(grown, 'T').width
+    const bottom = 100 + frameOf(grown, 'T').height
+    const label = labelOf(o, thin)
+    await page.mouse.click(label.x, label.y)
+    await expect(title(page)).toHaveText('Frame')
+    await drag(page, o.at(100 + width, bottom), o.at(103, 160), { steps: 8 })
+    const squeezed = await storedWhen(page, (d) => frameOf(d, 'T').height === 60)
+    expect(frameOf(squeezed, 'T')).toMatchObject({ left: 100, top: 100, width, height: 60 })
+    await drag(page, o.at(100 + width, 160), o.at(140, 180), { steps: 8 })
+    const widened = await storedWhen(page, (d) => frameOf(d, 'T').width === 40)
+    expect(frameOf(widened, 'T')).toMatchObject({ width: 40, height: 80 })
+    expect(o.errors).toEqual([])
+  })
+
+  test('a tiny image scale survives: 0.00001 scaled to 0.4 of itself is stored as a positive number and the board reloads editable', async ({ page }) => {
+    const A = frameRec('A', 300, 200, 400, 300)
+    const o = await openFramed(page, [A], [image('speck', 400, 300, { scaleX: 0.00001, scaleY: 0.00001, frameId: 'A' })])
+    await page.keyboard.press('Control+a')
+    await expect(title(page)).toHaveText('2 objects')
+    await drag(page, o.at(700, 500), o.at(460, 320), { steps: 12 }) // the frame to 160 x 120: a factor of 0.4
+    const after = await storedWhen(page, (d) => frameOf(d, 'A').width !== 400)
+    const k = frameOf(after, 'A').width / 400
+    expect(k).toBeCloseTo(0.4, 2)
+    const speck = obj(after, 'speck')
+    expect(speck.scaleX).toBeGreaterThan(0) // plain 5-decimal rounding would have stored 0 and made the board unreadable
+    expect(speck.scaleX! / 0.00001).toBeCloseTo(k, 3)
+    expect(speck.scaleY).toBe(speck.scaleX)
+    await reloadSettled(page)
+    await expect(page.getByTestId('readonly-banner')).toHaveCount(0) // the stored document still parses
+    await page.keyboard.press('Control+a')
+    await expect(title(page)).toHaveText('2 objects') // frame and image both intact
+    expect(o.errors).toEqual([])
+  })
+})
+
+test.describe('a drifted owner', () => {
+  test('a frame text that grew out of its frame is still the frame after Ctrl+A and move, and a loose image inside the frame still is not', async ({ page }) => {
+    const A = frameRec('A', 300, 200, 400, 300)
+    const note = { type: 'text', id: 'note', left: 340, top: 440, angle: 0, text: 'note', fontSize: 24, width: 200, frameId: 'A' }
+    const o = await openFramed(page, [A], [note, image('guest', 400, 240)]) // "guest" sits inside A, loose
+    const inside = o.at(350, 452)
+    await page.mouse.dblclick(inside.x, inside.y) // edit the existing text
+    await page.keyboard.press('Control+End')
+    for (let i = 0; i < 9; i++) {
+      await page.keyboard.press('Enter')
+      await page.keyboard.type('more')
+    }
+    await page.keyboard.press('Escape')
+    const grown = await storedWhen(page, (d) => (obj(d, 'note').text ?? '').split('\n').length === 10)
+    expect(obj(grown, 'note').frameId).toBe('A') // re-editing never changes the owner, although its centre is now below the frame
+    await waitSaved(page)
+
+    await page.keyboard.press('Control+a')
+    await expect(title(page)).toHaveText('3 objects')
+    const grab = o.at(500, 300) // on the guest image, inside the selection
+    await drag(page, grab, { x: grab.x + 60, y: grab.y + 20 })
+    const moved = await storedWhen(page, (d) => frameOf(d, 'A').left === 360)
+    expect(obj(moved, 'note')).toMatchObject({ left: 400, top: 460, frameId: 'A' })
+    expect(obj(moved, 'guest')).toMatchObject({ left: 460, top: 260 })
+    expect(obj(moved, 'guest')).not.toHaveProperty('frameId') // moved together with the frame: still loose
+
+    await reloadSettled(page)
+    const label = labelOf(o, { left: 360, top: 220 })
+    await drag(page, label, { x: label.x + 100, y: label.y })
+    const carried = await storedWhen(page, (d) => frameOf(d, 'A').left === 460)
+    expect(obj(carried, 'note')).toMatchObject({ left: 500, top: 460, frameId: 'A' }) // the frame alone carries its text ...
+    expect(obj(carried, 'guest')).toEqual(obj(moved, 'guest')) // ... and leaves the image behind
     expect(o.errors).toEqual([])
   })
 })
