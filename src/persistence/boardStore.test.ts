@@ -353,6 +353,89 @@ describe('the fence: first save of a board with a frame', () => {
     expect(after.row!.doc.title).toBe('Framed at last')
   })
 
+  it('a promotion that commits is never reported as timed out, however slow its write was', async () => {
+    const { factory, store } = newStore(new IDBFactory(), 30)
+    const t1 = await store.save(textOnly(), ABSENT, none)
+    const a5 = asset('a5', 5)
+    const slow: AssetBytes = (id) => {
+      const until = Date.now() + 90 // well past the deadline, inside the upgrade transaction
+      while (Date.now() < until) {
+        /* busy */
+      }
+      return id === 'a5' ? a5 : undefined
+    }
+    const token = await store.save(withFrame(docWith('a5')), t1, slow)
+    const raw = await readRaw(factory)
+    expect(raw.version).toBe(2)
+    expect(token).toEqual({ kind: 'rev', rev: raw.row!.rev })
+    await store.save(withFrame(docWith('a5', 'Token is usable')), token, none)
+  })
+
+  it('an open from another tab queued behind a blocked promotion gives up with a retryable error and writes nothing', async () => {
+    const factory = new IDBFactory()
+    const a = newStore(factory).store // waits up to 5 s for its promotion
+    const t1 = await a.save(textOnly(), ABSENT, none)
+    const before = await readRaw(factory)
+    const blocker = await stubbornConnection(factory)
+    const promoting = a.save(withFrame(textOnly('A framed')), t1, none)
+    await tick(5)
+
+    const b = newStore(factory, 20).store // a second tab: its open queues behind A's request
+    await expect(b.load()).rejects.toBeInstanceOf(StorageBusyError)
+    await expect(b.save(textOnly('B'), t1, none)).rejects.toBeInstanceOf(StorageBusyError)
+
+    blocker.close()
+    await promoting
+    const after = await readRaw(factory)
+    expect(after.version).toBe(2)
+    expect(after.row!.doc.title).toBe('A framed')
+    expect(before.row!.doc.title).toBe('Text only')
+    expect((await b.load())?.doc.title).toBe('A framed') // and the second tab recovers by itself
+  })
+
+  it('an attempt that timed out and later finds the database already promoted keeps no connection', async () => {
+    const factory = new IDBFactory()
+    const first = newStore(factory).store
+    const second = newStore(factory, 30).store
+    const t1 = await first.save(textOnly(), ABSENT, none)
+    await second.load()
+    const blocker = await stubbornConnection(factory)
+    const promoting = first.save(withFrame(textOnly('First')), t1, none)
+    await tick(5)
+    await expect(second.save(withFrame(textOnly('Second')), t1, none)).rejects.toBeInstanceOf(StorageBusyError)
+    blocker.close()
+    await promoting
+    await tick(20) // the abandoned request now opens at version 2 without an upgrade
+    expect((await readRaw(factory)).row!.doc.title).toBe('First')
+    // A leaked connection without a versionchange handler would block this forever.
+    const upgraded = await Promise.race([
+      new Promise<string>((resolve) => {
+        const open = factory.open('yuriful', 3)
+        open.onsuccess = () => {
+          open.result.close()
+          resolve('opened')
+        }
+        open.onerror = () => resolve('error')
+      }),
+      tick(500).then(() => 'blocked'),
+    ])
+    expect(upgraded).toBe('opened')
+  })
+
+  it('two overlapping framed saves on one store: only the newer one is ever written', async () => {
+    const { factory, store } = newStore()
+    const t1 = await store.save(textOnly(), ABSENT, none)
+    const [older, newer] = await Promise.allSettled([store.save(withFrame(textOnly('Older')), t1, none), store.save(withFrame(textOnly('Newer')), t1, none)])
+    expect(newer.status).toBe('fulfilled')
+    expect(older.status).toBe('rejected')
+    expect((older as PromiseRejectedResult).reason).toBeInstanceOf(StorageBusyError)
+    expect((older as PromiseRejectedResult).reason.message).toMatch(/newer save/)
+    const raw = await readRaw(factory)
+    expect(raw.version).toBe(2)
+    expect(raw.row!.doc.title).toBe('Newer')
+    expect(raw.row!.rev).toBe(((newer as PromiseFulfilledResult<RevisionToken>).value as { rev: string }).rev)
+  })
+
   it('an abandoned request stays harmless even if the user has since undone the frame and saved', async () => {
     const factory = new IDBFactory()
     const { store } = newStore(factory, 40)
@@ -433,10 +516,24 @@ describe('revision tokens: a stale tab never overwrites', () => {
     expect(tokensMatch({ kind: 'rev', rev: 'r1' }, { kind: 'rev', rev: 'r2' })).toBe(false)
     expect(tokensMatch({ kind: 'legacy', updatedAt: 5, docJson: '{}' }, { kind: 'legacy', updatedAt: 6, docJson: '{}' })).toBe(false)
     expect(tokensMatch({ kind: 'legacy', updatedAt: 5, docJson: '{}' }, { kind: 'legacy', updatedAt: 5, docJson: '{ }' })).toBe(false)
-    // A legacy row that could not be identified never matches, not even itself.
+    // A legacy row whose document could not be identified never matches, not even itself.
     const unknown: RevisionToken = { kind: 'legacy', updatedAt: 5, docJson: null }
     expect(tokensMatch(unknown, unknown)).toBe(false)
-    expect(tokensMatch({ kind: 'legacy', updatedAt: null, docJson: '{}' }, { kind: 'legacy', updatedAt: null, docJson: '{}' })).toBe(false)
+    // Without a usable timestamp the exact document alone identifies the row.
+    const untimed: RevisionToken = { kind: 'legacy', updatedAt: null, docJson: '{}' }
+    expect(tokensMatch(untimed, { ...untimed })).toBe(true)
+    expect(tokensMatch(untimed, { ...untimed, docJson: '{ }' })).toBe(false)
+    expect(tokensMatch(untimed, { ...untimed, updatedAt: 5 })).toBe(false)
+  })
+
+  it('a legacy row without a numeric timestamp still loads editable and can be saved', async () => {
+    const factory = new IDBFactory()
+    await putRaw(factory, { doc: legacyDoc('No timestamp'), updatedAt: 'yesterday' }, 1)
+    const { store } = newStore(factory)
+    const loaded = await store.load()
+    expect(loaded?.token).toMatchObject({ kind: 'legacy', updatedAt: null })
+    await store.save({ ...loaded!.doc, title: 'Saved anyway' }, loaded!.token, none)
+    expect((await readRaw(factory)).row!.doc.title).toBe('Saved anyway')
   })
 
   it('a row appearing where none was expected is a conflict, and so is a missing row', async () => {

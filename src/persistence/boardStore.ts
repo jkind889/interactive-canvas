@@ -15,8 +15,9 @@ export type RevisionToken =
   /**
    * A row written by milestone 1, which has no revision id. It is identified by its
    * timestamp and its exact document, so two legacy rows that match are byte-identical
-   * documents and writing over them loses nothing. `docJson` is null when the stored
-   * document cannot be serialized; such a token never matches anything.
+   * documents and writing over them loses nothing. `updatedAt` is null when the row has
+   * no numeric timestamp. `docJson` is null when the stored document cannot be
+   * serialized; such a token never matches anything.
    */
   | { kind: 'legacy'; updatedAt: number | null; docJson: string | null }
 
@@ -92,6 +93,7 @@ const ASSETS = 'assets'
 /** There is a single board; the key leaves room for a board list later. */
 const CURRENT_BOARD = 'current'
 const DEFAULT_DEADLINE_MS = 5000
+const SUPERSEDED = 'A newer save replaced this one before it could be written.'
 
 /** As written. On read every field is untrusted. */
 interface BoardRow {
@@ -114,11 +116,19 @@ function request<T>(req: IDBRequest<T>): Promise<T> {
   })
 }
 
+/**
+ * Resolves on commit. A failing request first raises `error` (when the transaction has
+ * no error of its own yet) and then aborts the transaction, so the rejection waits for
+ * `abort` and reports the most specific cause it saw.
+ */
 function transactionDone(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
+    let cause: unknown = null
     tx.oncomplete = () => resolve()
-    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'))
-    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
+    tx.onerror = (event) => {
+      cause ??= (event.target as IDBRequest | null)?.error ?? null
+    }
+    tx.onabort = () => reject(tx.error ?? cause ?? new Error('IndexedDB transaction aborted'))
   })
 }
 
@@ -146,13 +156,9 @@ function tokenOf(row: unknown): RevisionToken {
 export function tokensMatch(actual: RevisionToken, expected: RevisionToken): boolean {
   if (actual.kind === 'absent') return expected.kind === 'absent'
   if (actual.kind === 'rev') return expected.kind === 'rev' && actual.rev === expected.rev
-  return (
-    expected.kind === 'legacy' &&
-    actual.docJson !== null &&
-    actual.docJson === expected.docJson &&
-    actual.updatedAt !== null &&
-    actual.updatedAt === expected.updatedAt
-  )
+  // Equal JSON means byte-identical documents, so a write over the row loses nothing even
+  // when neither row has a usable timestamp (null on both sides).
+  return expected.kind === 'legacy' && actual.docJson !== null && actual.docJson === expected.docJson && actual.updatedAt === expected.updatedAt
 }
 
 function ensureStores(db: IDBDatabase) {
@@ -170,11 +176,15 @@ async function writeBoard(tx: IDBTransaction, doc: BoardDoc, wire: StoredDoc, ex
   const row: unknown = await request(boards.get(CURRENT_BOARD))
   if (!tokensMatch(tokenOf(row), expected)) throw new BoardConflictError()
   // A document is never written with a reference that has no stored bytes.
-  for (const id of referencedAssetIds(doc.objects)) {
-    if ((await request(assets.getKey(id))) !== undefined) continue
-    const asset = bytes(id)
-    if (!asset) throw new MissingAssetError()
-    assets.put(asset)
+  const referenced = referencedAssetIds(doc.objects)
+  if (referenced.size > 0) {
+    const stored = new Set<IDBValidKey>(await request(assets.getAllKeys()))
+    for (const id of referenced) {
+      if (stored.has(id)) continue
+      const asset = bytes(id)
+      if (!asset) throw new MissingAssetError()
+      assets.put(asset)
+    }
   }
   const next: BoardRow = { id: CURRENT_BOARD, doc: wire, rev: newId(), updatedAt: Date.now() }
   boards.put(next)
@@ -184,15 +194,21 @@ async function writeBoard(tx: IDBTransaction, doc: BoardDoc, wire: StoredDoc, ex
 const isDomainError = (e: unknown) => e instanceof BoardConflictError || e instanceof MissingAssetError || e instanceof StorageBusyError
 
 export interface IndexedDbBoardStoreOptions {
-  /** How long a save or open may wait for another tab before failing with a retryable error. */
+  /** How long the first save of a framed board may wait for other tabs to let go before failing with a retryable error. */
   deadlineMs?: number
+  /**
+   * How long any open may wait. An open only waits when it is queued behind a promotion
+   * (this tab's or another's) that other tabs are blocking. Longer than `deadlineMs` by
+   * default so that a merely slow start never turns a board read-only.
+   */
+  openDeadlineMs?: number
 }
 
 export class IndexedDbBoardStore implements BoardStore {
   private dbPromise: Promise<IDBDatabase> | null = null
   private readonly deadlineMs: number
-  /** Promotion requests this store gave up on that are still queued in the browser. */
-  private abandonedFences = 0
+  private readonly openDeadlineMs: number
+  /** Identifies the newest promotion attempt; an older one that runs late must not write. */
   private fenceSeq = 0
 
   constructor(
@@ -200,6 +216,7 @@ export class IndexedDbBoardStore implements BoardStore {
     opts: IndexedDbBoardStoreOptions = {},
   ) {
     this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS
+    this.openDeadlineMs = opts.openDeadlineMs ?? this.deadlineMs * 3
   }
 
   private open(): Promise<IDBDatabase> {
@@ -242,17 +259,15 @@ export class IndexedDbBoardStore implements BoardStore {
         return
       }
       let abandoned = false
-      // An open only has to wait when it is queued behind a promotion this store gave up on.
-      const timer =
-        this.abandonedFences > 0
-          ? setTimeout(() => {
-              abandoned = true
-              reject(new StorageBusyError())
-            }, this.deadlineMs)
-          : null
+      // An open normally answers at once. It only waits when it is queued behind a promotion
+      // request that other tabs are blocking; then it gives up with a retryable error.
+      const timer = setTimeout(() => {
+        abandoned = true
+        reject(new StorageBusyError())
+      }, this.openDeadlineMs)
       req.onupgradeneeded = () => ensureStores(req.result) // only when the database did not exist
       req.onsuccess = () => {
-        if (timer !== null) clearTimeout(timer)
+        clearTimeout(timer)
         const db = req.result
         if (abandoned) {
           db.close()
@@ -267,8 +282,8 @@ export class IndexedDbBoardStore implements BoardStore {
         resolve(db)
       }
       req.onerror = () => {
-        if (timer !== null) clearTimeout(timer)
-        reject(new Error(describe(req.error, 'Could not open local storage.')))
+        clearTimeout(timer)
+        if (!abandoned) reject(new Error(describe(req.error, 'Could not open local storage.')))
       }
     })
   }
@@ -367,24 +382,29 @@ export class IndexedDbBoardStore implements BoardStore {
           // `blocked` is not an error: the request waits for other tabs. We only wait so long.
           const timer = setTimeout(() => {
             expired = true
-            this.abandonedFences++
             reject(new StorageBusyError())
           }, this.deadlineMs)
-          const settleAbandoned = () => {
-            this.abandonedFences = Math.max(0, this.abandonedFences - 1)
-          }
 
           req.onupgradeneeded = () => {
             const tx = req.transaction
-            if (!tx) return
+            // Throwing here aborts the upgrade, which is the only safe outcome without a transaction to write in.
+            if (!tx) throw new Error('IndexedDB gave no upgrade transaction.')
             // An attempt that was given up on, or replaced by a newer one, must never write,
             // however late it finally gets to run.
-            if (expired || attempt !== this.fenceSeq) {
+            if (expired) {
+              abortQuietly(tx)
+              return
+            }
+            if (attempt !== this.fenceSeq) {
+              failure = new StorageBusyError(SUPERSEDED)
               abortQuietly(tx)
               return
             }
             clearTimeout(timer) // from here on the outcome is decided by the transaction alone
             ensureStores(req.result)
+            tx.addEventListener('error', (event) => {
+              failure ??= (event.target as IDBRequest | null)?.error ?? null // the request that failed says why
+            })
             writeBoard(tx, doc, wire, expected, bytes).then(
               (written) => {
                 rev = written
@@ -399,21 +419,18 @@ export class IndexedDbBoardStore implements BoardStore {
             clearTimeout(timer)
             const db = req.result
             if (expired) {
-              settleAbandoned()
-              db.close()
+              db.close() // nobody is waiting for this connection any more
               return
             }
             void this.adopt(db)
             if (rev !== null) resolve({ token: { kind: 'rev', rev } })
+            else if (attempt !== this.fenceSeq) reject(new StorageBusyError(SUPERSEDED)) // a newer save owns the board now
             else resolve({ db }) // no upgrade ran: the database was already promoted
           }
           req.onerror = (event) => {
             event.preventDefault()
             clearTimeout(timer)
-            if (expired) {
-              settleAbandoned()
-              return
-            }
+            if (expired) return
             if (isDomainError(failure)) reject(failure)
             else reject(new Error(describe(failure ?? req.error, 'Could not write to local storage (it may be full).'), { cause: failure ?? req.error }))
           }

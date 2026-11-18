@@ -1,5 +1,5 @@
 import type { BoardDoc, SaveState } from '../model/types.ts'
-import { ABSENT, BoardConflictError } from './boardStore.ts'
+import { ABSENT, BoardConflictError, NewerBoardError } from './boardStore.ts'
 import type { AssetBytes, BoardStore, RevisionToken } from './boardStore.ts'
 
 export interface AutosaverOptions {
@@ -9,13 +9,19 @@ export interface AutosaverOptions {
   /** Original bytes of every image this session has seen; the store re-stores any that are missing. */
   bytes: AssetBytes
   onStatus: (s: SaveState) => void
-  /** The stored board is no longer the one this tab loaded or saved. Saving is off for good. */
+  /**
+   * The stored board is no longer one this tab may write (another tab changed it, or a
+   * newer build took the database over). Saving is off for good; `message` says why.
+   */
   onConflict?: (message: string) => void
   debounceMs?: number
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
 }
+
+export const NEWER_BUILD_MESSAGE =
+  'This board is now being saved by a newer yuriful, so this tab stopped saving. Reload to continue; changes made here since its last save are not saved.'
 
 export const CONFLICT_MESSAGE =
   'This board was changed in another tab, so this tab stopped saving. Reload to continue from the saved board; changes made here since its last save are not saved.'
@@ -135,10 +141,11 @@ export class Autosaver {
       this.token = await this.opts.store.save(this.opts.getDoc(), this.token, this.opts.bytes)
     } catch (e) {
       if (this.disabled) return // switched off while the save was in flight; its reason stays visible
-      if (e instanceof BoardConflictError) {
-        // Never overwrite, never retry: the other tab's board is the stored truth.
-        this.disable(CONFLICT_MESSAGE)
-        this.opts.onConflict?.(CONFLICT_MESSAGE)
+      if (e instanceof BoardConflictError || e instanceof NewerBoardError) {
+        // Never overwrite, never retry: what is stored now is the truth, and it is not ours.
+        const message = e instanceof NewerBoardError ? NEWER_BUILD_MESSAGE : CONFLICT_MESSAGE
+        this.disable(message)
+        this.opts.onConflict?.(message)
         return
       }
       // Everything else (quota, missing image bytes, storage held by another tab) wrote

@@ -2,8 +2,8 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyDoc } from '../model/doc.ts'
 import type { BoardDoc, SaveState, StoredAsset } from '../model/types.ts'
-import { Autosaver, CONFLICT_MESSAGE } from './autosave.ts'
-import { ABSENT, BoardConflictError, MissingAssetError, StorageBusyError } from './boardStore.ts'
+import { Autosaver, CONFLICT_MESSAGE, NEWER_BUILD_MESSAGE } from './autosave.ts'
+import { ABSENT, BoardConflictError, MissingAssetError, NewerBoardError, StorageBusyError } from './boardStore.ts'
 import type { AssetBytes, BoardStore, RevisionToken } from './boardStore.ts'
 
 const asset = (id: string): StoredAsset => ({ id, name: `${id}.png`, type: 'image/png', bytes: new ArrayBuffer(4) })
@@ -273,6 +273,39 @@ describe('Autosaver: revision token and asset bytes', () => {
     expect(a.saves).toHaveLength(0)
     expect(a.timers.filter((t) => t.live)).toHaveLength(0)
     expect(a.conflicts).toHaveLength(1)
+  })
+
+  it('a database taken over by a newer build is final too, with its own reason', async () => {
+    const a = setup()
+    a.saver.markLoaded(STORED)
+    a.gate.fail = new NewerBoardError()
+    a.saver.markDirty()
+    await a.fire()
+    expect(a.conflicts).toEqual([NEWER_BUILD_MESSAGE])
+    expect(a.saver.state).toEqual({ kind: 'unavailable', message: NEWER_BUILD_MESSAGE })
+    a.gate.fail = null
+    a.saver.markDirty()
+    await a.saver.retry()
+    await a.saver.flush()
+    expect(a.gate.attempts).toBe(1)
+  })
+
+  it('a save that succeeds after saving was switched off does not claim "saved" or reschedule', async () => {
+    const a = setup()
+    let release!: () => void
+    a.gate.hold = new Promise<void>((r) => (release = r))
+    a.saver.markDirty()
+    for (const t of a.timers.filter((t) => t.live)) {
+      t.live = false
+      t.fn()
+    }
+    a.saver.markDirty() // changed while saving: would normally schedule another save
+    a.saver.disable('read-only now')
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(a.saves).toHaveLength(1)
+    expect(a.saver.state).toEqual({ kind: 'unavailable', message: 'read-only now' })
+    expect(a.timers.filter((t) => t.live)).toHaveLength(0)
   })
 
   it('missing bytes and a storage deadline are ordinary retryable errors', async () => {
