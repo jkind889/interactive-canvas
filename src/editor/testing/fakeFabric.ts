@@ -8,6 +8,17 @@
  */
 
 type Handler = (e: never) => void
+
+/** Scene or viewport point with the one operation the editor uses. */
+export class Point {
+  constructor(
+    public x = 0,
+    public y = 0,
+  ) {}
+  transform(m: readonly number[]) {
+    return new Point((m[0] ?? 1) * this.x + (m[2] ?? 0) * this.y + (m[4] ?? 0), (m[1] ?? 0) * this.x + (m[3] ?? 1) * this.y + (m[5] ?? 0))
+  }
+}
 type Origin = 'left' | 'center' | 'right' | 'top' | 'bottom'
 const originFactor = (o: Origin) => (o === 'center' ? 0.5 : o === 'right' || o === 'bottom' ? 1 : 0)
 
@@ -20,8 +31,14 @@ export class FakeObject {
   width = 0
   height = 0
   isEditing = false
+  visible = true
+  evented = true
+  selectable = true
+  lockRotation = false
   group: unknown = null
   canvas: Canvas | null = null
+  /** Which handles are shown, as last set through setControlsVisibility. */
+  controls: Record<string, boolean> = {}
   constructor(opts: Record<string, unknown> = {}) {
     Object.assign(this, opts)
   }
@@ -30,7 +47,27 @@ export class FakeObject {
     return this
   }
   setCoords() {}
-  setControlsVisibility() {}
+  setControlsVisibility(patch: Record<string, boolean> = {}) {
+    this.controls = { ...this.controls, ...patch }
+  }
+  getActiveControl() {
+    return undefined
+  }
+  private box() {
+    return { left: this.left, top: this.top, right: this.left + this.width * this.scaleX, bottom: this.top + this.height * this.scaleY }
+  }
+  containsPoint(p: { x: number; y: number }) {
+    const b = this.box()
+    return p.x >= b.left && p.x <= b.right && p.y >= b.top && p.y <= b.bottom
+  }
+  isContainedWithinRect(tl: { x: number; y: number }, br: { x: number; y: number }) {
+    const b = this.box()
+    return b.left >= tl.x && b.right <= br.x && b.top >= tl.y && b.bottom <= br.y
+  }
+  intersectsWithRect(tl: { x: number; y: number }, br: { x: number; y: number }) {
+    const b = this.box()
+    return b.left <= br.x && b.right >= tl.x && b.top <= br.y && b.bottom >= tl.y
+  }
   calcTransformMatrix() {
     const sx = this.scaleX
     const sy = this.scaleY
@@ -139,6 +176,10 @@ export class Canvas {
   readonly options: Record<string, unknown>
   /** Names of Fabric calls made, for tests that must prove something was NOT called. */
   readonly calls: string[] = []
+  /** The context `getContext()` returns (tests may install a recording stand-in). */
+  mainContext: unknown = null
+  /** Every call that reached the base multi-selection routine (i.e. what Fabric would toggle). */
+  readonly multiSelectionCalls: Array<{ target?: FakeObject }> = []
   private width: number
   private height: number
   private handlers = new Map<string, Handler[]>()
@@ -224,14 +265,43 @@ export class Canvas {
     return this.viewportTransform[0] ?? 1
   }
   getContext() {
-    return null
+    return this.mainContext
+  }
+
+  // ---- plain base implementations of what FrameCanvas overrides ---------------------------
+
+  /** Like Fabric: is the scene point inside the object's selection area? */
+  _checkTarget(obj: FakeObject, pointer: { x: number; y: number }) {
+    return obj.visible && obj.evented && obj.containsPoint(pointer)
+  }
+  /** Like Fabric: the top-most of `objects` under the pointer. Dispatches to the (overridable) _checkTarget. */
+  searchPossibleTargets(objects: FakeObject[], pointer: { x: number; y: number }) {
+    for (let i = objects.length - 1; i >= 0; i--) {
+      const target = objects[i] as FakeObject
+      if (this._checkTarget(target, pointer)) return { target, subTargets: [], container: target }
+    }
+    return { subTargets: [] }
+  }
+  /** Records what Fabric would have toggled. */
+  handleMultiSelection(_e: unknown, target?: FakeObject) {
+    this.multiSelectionCalls.push({ target })
+    return true
+  }
+  /** Like Fabric with `includeIntersecting`: everything the rectangle touches, top to bottom. */
+  collectObjects(bbox: { left: number; top: number; width: number; height: number }) {
+    const tl = { x: bbox.left, y: bbox.top }
+    const br = { x: bbox.left + bbox.width, y: bbox.top + bbox.height }
+    return [...this.objects].reverse().filter((o) => o.selectable && o.visible && o.intersectsWithRect(tl, br))
+  }
+  _isSelectionKeyPressed(e: { shiftKey?: boolean }) {
+    return e.shiftKey === true
   }
   setViewportTransform(v: number[]) {
     this.viewportTransform = v
   }
   /** Scene point of a mouse event: tests put scene coordinates straight into clientX/clientY. */
   getScenePoint(e?: { clientX?: number; clientY?: number }) {
-    return { x: e?.clientX ?? 0, y: e?.clientY ?? 0 }
+    return new Point(e?.clientX ?? 0, e?.clientY ?? 0)
   }
   async dispose() {
     return true

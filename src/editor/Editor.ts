@@ -1,4 +1,4 @@
-import { ActiveSelection, Canvas, Textbox } from 'fabric'
+import { ActiveSelection, Textbox } from 'fabric'
 import type { FabricObject, Transform } from 'fabric'
 import { DEFAULT_VIEWPORT, MAX_FONT_SIZE, MIN_FONT_SIZE, clamp, normalizeTitle, referencedAssetIds, sceneEqual } from '../model/doc.ts'
 import { allowedScaleFactor } from '../model/frames.ts'
@@ -16,6 +16,7 @@ import { hydrateBoard } from '../persistence/hydrate.ts'
 import { isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
 import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
+import { FrameCanvas } from './FrameCanvas.ts'
 import type { AssetSource } from './assets.ts'
 import { ACCENT, createFrame, createObject, hasResidualScale, idOf, isFrame, newId, normalizeTextScale, toFrameRecord, toRecord } from './objects.ts'
 
@@ -95,7 +96,7 @@ const isPrimary = (e: Event): boolean => {
  * runs in a microtask, after Fabric's own mouse-up handling has returned.
  */
 export class Editor {
-  private readonly canvas: Canvas
+  private readonly canvas: FrameCanvas
   private readonly canvasEl: HTMLCanvasElement
   private readonly history = new History<Scene>(EMPTY_SCENE, { equals: sceneEqual })
   private readonly autosaver: Autosaver
@@ -125,7 +126,7 @@ export class Editor {
     this.canvasEl = document.createElement('canvas')
     host.appendChild(this.canvasEl)
     const { width, height } = host.getBoundingClientRect()
-    this.canvas = new Canvas(this.canvasEl, {
+    this.canvas = new FrameCanvas(this.canvasEl, {
       width: Math.max(1, Math.floor(width)),
       height: Math.max(1, Math.floor(height)),
       preserveObjectStacking: true,
@@ -401,7 +402,10 @@ export class Editor {
     const onSelection = () => {
       const active = c.getActiveObject()
       if (active instanceof ActiveSelection) {
-        active.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false })
+        // Frames have no angle, so a selection that contains one cannot be rotated. A
+        // content-only selection can. (Set both ways: Shift-click changes a selection in place.)
+        const hasFrame = active.getObjects().some(isFrame)
+        active.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false, mtr: !hasFrame })
         active.set({
           borderColor: ACCENT,
           cornerColor: '#ffffff',
@@ -411,8 +415,12 @@ export class Editor {
           transparentCorners: false,
           borderScaleFactor: 1.5,
           lockScalingFlip: true,
+          lockRotation: hasFrame,
         })
       }
+      // A frame on its own is a container and resizes freely; everything else, including any
+      // multi-selection, scales proportionally.
+      c.uniformScaling = !(!!active && !(active instanceof ActiveSelection) && isFrame(active))
       this.syncState()
     }
     c.on('selection:created', onSelection)

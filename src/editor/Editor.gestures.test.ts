@@ -853,6 +853,40 @@ describe('scene plumbing with frames', () => {
     expect(editor.getState().canUndo).toBe(false)
   })
 
+  it('a frame selected on its own resizes freely; anything else scales proportionally', async () => {
+    const { canvas } = await framed()
+    expect(canvas.uniformScaling).toBe(true)
+    canvas.setActiveObject(canvas.objects[0]!) // a frame
+    expect(canvas.uniformScaling).toBe(false)
+    canvas.setActiveObject(canvas.objects[2]!) // an image
+    expect(canvas.uniformScaling).toBe(true)
+    canvas.setActiveObject(canvas.objects[1]!)
+    expect(canvas.uniformScaling).toBe(false)
+    canvas.discardActiveObject()
+    expect(canvas.uniformScaling).toBe(true)
+  })
+
+  it('a multi-selection that contains a frame cannot rotate; a content-only one can', async () => {
+    const { canvas } = await framed()
+    const { ActiveSelection } = await import('./testing/fakeFabric.ts')
+    const mixed = new ActiveSelection([canvas.objects[0]!, canvas.objects[2]!])
+    canvas.setActiveObject(mixed)
+    expect(mixed.lockRotation).toBe(true)
+    expect(mixed.controls).toMatchObject({ mtr: false, ml: false, mr: false, mt: false, mb: false })
+    expect(canvas.uniformScaling).toBe(true) // even with a frame in it, a selection is proportional
+
+    const content = new ActiveSelection([canvas.objects[2]!, canvas.objects[3]!])
+    canvas.setActiveObject(content)
+    expect(content.lockRotation).toBe(false)
+    expect(content.controls).toMatchObject({ mtr: true, ml: false })
+
+    // Shift-click changes a selection in place: the rule follows its current members.
+    ;(content as unknown as { members: unknown[] }).members.push(canvas.objects[1]!)
+    canvas.fire('selection:updated', {})
+    expect(content.lockRotation).toBe(true)
+    expect(content.controls.mtr).toBe(false)
+  })
+
   it('layer commands move frames among frames and content among content, never across', async () => {
     const { editor, canvas, internals } = await framed()
     const ids = () => [...internals.getDoc().frames.map((f) => f.id), ...internals.getDoc().objects.map((o) => o.id)]
