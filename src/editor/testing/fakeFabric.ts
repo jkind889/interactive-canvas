@@ -131,10 +131,21 @@ export class Textbox extends FakeObject {
 }
 
 export class FabricImage extends FakeObject {
+  cropX = 0
+  cropY = 0
+  hasControls = true
+  hasBorders = true
+  private readonly natural: { width: number; height: number }
   constructor(el: { naturalWidth?: number; naturalHeight?: number }, opts: Record<string, unknown> = {}) {
     super(opts)
-    this.width = el.naturalWidth ?? 100
-    this.height = el.naturalHeight ?? 100
+    Object.assign(this, opts) // field initializers above ran after super(): apply the options again
+    this.natural = { width: el.naturalWidth ?? 100, height: el.naturalHeight ?? 100 }
+    // Like Fabric: an explicit width/height (a crop) wins over the element's size.
+    this.width = (opts.width as number | undefined) || this.natural.width
+    this.height = (opts.height as number | undefined) || this.natural.height
+  }
+  getOriginalSize() {
+    return { ...this.natural }
   }
 }
 

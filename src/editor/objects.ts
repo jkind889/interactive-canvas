@@ -1,8 +1,9 @@
 import { FabricImage, Rect, Textbox, util } from 'fabric'
 import type { FabricObject } from 'fabric'
+import { clampCrop, isWholeImage, roundCrop } from '../model/crop.ts'
 import { round, roundPositive } from '../model/doc.ts'
-import type { FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
-import type { Point } from '../model/viewport.ts'
+import type { CropRect, FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
+import type { Point, Size } from '../model/viewport.ts'
 
 export const ACCENT = '#6c7bf2'
 export const TEXT_COLOR = '#1d2230'
@@ -103,6 +104,9 @@ export function createObject(rec: ObjectRecord, getImage: (assetId: string) => H
   if (rec.type === 'image') {
     const el = getImage(rec.assetId)
     if (!el) return null
+    // A stored crop that reaches outside the decoded image is clamped to it; if nothing is
+    // left, the image is shown whole (at the same top-left and scale).
+    const crop = clampCrop(rec.crop, { width: el.naturalWidth || el.width, height: el.naturalHeight || el.height })
     const img = new FabricImage(el, {
       ...SELECTION_STYLE,
       left: rec.left,
@@ -110,6 +114,7 @@ export function createObject(rec: ObjectRecord, getImage: (assetId: string) => H
       angle: rec.angle,
       scaleX: rec.scaleX,
       scaleY: rec.scaleY,
+      ...(crop && { cropX: crop.x, cropY: crop.y, width: crop.width, height: crop.height }),
     })
     // Images keep their aspect ratio: corner handles only.
     img.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false })
@@ -208,8 +213,42 @@ export function toRecord(obj: FabricObject): ObjectRecord | null {
     return rec
   }
   if (m.assetId === undefined) return null
-  const rec: ImageRecord = { ...base, type: 'image', assetId: m.assetId, scaleX: roundPositive(sx, 5), scaleY: roundPositive(sy, 5), ...owner }
+  // A fresh object every time: snapshots never share a crop.
+  const crop = obj instanceof FabricImage ? imageCropOf(obj) : undefined
+  const rec: ImageRecord = {
+    ...base,
+    type: 'image',
+    assetId: m.assetId,
+    scaleX: roundPositive(sx, 5),
+    scaleY: roundPositive(sy, 5),
+    ...(crop && { crop: roundCrop(crop) }),
+    ...owner,
+  }
   return rec
+}
+
+export const isImage = (obj: FabricObject | undefined | null): obj is FabricImage => obj instanceof FabricImage
+
+/** The original image's size in source pixels. */
+export function imageSizeOf(img: FabricImage): Size {
+  return img.getOriginalSize()
+}
+
+/** The visible part of the original, in source pixels; undefined when it is the whole image. A fresh object. */
+export function imageCropOf(img: FabricImage): CropRect | undefined {
+  const crop = { x: img.cropX, y: img.cropY, width: img.width, height: img.height }
+  return isWholeImage(crop, imageSizeOf(img)) ? undefined : crop
+}
+
+/**
+ * Shows only `crop` of the original (undefined: all of it). Changes nothing else: the caller
+ * places the image (see `model/crop.ts`) so that the kept pixels do not move.
+ */
+export function setImageCrop(img: FabricImage, crop: CropRect | undefined) {
+  const size = imageSizeOf(img)
+  const c = crop ?? { x: 0, y: 0, width: size.width, height: size.height }
+  img.set({ cropX: c.x, cropY: c.y, width: c.width, height: c.height, dirty: true })
+  img.setCoords()
 }
 
 /** Reads a frame's absolute rectangle (any scale is folded into its size). Returns null for content. */

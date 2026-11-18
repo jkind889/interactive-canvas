@@ -1,5 +1,5 @@
 import { ActiveSelection, Textbox } from 'fabric'
-import type { FabricObject, Transform } from 'fabric'
+import type { FabricImage, FabricObject, Transform } from 'fabric'
 import {
   DEFAULT_VIEWPORT,
   MAX_FONT_SIZE,
@@ -23,20 +23,34 @@ import {
   rectFromDrag,
 } from '../model/frames.ts'
 import type { Box } from '../model/frames.ts'
+import {
+  croppedPlacement,
+  dragCropRect,
+  fillRecord,
+  fitRecord,
+  hitCropHandle,
+  isWholeImage,
+  minCropSide,
+  roundCrop,
+  sceneToSource,
+  uncroppedPlacement,
+} from '../model/crop.ts'
+import type { CropHit, CropRect, Placement } from '../model/crop.ts'
 import { History } from '../model/history.ts'
 import { canReorderLayered, reorderLayered } from '../model/layers.ts'
 import type { LayerOp } from '../model/layers.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from '../model/types.ts'
 import type { BoardDoc, FrameRecord, ImageRecord, SaveState, Scene, TextRecord, Viewport } from '../model/types.ts'
 import { fitImageScale, fitViewport, screenToScene, zoomAround } from '../model/viewport.ts'
-import type { Point, Rect } from '../model/viewport.ts'
+import type { Point, Rect, Size } from '../model/viewport.ts'
 import { Autosaver } from '../persistence/autosave.ts'
 import { ABSENT } from '../persistence/boardStore.ts'
 import type { BoardStore } from '../persistence/boardStore.ts'
 import { hydrateBoard } from '../persistence/hydrate.ts'
-import { isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
+import { isConfirmKey, isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
 import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
+import { CROP_HIT_TOLERANCE, cropCursor, cropOverlay, drawCropOverlay } from './cropLayer.ts'
 import { FrameCanvas } from './FrameCanvas.ts'
 import type { AssetSource } from './assets.ts'
 import { EMPTY_LAYERS, computeLayers } from './layerList.ts'
@@ -49,12 +63,15 @@ import {
   frameNameOf,
   hasResidualScale,
   idOf,
+  imageSizeOf,
   isFrame,
+  isImage,
   isLocked,
   newId,
   normalizeTextScale,
   ownerOf,
   setFrameName,
+  setImageCrop,
   setLocked,
   setOwner,
   toFrameRecord,
@@ -83,6 +100,11 @@ export interface SelectionInfo {
    */
   locked: boolean
   layer: Record<LayerOp, boolean>
+  /**
+   * Only for a single image: whether it is cropped, and whether Fit and Fill would change
+   * anything (both false while it is locked or being cropped).
+   */
+  image: { cropped: boolean; canFit: boolean; canFill: boolean } | null
 }
 
 export interface Notice {
@@ -104,6 +126,8 @@ export interface EditorState {
   /** Hand tool is in effect (selected, or Space held). */
   handActive: boolean
   editingText: boolean
+  /** Crop mode is open on the selected image (see `startCrop`). */
+  cropping: boolean
   selection: SelectionInfo | null
   viewport: Viewport
   objectCount: number
@@ -146,6 +170,30 @@ interface Carry {
   left: number
   top: number
   followers: Array<{ obj: FabricObject; left: number; top: number }>
+}
+
+/**
+ * Crop mode on one image. While it is open the WHOLE original is shown in place (the kept
+ * pixels do not move) with the crop rectangle drawn over it, so the canvas temporarily
+ * holds an un-cropped image: saves see `base`, nothing is committed, and every command
+ * applies the crop first (see `finishEditing`).
+ */
+interface CropSession {
+  /** The scene before the crop opened: what saves see, and what cancelling restores. */
+  base: Scene
+  target: FabricImage
+  /** The image's own Fabric state before the crop opened, restored exactly when nothing changes. */
+  before: { left: number; top: number; cropX: number; cropY: number; width: number; height: number; hasControls: boolean; hasBorders: boolean }
+  /** The original's size in source pixels. */
+  size: Size
+  /** Where the whole original lies on the board while cropping (fixed for the session). */
+  full: Placement
+  /** The crop when the session began (the whole image when there was none). */
+  start: CropRect
+  /** The crop rectangle as it is now, in source pixels. */
+  rect: CropRect
+  /** A handle or the box being dragged with the primary button. */
+  drag: { startRect: CropRect; end: () => void } | null
 }
 
 /** A Frame-tool press that moves less than this many screen pixels is a click (default-sized frame). */
@@ -196,6 +244,11 @@ export class Editor {
   /** A primary-button press has been passed through to Fabric and not yet released. */
   private primaryDown = false
   private pan: { button: number; end: () => void } | null = null
+  private crop: CropSession | null = null
+  /** The last press on the canvas applied a crop (so the double-click it may begin does not reopen one). */
+  private pressAppliedCrop = false
+  /** The press that began the current double-click followed a press that applied a crop. */
+  private dblClickAfterCrop = false
 
   constructor(
     private readonly host: HTMLElement,
@@ -234,6 +287,7 @@ export class Editor {
       tool: 'select',
       handActive: false,
       editingText: false,
+      cropping: false,
       selection: null,
       viewport: { ...DEFAULT_VIEWPORT },
       objectCount: 0,
@@ -333,6 +387,7 @@ export class Editor {
     if (this.disposed) return
     this.autosaver.disable(message)
     this.cancelGesture()
+    this.cancelCrop() // before leaving the edit below, which would apply it
     this.setState({ readOnly: message, reloadSuggested, tool: 'hand' }) // not editable from here on, so leaving the edit below commits nothing
     this.dropStagedImports()
     this.finishEditing()
@@ -354,6 +409,8 @@ export class Editor {
     this.gesture = null // invalidates any queued settlement
     this.stagedImports = []
     this.pan?.end()
+    this.crop?.drag?.end()
+    this.crop = null
     for (const c of this.cleanups.splice(0)) c()
     this.autosaver.dispose()
     this.listeners.clear()
@@ -386,11 +443,11 @@ export class Editor {
   }
 
   /**
-   * What a save should store right now. A save never sees an unfinished gesture: while
-   * one exists the scene is the one from before it. Title and viewport are always live.
+   * What a save should store right now. A save never sees an unfinished gesture or an open
+   * crop: while one exists the scene is the one from before it. Title and viewport are always live.
    */
   private getDoc(): BoardDoc {
-    const scene = this.gesture ? this.gesture.base : this.snapshot()
+    const scene = this.gesture ? this.gesture.base : this.crop ? this.crop.base : this.snapshot()
     return { version: DOC_VERSION, title: this.state.title, frames: scene.frames, objects: scene.objects, viewport: this.getViewport() }
   }
 
@@ -399,7 +456,7 @@ export class Editor {
    * entry and no save. Never changes ownership or anything else on the canvas.
    */
   private commit(coalesceKey?: string) {
-    if (this.applying || !this.editable || this.gesture) return
+    if (this.applying || !this.editable || this.gesture || this.crop) return
     if (this.history.push(this.snapshot(), coalesceKey)) this.autosaver.markDirty()
     this.syncState()
   }
@@ -494,7 +551,17 @@ export class Editor {
         backward: !locked && canReorderLayered(order, ids, 'backward'),
         back: !locked && canReorderLayered(order, ids, 'back'),
       },
+      image: isImage(single) ? this.imageInfo(single, locked) : null,
     }
+  }
+
+  private imageInfo(img: FabricImage, locked: boolean): SelectionInfo['image'] {
+    const rec = toRecord(img)
+    if (rec?.type !== 'image') return null
+    if (locked || this.crop) return { cropped: rec.crop !== undefined, canFit: false, canFill: false }
+    const size = imageSizeOf(img)
+    const changes = (next: ImageRecord) => !sceneEqual({ frames: [], objects: [rec] }, { frames: [], objects: [next] })
+    return { cropped: rec.crop !== undefined, canFit: changes(fitRecord(rec, size)), canFill: changes(fillRecord(rec, size)) }
   }
 
   private syncState() {
@@ -506,6 +573,7 @@ export class Editor {
       canUndo: this.history.canUndo,
       canRedo: this.history.canRedo,
       editingText: active instanceof Textbox && active.isEditing === true,
+      cropping: this.crop !== null,
     })
   }
 
@@ -667,10 +735,27 @@ export class Editor {
     // name field. Deferred, like everything else that follows from a canvas event.
     c.on('mouse:dblclick', (opt) => {
       const target = opt.target
-      if (!this.editable || this.busy || !target || !isFrame(target)) return
+      if (!this.editable || this.busy || this.crop || !target) return
+      if (isFrame(target)) {
+        queueMicrotask(() => {
+          if (this.editable && !this.busy && c.getActiveObject() === target) this.frameRenamer?.()
+        })
+        return
+      }
+      // Double-clicking an unlocked image with the Select tool opens crop mode. (A locked image
+      // is never the target: the double-click falls through to what is beneath it.) Not when
+      // the double-click began with the press that applied a crop.
+      if (!isImage(target) || isLocked(target) || this.state.tool !== 'select' || this.state.handActive || this.dblClickAfterCrop) return
       queueMicrotask(() => {
-        if (this.editable && !this.busy && c.getActiveObject() === target) this.frameRenamer?.()
+        if (this.editable && !this.busy && !this.crop && c.getActiveObject() === target) this.startCrop()
       })
+    })
+
+    // Crop mode: the whole image dimmed outside the crop rectangle, the box and its handles.
+    c.on('after:render', ({ ctx }) => {
+      const s = this.crop
+      if (!s || ctx !== c.getContext()) return
+      drawCropOverlay(ctx, cropOverlay(s.full, s.size, s.rect, c.viewportTransform), c.getRetinaScaling())
     })
 
     c.on('mouse:up', (opt) => {
@@ -984,8 +1069,8 @@ export class Editor {
           // document listeners of a primary drag that is still in progress.
           e.preventDefault()
           e.stopPropagation()
-          if (e.button === 1 && !this.primaryDown) {
-            this.finishEditing()
+          if (e.button === 1 && !this.primaryDown && !this.crop?.drag) {
+            this.finishEditing({ keepCrop: true }) // panning keeps crop mode open
             this.beginPan(e)
           }
           return
@@ -993,11 +1078,33 @@ export class Editor {
         if (this.state.handActive) {
           e.preventDefault()
           e.stopPropagation()
-          this.finishEditing()
+          this.finishEditing({ keepCrop: true })
           this.beginPan(e)
           return
         }
+        if (this.crop) {
+          // Crop mode: Fabric never sees a primary press, so no Fabric gesture can begin.
+          e.preventDefault()
+          e.stopPropagation()
+          this.cropPress(e)
+          return
+        }
+        this.dblClickAfterCrop = this.pressAppliedCrop
+        this.pressAppliedCrop = false
         this.primaryDown = true
+      },
+      { capture: true },
+    )
+
+    // Crop mode: the cursor says what a press would grab (Fabric applies `defaultCursor`, as nothing is a target).
+    listen(
+      wrapper,
+      'mousemove',
+      (e) => {
+        const s = this.crop
+        if (!s || s.drag || this.state.handActive) return
+        const hit = this.cropHitAt(s, e)
+        this.canvas.defaultCursor = hit ? cropCursor(hit, s.full.angle) : 'default'
       },
       { capture: true },
     )
@@ -1073,6 +1180,8 @@ export class Editor {
       // The release of whatever was held may never arrive: undo the unfinished gesture.
       this.pan?.end()
       if (this.cancelGesture()) this.queueIdle()
+      // A crop handle drag returns to where it began; crop mode stays open.
+      if (this.crop?.drag) this.endCropDrag(false)
     }
     const onHide = () => {
       if (document.visibilityState === 'hidden') void this.autosaver.flush()
@@ -1162,6 +1271,20 @@ export class Editor {
       return
     }
     const action = resolveShortcut(e, ctx)
+    if (this.crop) {
+      // Crop mode: Esc cancels, Enter applies, zoom works (and Space pans, above); nothing else.
+      if (action === 'escape') {
+        e.preventDefault()
+        this.cancelCrop()
+      } else if (isConfirmKey(e, ctx)) {
+        e.preventDefault()
+        this.applyCrop()
+      } else if (action && ZOOM_ACTIONS.has(action)) {
+        e.preventDefault()
+        this.run(action)
+      }
+      return
+    }
     if (!action) return
     e.preventDefault()
     this.run(action)
@@ -1249,18 +1372,212 @@ export class Editor {
     const { tool } = this.state
     const hand = tool === 'hand' || this.spaceHeld
     const editable = this.state.ready && this.state.readOnly === null
-    this.canvas.selection = editable && tool === 'select' && !hand
-    // The Frame tool draws over whatever is there: it must not grab or select anything.
-    this.canvas.skipTargetFind = hand || !editable || tool === 'frame'
+    const cropping = this.crop !== null
+    this.canvas.selection = editable && tool === 'select' && !hand && !cropping
+    // The Frame tool draws over whatever is there: it must not grab or select anything. Nor
+    // does anything while cropping (the editor handles those presses itself).
+    this.canvas.skipTargetFind = hand || !editable || tool === 'frame' || cropping
     this.canvas.defaultCursor = hand ? 'grab' : tool === 'text' ? 'text' : tool === 'frame' ? 'crosshair' : 'default'
     this.canvas.hoverCursor = hand ? 'grab' : tool === 'text' ? 'text' : tool === 'frame' ? 'crosshair' : 'move'
     this.canvas.requestRenderAll()
     this.setState({ handActive: hand })
   }
 
-  private finishEditing() {
+  /**
+   * Leaves the current edit before a command runs: an open crop is applied (its own history
+   * step if it changed anything) and a text being edited is left (typed text is committed as
+   * its own step). Every command calls this first, so none can run against a temporarily
+   * un-cropped image. Panning keeps crop mode open (`keepCrop`).
+   */
+  private finishEditing(opts: { keepCrop?: boolean } = {}) {
+    if (!opts.keepCrop) this.applyCrop()
     const active = this.canvas.getActiveObject()
     if (active instanceof Textbox && active.isEditing) active.exitEditing()
+  }
+
+  // ---- image tools: crop, Fit and Fill -------------------------------------------------------
+
+  /**
+   * Opens crop mode on the selected image. Only for one unlocked image, on an editable board
+   * that is not busy. The whole original is shown in place (the kept pixels do not move) with
+   * the crop box over it; Fabric's own handles are hidden and Fabric sees no presses.
+   */
+  startCrop() {
+    if (!this.editable || this.busy || this.crop) return
+    const img = this.canvas.getActiveObject()
+    if (!isImage(img) || isLocked(img) || img.group) return
+    this.finishEditing()
+    if (this.state.tool !== 'select') this.switchTool('select')
+    if (this.canvas.getActiveObject() !== img) return
+    const size = imageSizeOf(img)
+    const start = { x: img.cropX, y: img.cropY, width: img.width, height: img.height }
+    const shown: Placement = { left: img.left, top: img.top, angle: img.angle, scaleX: img.scaleX, scaleY: img.scaleY }
+    const full = uncroppedPlacement(shown, start)
+    this.crop = {
+      base: this.snapshot(),
+      target: img,
+      before: {
+        left: img.left,
+        top: img.top,
+        cropX: img.cropX,
+        cropY: img.cropY,
+        width: img.width,
+        height: img.height,
+        hasControls: img.hasControls,
+        hasBorders: img.hasBorders,
+      },
+      size,
+      full,
+      start,
+      rect: { ...start },
+      drag: null,
+    }
+    img.set({ hasControls: false, hasBorders: false })
+    setImageCrop(img, undefined)
+    img.set({ left: full.left, top: full.top })
+    img.setCoords()
+    this.applyToolState()
+    this.canvas.requestRenderAll()
+    this.syncState()
+  }
+
+  /** Done, Enter, or a press outside the crop box: applies the crop. Nothing when crop mode is not open. */
+  applyCrop() {
+    this.closeCrop(true)
+  }
+
+  /** Cancel or Esc: restores the image exactly as it was. No history entry and no save. */
+  cancelCrop() {
+    this.closeCrop(false)
+  }
+
+  /**
+   * Ends crop mode. A drag in flight ends with the rectangle as it is. Applying a changed crop
+   * places the image so that the kept pixels stay where they were shown, decides its owner as
+   * after a resize, and records one history step. Applying an unchanged crop, or cancelling,
+   * restores the image's own state exactly and records nothing.
+   */
+  private closeCrop(apply: boolean) {
+    const s = this.crop
+    if (!s) return
+    if (s.drag) this.endCropDrag(true)
+    this.crop = null
+    const img = s.target
+    const rect = roundCrop(s.rect)
+    const whole = isWholeImage(rect, s.size)
+    const unchanged = (whole && isWholeImage(s.start, s.size)) || sameRect(rect, roundCrop(s.start))
+    img.set({ hasControls: s.before.hasControls, hasBorders: s.before.hasBorders })
+    const onCanvas = this.canvas.getObjects().includes(img)
+    if (!apply || unchanged || !onCanvas) {
+      const b = s.before
+      img.set({ cropX: b.cropX, cropY: b.cropY, width: b.width, height: b.height, left: b.left, top: b.top, dirty: true })
+      img.setCoords()
+    } else {
+      const crop = whole ? undefined : rect
+      const at = croppedPlacement(s.full, crop ?? { x: 0, y: 0 })
+      setImageCrop(img, crop)
+      img.set({ left: at.left, top: at.top })
+      img.setCoords()
+      // A crop changes the image's box, so it counts as resizing it.
+      setOwner(img, ownerAfterManipulation(ownerOf(img), centerOf(img), this.frameRecords(), NO_FRAMES))
+    }
+    this.applyToolState()
+    this.canvas.requestRenderAll()
+    if (apply && !unchanged && onCanvas) this.commit()
+    this.syncState()
+  }
+
+  /** What a press at this mouse event would grab in crop mode, or null (outside the crop box). */
+  private cropHitAt(s: CropSession, e: MouseEvent): CropHit | null {
+    const p = sceneToSource(this.canvas.getScenePoint(e), s.full)
+    const zoom = this.getViewport().zoom
+    const tolX = CROP_HIT_TOLERANCE / (zoom * Math.abs(s.full.scaleX))
+    const tolY = CROP_HIT_TOLERANCE / (zoom * Math.abs(s.full.scaleY))
+    return hitCropHandle(p, s.rect, tolX, tolY)
+  }
+
+  /** A primary press in crop mode: a handle or the box starts a drag; anywhere else applies the crop. */
+  private cropPress(e: MouseEvent) {
+    const s = this.crop
+    if (!s) return
+    if (s.drag) this.endCropDrag(true) // its release was lost
+    const hit = this.cropHitAt(s, e)
+    if (!hit) {
+      this.pressAppliedCrop = true
+      this.applyCrop() // like clicking away from a text: the press does nothing else
+      return
+    }
+    const from = sceneToSource(this.canvas.getScenePoint(e), s.full)
+    const startRect = { ...s.rect }
+    const minW = minCropSide(s.full.scaleX, s.size.width, startRect.width)
+    const minH = minCropSide(s.full.scaleY, s.size.height, startRect.height)
+    const move = (ev: MouseEvent) => {
+      if (this.crop !== s || !s.drag) return
+      if ((ev.buttons & 1) === 0) {
+        this.endCropDrag(true) // the primary release was lost: the drag ends where it is
+        return
+      }
+      const p = sceneToSource(this.canvas.getScenePoint(ev), s.full)
+      s.rect = dragCropRect(startRect, hit, p.x - from.x, p.y - from.y, s.size, minW, minH)
+      this.canvas.requestRenderAll()
+    }
+    const up = (ev: MouseEvent) => {
+      if (ev.button === 0 && this.crop === s && s.drag) this.endCropDrag(true) // other buttons never end it
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+    s.drag = {
+      startRect,
+      end: () => {
+        window.removeEventListener('mousemove', move)
+        window.removeEventListener('mouseup', up)
+        s.drag = null
+      },
+    }
+  }
+
+  /** Ends a crop drag, keeping the rectangle or (`keep` false: a window blur) returning it to where the drag began. */
+  private endCropDrag(keep: boolean) {
+    const s = this.crop
+    if (!s?.drag) return
+    if (!keep) s.rect = { ...s.drag.startRect }
+    s.drag.end()
+    this.canvas.requestRenderAll()
+  }
+
+  /**
+   * Fit: the whole original, at the largest uniform scale at which it fits inside the image's
+   * current box, centred on it, same angle. One history step, or nothing when nothing changes.
+   * The box changes, so its owner is decided as after a resize.
+   */
+  fitImage() {
+    this.reshapeImage(fitRecord, true)
+  }
+
+  /**
+   * Fill: the box stays exactly as it is and the image covers it, with the largest centred
+   * crop of the original that has the box's aspect ratio. One history step, or nothing.
+   * Never changes ownership.
+   */
+  fillImage() {
+    this.reshapeImage(fillRecord, false)
+  }
+
+  private reshapeImage(next: (rec: ImageRecord, size: Size) => ImageRecord, decidesOwner: boolean) {
+    if (!this.editable || this.busy) return
+    this.finishEditing() // an open crop is applied first, as its own step
+    const img = this.canvas.getActiveObject()
+    if (!isImage(img) || isLocked(img) || img.group) return
+    const rec = toRecord(img)
+    if (rec?.type !== 'image') return
+    const out = next(rec, imageSizeOf(img))
+    if (sceneEqual({ frames: [], objects: [rec] }, { frames: [], objects: [out] })) return
+    setImageCrop(img, out.crop)
+    img.set({ left: out.left, top: out.top, scaleX: out.scaleX, scaleY: out.scaleY })
+    img.setCoords()
+    if (decidesOwner) setOwner(img, ownerAfterManipulation(ownerOf(img), centerOf(img), this.frameRecords(), NO_FRAMES))
+    this.canvas.requestRenderAll()
+    this.commit()
   }
 
   // ---- adding content ----------------------------------------------------------------
@@ -1548,10 +1865,7 @@ export class Editor {
     const changing = objs.filter((o) => isLocked(o) !== locked)
     if (changing.length === 0) return
     for (const o of changing) setLocked(o, locked)
-    if (locked && this.canvas.getActiveObject() instanceof ActiveSelection) {
-      this.canvas.discardActiveObject()
-      if (objs.length === 1) this.selectByIds(objs)
-    }
+    if (locked && this.canvas.getActiveObject() instanceof ActiveSelection) this.canvas.discardActiveObject()
     this.canvas.requestRenderAll()
     this.commit()
   }
@@ -1692,6 +2006,8 @@ function bakeFrame(frame: FabricObject) {
   })
   frame.setCoords()
 }
+
+const sameRect = (a: CropRect, b: CropRect) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
 
 /** Corner (and side) scaling, as opposed to moving, rotating or changing a text's wrap width. */
 function isScaleAction(transform: Transform): boolean {

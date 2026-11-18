@@ -1,5 +1,5 @@
 import { DEFAULT_TITLE, DOC_VERSION } from './types.ts'
-import type { BoardDoc, FrameRecord, ObjectRecord, Scene, StoredDoc, Viewport } from './types.ts'
+import type { BoardDoc, CropRect, FrameRecord, ObjectRecord, Scene, StoredDoc, Viewport } from './types.ts'
 
 export const MIN_ZOOM = 0.05
 export const MAX_ZOOM = 8
@@ -21,6 +21,20 @@ const isStr = (v: unknown): v is string => typeof v === 'string'
 /** `locked` is kept only when it is exactly `true`; anything else is dropped, not fatal. Both wire versions. */
 const lockOf = (raw: Record<string, unknown>): { locked?: true } => (raw.locked === true ? { locked: true } : {})
 
+/**
+ * An image's `crop`, kept only when it is an object of finite numbers with `x >= 0`,
+ * `y >= 0`, `width > 0` and `height > 0`; anything else is dropped (the image is shown
+ * whole), not fatal. Both wire versions. Whether it lies inside the image is only known
+ * once the image is decoded (see `clampCrop`).
+ */
+const cropOf = (raw: Record<string, unknown>): { crop?: CropRect } => {
+  const c = raw.crop
+  if (!isRecord(c)) return {}
+  const { x, y, width, height } = c
+  if (!isNum(x) || !isNum(y) || !isNum(width) || !isNum(height) || x < 0 || y < 0 || width <= 0 || height <= 0) return {}
+  return { crop: { x, y, width, height } }
+}
+
 /** Allowlist parse: `frameId` is deliberately not read here (see the v2 path in parseDoc). */
 function parseObject(raw: unknown): ObjectRecord | null {
   if (!isRecord(raw)) return null
@@ -29,7 +43,7 @@ function parseObject(raw: unknown): ObjectRecord | null {
   if (type === 'image') {
     const { assetId, scaleX, scaleY } = raw
     if (!isStr(assetId) || !isNum(scaleX) || !isNum(scaleY) || scaleX === 0 || scaleY === 0) return null
-    return { type, id, left, top, angle, assetId, scaleX, scaleY, ...lockOf(raw) }
+    return { type, id, left, top, angle, assetId, scaleX, scaleY, ...cropOf(raw), ...lockOf(raw) }
   }
   if (type === 'text') {
     const { text, fontSize, width } = raw
@@ -91,11 +105,15 @@ export function parseDoc(raw: unknown): BoardDoc | null {
   return { version: DOC_VERSION, title, frames, objects, viewport }
 }
 
-/** A copy without keys whose value is `undefined`, and with `locked` only when it is `true`. */
-function storable<T extends { locked?: true }>(rec: T): T {
+/**
+ * A copy without keys whose value is `undefined`, with `locked` only when it is `true`, and
+ * with a fresh copy of an image's `crop` (never a reference shared with the live document).
+ */
+function storable<T extends { locked?: true; crop?: CropRect }>(rec: T): T {
   const out = { ...rec }
   for (const k of Object.keys(out) as Array<keyof T>) if (out[k] === undefined) delete out[k]
   if (out.locked !== true) delete out.locked // never store `locked: false`
+  if (out.crop) out.crop = { x: out.crop.x, y: out.crop.y, width: out.crop.width, height: out.crop.height }
   return out
 }
 
@@ -137,17 +155,30 @@ export function objectsEqual(a: readonly ObjectRecord[], b: readonly ObjectRecor
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
-/** Flat records compared field by field; key order and `undefined` vs absent do not matter. */
+/** Records hold only plain data (no dates, maps or class instances), possibly from another realm (IndexedDB, tests). */
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/**
+ * Structural equality of record values: nested plain objects (such as an image's `crop`) and
+ * arrays are compared by content, never by reference, so two snapshots of the same board
+ * are equal. Key order and `undefined` vs absent do not matter, at any depth. NaN equals NaN
+ * here, so a broken number can never look like an endless stream of changes.
+ */
+function valuesEqual(x: unknown, y: unknown): boolean {
+  if (x === y) return true
+  if (typeof x === 'number' && typeof y === 'number') return Number.isNaN(x) && Number.isNaN(y)
+  if (Array.isArray(x) && Array.isArray(y)) return x.length === y.length && x.every((v, i) => valuesEqual(v, y[i]))
+  if (isPlainObject(x) && isPlainObject(y)) {
+    for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) if (!valuesEqual(x[k], y[k])) return false
+    return true
+  }
+  return false
+}
+
+/** Records compared field by field, structurally (see `valuesEqual`). */
 function recordsEqual(a: readonly object[], b: readonly object[]): boolean {
   if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i] as Record<string, unknown>
-    const y = b[i] as Record<string, unknown>
-    for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) {
-      // NaN equals NaN here, so a broken number can never look like an endless stream of changes.
-      if (x[k] !== y[k] && !(Number.isNaN(x[k]) && Number.isNaN(y[k]))) return false
-    }
-  }
+  for (let i = 0; i < a.length; i++) if (!valuesEqual(a[i], b[i])) return false
   return true
 }
 

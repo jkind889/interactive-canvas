@@ -121,3 +121,21 @@ export function isPanHoldKey(e: KeyEventLike, ctx: ShortcutContext): boolean {
     !isActivatableTarget(e.target)
   )
 }
+
+/**
+ * Plain Enter (outside fields and buttons, which use Enter themselves): applies an open crop.
+ * Enter in the title field, or on a focused Cancel button, is not this key.
+ */
+export function isConfirmKey(e: KeyEventLike, ctx: ShortcutContext): boolean {
+  return (
+    e.key === 'Enter' &&
+    !e.ctrlKey &&
+    !e.metaKey &&
+    !e.altKey &&
+    !e.shiftKey &&
+    !e.isComposing &&
+    !ctx.editingText &&
+    !isEditableTarget(e.target) &&
+    !isActivatableTarget(e.target)
+  )
+}

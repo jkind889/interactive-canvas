@@ -1,0 +1,252 @@
+import { round, roundPositive } from './doc.ts'
+import type { CropRect, ImageRecord } from './types.ts'
+import type { Point, Size } from './viewport.ts'
+
+export type { CropRect } from './types.ts'
+
+/**
+ * Pure geometry of image crops, Fit and Fill. No Fabric, no DOM.
+ *
+ * Coordinates:
+ *  - "source pixels": the original image, (0, 0) at its top-left, (W, H) at its bottom-right.
+ *  - a `Placement` puts source pixels on the board: source point (u, v) is at
+ *    `(left, top) + R(angle) * (u * scaleX, v * scaleY)` in scene coordinates. That is how
+ *    Fabric draws an image with a left/top origin, so `(left, top)` is the scene position of
+ *    source pixel (0, 0), whatever the rotation.
+ */
+export interface Placement {
+  left: number
+  top: number
+  /** Degrees, clockwise. */
+  angle: number
+  scaleX: number
+  scaleY: number
+}
+
+/** Each side of a crop stays at least this many scene units long as displayed. */
+export const MIN_CROP_SCENE = 8
+/** Within this many source pixels of every edge, a crop is the whole image (and is not stored). */
+export const WHOLE_IMAGE_TOLERANCE = 0.01
+
+function rotate(x: number, y: number, deg: number): Point {
+  const r = (deg * Math.PI) / 180
+  const c = Math.cos(r)
+  const s = Math.sin(r)
+  return { x: x * c - y * s, y: x * s + y * c }
+}
+
+/** Scene point of a source-pixel point. */
+export function sourceToScene(p: Point, at: Placement): Point {
+  const d = rotate(p.x * at.scaleX, p.y * at.scaleY, at.angle)
+  return { x: at.left + d.x, y: at.top + d.y }
+}
+
+/** Source-pixel point of a scene point (the inverse of `sourceToScene`). Rotation-independent. */
+export function sceneToSource(p: Point, at: Placement): Point {
+  const d = rotate(p.x - at.left, p.y - at.top, -at.angle)
+  return { x: d.x / at.scaleX, y: d.y / at.scaleY }
+}
+
+/**
+ * Where the whole original lies when the displayed (cropped) box is at `shown`: the kept
+ * pixels stay exactly where they are, so the original's top-left is the displayed top-left
+ * moved back by the rotated, scaled offset of the crop's corner.
+ */
+export function uncroppedPlacement(shown: Placement, crop: Pick<CropRect, 'x' | 'y'>): Placement {
+  const d = rotate(-crop.x * shown.scaleX, -crop.y * shown.scaleY, shown.angle)
+  return { ...shown, left: shown.left + d.x, top: shown.top + d.y }
+}
+
+/** The displayed top-left of `crop` when the whole original lies at `full` (the inverse of `uncroppedPlacement`). */
+export function croppedPlacement(full: Placement, crop: Pick<CropRect, 'x' | 'y'>): Placement {
+  const p = sourceToScene({ x: crop.x, y: crop.y }, full)
+  return { ...full, left: p.x, top: p.y }
+}
+
+export const wholeRect = (size: Size): CropRect => ({ x: 0, y: 0, width: size.width, height: size.height })
+
+/** The crop shows the whole image (within a small tolerance), so it is not a crop at all. */
+export function isWholeImage(crop: CropRect | undefined, size: Size, tolerance = WHOLE_IMAGE_TOLERANCE): boolean {
+  if (!crop) return true
+  return (
+    Math.abs(crop.x) <= tolerance &&
+    Math.abs(crop.y) <= tolerance &&
+    Math.abs(crop.x + crop.width - size.width) <= tolerance &&
+    Math.abs(crop.y + crop.height - size.height) <= tolerance
+  )
+}
+
+/** Rounded like other stored numbers: positions to 2 decimals, sizes with `roundPositive`. */
+export function roundCrop(crop: CropRect): CropRect {
+  return { x: round(crop.x), y: round(crop.y), width: roundPositive(crop.width), height: roundPositive(crop.height) }
+}
+
+/**
+ * A stored crop clamped to the real image (only known once it has been decoded). Returns
+ * undefined (the image is shown whole) when there was no crop, when nothing of it lies
+ * inside the image, or when what is left is the whole image.
+ */
+export function clampCrop(crop: CropRect | undefined, size: Size): CropRect | undefined {
+  if (!crop || !(size.width > 0) || !(size.height > 0)) return undefined
+  const x0 = Math.min(Math.max(crop.x, 0), size.width)
+  const y0 = Math.min(Math.max(crop.y, 0), size.height)
+  const x1 = Math.min(Math.max(crop.x + crop.width, 0), size.width)
+  const y1 = Math.min(Math.max(crop.y + crop.height, 0), size.height)
+  if (!(x1 - x0 > 0) || !(y1 - y0 > 0)) return undefined
+  const out = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
+  return isWholeImage(out, size) ? undefined : out
+}
+
+// ---- handles ------------------------------------------------------------------------------
+
+export type CropHandle = 'tl' | 't' | 'tr' | 'r' | 'br' | 'b' | 'bl' | 'l'
+export type CropHit = CropHandle | 'move'
+
+/** The eight handles, each with its position as a fraction of the crop rectangle. */
+export const CROP_HANDLES: ReadonlyArray<{ handle: CropHandle; fx: number; fy: number }> = [
+  { handle: 'tl', fx: 0, fy: 0 },
+  { handle: 't', fx: 0.5, fy: 0 },
+  { handle: 'tr', fx: 1, fy: 0 },
+  { handle: 'r', fx: 1, fy: 0.5 },
+  { handle: 'br', fx: 1, fy: 1 },
+  { handle: 'b', fx: 0.5, fy: 1 },
+  { handle: 'bl', fx: 0, fy: 1 },
+  { handle: 'l', fx: 0, fy: 0.5 },
+]
+
+/** Centre of a handle in source pixels. */
+export function handlePoint(rect: CropRect, h: { fx: number; fy: number }): Point {
+  return { x: rect.x + rect.width * h.fx, y: rect.y + rect.height * h.fy }
+}
+
+/**
+ * What a press at `p` (source pixels) grabs. `tolX`/`tolY` are the hit tolerance in source
+ * pixels along each axis (a fixed number of screen pixels, divided by the on-screen scale).
+ * Corners first, then the sides (anywhere along the drawn border), then the inside of the
+ * box. Null: outside the box.
+ */
+export function hitCropHandle(p: Point, rect: CropRect, tolX: number, tolY: number): CropHit | null {
+  const left = rect.x
+  const right = rect.x + rect.width
+  const top = rect.y
+  const bottom = rect.y + rect.height
+  const nearL = Math.abs(p.x - left) <= tolX
+  const nearR = Math.abs(p.x - right) <= tolX
+  const nearT = Math.abs(p.y - top) <= tolY
+  const nearB = Math.abs(p.y - bottom) <= tolY
+  // When the box is smaller than the tolerance, the nearer edge wins.
+  const pickX = nearL && nearR ? (Math.abs(p.x - left) <= Math.abs(p.x - right) ? 'l' : 'r') : nearL ? 'l' : nearR ? 'r' : null
+  const pickY = nearT && nearB ? (Math.abs(p.y - top) <= Math.abs(p.y - bottom) ? 't' : 'b') : nearT ? 't' : nearB ? 'b' : null
+  const withinX = p.x >= left - tolX && p.x <= right + tolX
+  const withinY = p.y >= top - tolY && p.y <= bottom + tolY
+  if (pickX && pickY) return `${pickY}${pickX}` as CropHandle
+  if (pickX && withinY) return pickX
+  if (pickY && withinX) return pickY
+  if (p.x > left && p.x < right && p.y > top && p.y < bottom) return 'move'
+  return null
+}
+
+/**
+ * Smallest allowed side, in source pixels: `MIN_CROP_SCENE` scene units as displayed, at
+ * least one source pixel, never more than the image's own side, and never more than the
+ * side was when the drag began (a crop that is already smaller may grow, and is never
+ * snapped up).
+ */
+export function minCropSide(scale: number, imageSide: number, startSide: number): number {
+  const s = Math.abs(scale)
+  const fromScene = s > 0 ? MIN_CROP_SCENE / s : imageSide
+  return Math.min(Math.max(1, fromScene), imageSide, startSide)
+}
+
+/**
+ * The crop rectangle after dragging `hit` by `(dx, dy)` source pixels from `start`. Free
+ * aspect. The result always lies inside the image, never flips, and keeps each side at
+ * least `minW` by `minH`.
+ */
+export function dragCropRect(start: CropRect, hit: CropHit, dx: number, dy: number, size: Size, minW: number, minH: number): CropRect {
+  if (hit === 'move') {
+    const x = Math.min(Math.max(start.x + dx, 0), Math.max(0, size.width - start.width))
+    const y = Math.min(Math.max(start.y + dy, 0), Math.max(0, size.height - start.height))
+    return { x, y, width: start.width, height: start.height }
+  }
+  let left = start.x
+  let top = start.y
+  let right = start.x + start.width
+  let bottom = start.y + start.height
+  if (hit.includes('l')) left = Math.min(Math.max(left + dx, 0), right - minW)
+  if (hit.includes('r')) right = Math.max(Math.min(right + dx, size.width), left + minW)
+  if (hit.includes('t')) top = Math.min(Math.max(top + dy, 0), bottom - minH)
+  if (hit.includes('b')) bottom = Math.max(Math.min(bottom + dy, size.height), top + minH)
+  return { x: left, y: top, width: right - left, height: bottom - top }
+}
+
+// ---- Fit and Fill ------------------------------------------------------------------------
+
+/** The largest rectangle of `size` with the aspect ratio `aspect` (width / height), centred. */
+export function largestCentredCrop(size: Size, aspect: number): CropRect {
+  if (!(aspect > 0) || !Number.isFinite(aspect)) return wholeRect(size)
+  let width = size.width
+  let height = width / aspect
+  if (height > size.height) {
+    height = size.height
+    width = height * aspect
+  }
+  width = Math.min(width, size.width)
+  height = Math.min(height, size.height)
+  return { x: (size.width - width) / 2, y: (size.height - height) / 2, width, height }
+}
+
+/** The largest uniform scale at which `size` fits inside `box`. */
+export function fitInsideScale(size: Size, box: Size): number {
+  return Math.min(box.width / size.width, box.height / size.height)
+}
+
+/** An image's displayed box: centre, displayed size and angle. */
+export interface DisplayBox {
+  centre: Point
+  width: number
+  height: number
+  angle: number
+}
+
+/** The displayed box of an image record (`size` is the original's size in source pixels). */
+export function displayBox(rec: Pick<ImageRecord, 'left' | 'top' | 'angle' | 'scaleX' | 'scaleY' | 'crop'>, size: Size): DisplayBox {
+  const crop = rec.crop ?? wholeRect(size)
+  const width = crop.width * Math.abs(rec.scaleX)
+  const height = crop.height * Math.abs(rec.scaleY)
+  const d = rotate(width / 2, height / 2, rec.angle)
+  return { centre: { x: rec.left + d.x, y: rec.top + d.y }, width, height, angle: rec.angle }
+}
+
+/** The record placed so that its displayed box (of `width` x `height`) is centred on `centre`. */
+function placeCentred<T extends ImageRecord>(rec: T, centre: Point, width: number, height: number, scale: number, crop: CropRect | undefined): T {
+  const d = rotate(width / 2, height / 2, rec.angle)
+  const out: T = { ...rec, left: round(centre.x - d.x), top: round(centre.y - d.y), scaleX: roundPositive(scale, 5), scaleY: roundPositive(scale, 5) }
+  if (crop) out.crop = crop
+  else delete out.crop
+  return out
+}
+
+/**
+ * Fill: the displayed box stays exactly as it is (centre, size, angle) and the image covers
+ * it, with the largest centred crop of the original that has the box's aspect ratio and one
+ * uniform scale. Rounded as stored.
+ */
+export function fillRecord<T extends ImageRecord>(rec: T, size: Size): T {
+  const box = displayBox(rec, size)
+  const raw = largestCentredCrop(size, box.width / box.height)
+  const crop = isWholeImage(raw, size) ? undefined : roundCrop(raw)
+  const shown = crop ?? wholeRect(size)
+  return placeCentred(rec, box.centre, box.width, box.height, box.width / shown.width, crop)
+}
+
+/**
+ * Fit: the whole original (no crop) at the largest uniform scale at which it fits inside the
+ * displayed box, centred on the box's centre, same angle. The box shrinks to the image's
+ * aspect ratio. Rounded as stored.
+ */
+export function fitRecord<T extends ImageRecord>(rec: T, size: Size): T {
+  const box = displayBox(rec, size)
+  const scale = fitInsideScale(size, box)
+  return placeCentred(rec, box.centre, size.width * scale, size.height * scale, scale, undefined)
+}

@@ -355,6 +355,19 @@ button:disabled {
 .inspector-btn:disabled {
   opacity: 0.5;
 }
+.image-tools {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.crop-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.inspector-note.crop-help {
+  margin: 0;
+}
 .inspector-note {
   margin: -4px 0 0;
   font-size: 11.5px;

@@ -65,7 +65,10 @@ export function Overlays({ editor }: { editor: Editor }) {
     }
   }, [editor])
 
-  const openPicker = () => fileInput.current?.click()
+  const openPicker = () => {
+    editor.applyCrop() // like every command: an open crop is applied first
+    fileInput.current?.click()
+  }
   const readOnly = state?.readOnly ?? null
   const showEmpty = !!state && state.ready && readOnly === null && state.objectCount === 0 && !state.editingText && state.tool !== 'frame'
   const notice = state?.notice ?? null
@@ -114,7 +117,7 @@ export function Overlays({ editor }: { editor: Editor }) {
       {state?.ready && (
         // The inspector on top and the layer list anchored at the bottom share one column, so they never overlap.
         <div className="side-stack">
-          {state.selection && <Inspector editor={editor} selection={state.selection} />}
+          {state.selection && <Inspector editor={editor} selection={state.selection} cropping={state.cropping} />}
           {state.layers.length > 0 && (
             <LayerPanel editor={editor} layers={state.layers} readOnly={readOnly !== null} open={layersOpen} onToggleOpen={toggleLayers} />
           )}

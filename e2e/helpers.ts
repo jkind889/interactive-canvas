@@ -24,12 +24,33 @@ function chunk(type: string, data: Buffer): Buffer {
   return Buffer.concat([len, body, crc])
 }
 
-/** A valid RGB PNG with a diagonal gradient, so different sizes/seeds differ byte-for-byte. */
-export function pngBuffer(width: number, height: number, seed = 0): Buffer {
+/** Quadrant base colours of `quadrantsPng`: top-left, top-right, bottom-left, bottom-right. */
+export const QUADRANT_COLOURS = { tl: [220, 40, 40], tr: [40, 180, 60], bl: [40, 70, 220], br: [230, 200, 30] } as const
+
+/**
+ * Four coloured quadrants (see `QUADRANT_COLOURS`) overlaid with an 8-pixel checker that
+ * darkens every other cell, so that a region of the canvas changes visibly if the image moves
+ * by even one pixel, and so that a sample says which part of the original it shows.
+ */
+function quadrantPixel(x: number, y: number, width: number, height: number): readonly number[] {
+  const q = y < height / 2 ? (x < width / 2 ? QUADRANT_COLOURS.tl : QUADRANT_COLOURS.tr) : x < width / 2 ? QUADRANT_COLOURS.bl : QUADRANT_COLOURS.br
+  const dark = (Math.floor(x / 8) + Math.floor(y / 8)) % 2 === 1
+  return dark ? q.map((c) => Math.round(c * 0.55)) : q
+}
+
+/** A valid RGB PNG with a diagonal gradient, so different sizes/seeds differ byte-for-byte; or `quadrantsPng`'s pattern. */
+export function pngBuffer(width: number, height: number, seed = 0, pattern: 'gradient' | 'quadrants' = 'gradient'): Buffer {
   const raw = Buffer.alloc((width * 3 + 1) * height)
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = y * (width * 3 + 1) + 1 + x * 3
+      if (pattern === 'quadrants') {
+        const [r, g, b] = quadrantPixel(x, y, width, height)
+        raw[i] = r!
+        raw[i + 1] = g!
+        raw[i + 2] = b!
+        continue
+      }
       raw[i] = Math.floor((x / width) * 255)
       raw[i + 1] = (120 + seed * 40) % 256
       raw[i + 2] = Math.floor((y / height) * 255)
@@ -212,6 +233,8 @@ export interface SeedAsset {
   width: number
   height: number
   seed?: number
+  /** The pixels: a gradient (default), or coloured quadrants with a checker (for position checks). */
+  pattern?: 'gradient' | 'quadrants'
 }
 
 /** An app-origin page that does not run the app, so storage can be prepared before the app loads. */
@@ -221,7 +244,7 @@ export async function openBlank(page: Page) {
 }
 
 const assetPayload = (assets: readonly SeedAsset[]) =>
-  assets.map((a) => ({ id: a.id, name: a.name, type: 'image/png', base64: pngBuffer(a.width, a.height, a.seed ?? 0).toString('base64') }))
+  assets.map((a) => ({ id: a.id, name: a.name, type: 'image/png', base64: pngBuffer(a.width, a.height, a.seed ?? 0, a.pattern).toString('base64') }))
 
 /**
  * Writes a board exactly as milestone 1 did: through the frozen copy of that build's own
@@ -282,6 +305,7 @@ export interface StoredObject {
   fontSize?: number
   width?: number
   text?: string
+  crop?: { x: number; y: number; width: number; height: number }
 }
 export interface StoredFrame {
   id: string

@@ -691,3 +691,30 @@ describe('locked items', () => {
     expect((await store.load())?.doc).toEqual(doc)
   })
 })
+
+describe('cropped images', () => {
+  const croppedFirst = (doc: BoardDoc): BoardDoc => ({
+    ...doc,
+    objects: doc.objects.map((o, i) => (i === 0 && o.type === 'image' ? { ...o, crop: { x: 1.5, y: 2, width: 30, height: 40.25 } } : o)),
+  })
+
+  it('a frameless cropped board stays wire version 1 in a version 1 database, and round-trips the crop', async () => {
+    const { factory, store } = newStore()
+    await store.save(croppedFirst(docWith('a1')), ABSENT, having(asset('a1', 1)))
+    const raw = await readRaw(factory)
+    expect(raw.version).toBe(1)
+    expect(raw.row!.doc.version).toBe(1)
+    const objects = raw.row!.doc.objects as Array<Record<string, unknown>>
+    expect(objects[0]!.crop).toEqual({ x: 1.5, y: 2, width: 30, height: 40.25 })
+    expect(Object.keys(objects[1]!)).not.toContain('crop')
+    expect((await store.load())?.doc).toEqual(croppedFirst(docWith('a1')))
+  })
+
+  it('a framed cropped board needs no further upgrade', async () => {
+    const { factory, store } = newStore()
+    const doc = croppedFirst(withFrame(docWith('a1')))
+    await store.save(doc, ABSENT, having(asset('a1', 1)))
+    expect((await readRaw(factory)).version).toBe(2)
+    expect((await store.load())?.doc).toEqual(doc)
+  })
+})

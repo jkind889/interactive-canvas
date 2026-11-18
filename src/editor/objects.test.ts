@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parseDoc, serializeDoc, createEmptyDoc } from '../model/doc.ts'
 import type { FrameRecord, ImageRecord, TextRecord } from '../model/types.ts'
-import { centerOf, createFrame, createObject, frameNameOf, idOf, isFrame, isLocked, normalizeTextScale, ownerOf, setFrameName, setLocked, setOwner, toFrameRecord, toRecord } from './objects.ts'
+import { centerOf, createFrame, createObject, frameNameOf, idOf, imageSizeOf, isFrame, isLocked, normalizeTextScale, ownerOf, setFrameName, setImageCrop, setLocked, setOwner, toFrameRecord, toRecord } from './objects.ts'
 
 vi.mock('fabric', () => import('./testing/fakeFabric.ts'))
 
@@ -186,5 +186,68 @@ describe('locking', () => {
   it('a locked record survives the stored document both ways', () => {
     const doc = { ...createEmptyDoc(), objects: [toRecord(make(image({ locked: true })))!] }
     expect(parseDoc(JSON.parse(JSON.stringify(serializeDoc(doc))))?.objects[0]).toEqual(image({ locked: true }))
+  })
+})
+
+describe('cropped images', () => {
+  // The fake element is 200x100 source pixels.
+  const crop = { x: 20, y: 10, width: 100, height: 60 }
+
+  it('a crop round-trips: Fabric shows only that part, and the record keeps it', () => {
+    const img = make(image({ crop }))
+    expect(img).toMatchObject({ cropX: 20, cropY: 10, width: 100, height: 60 })
+    expect(toRecord(img)).toEqual(image({ crop }))
+  })
+
+  it('left/top are the displayed box: the centre is the centre of the cropped box', () => {
+    const img = make(image({ crop, left: 0, top: 0, scaleX: 2, scaleY: 2 }))
+    expect(centerOf(img)).toEqual({ x: 100, y: 60 })
+  })
+
+  it('emits a fresh crop object every time, never shared between snapshots', () => {
+    const rec = image({ crop })
+    const img = make(rec)
+    const a = toRecord(img) as ImageRecord
+    const b = toRecord(img) as ImageRecord
+    expect(a.crop).toEqual(b.crop)
+    expect(a.crop).not.toBe(b.crop)
+    expect(a.crop).not.toBe(rec.crop)
+  })
+
+  it('an uncropped image, or a crop equal to the whole image, has no crop key', () => {
+    expect(toRecord(make(image()))).not.toHaveProperty('crop')
+    const whole = make(image({ crop: { x: 0, y: 0, width: 200, height: 100 } }))
+    expect(toRecord(whole)).not.toHaveProperty('crop')
+    expect(toRecord(whole)).toEqual(image())
+  })
+
+  it('reads the crop from Fabric, rounded like other stored numbers', () => {
+    const img = make(image())
+    Object.assign(img, { cropX: 1.23456, cropY: 0.5, width: 50.004999, height: 20 })
+    expect((toRecord(img) as ImageRecord).crop).toEqual({ x: 1.23, y: 0.5, width: 50, height: 20 })
+  })
+
+  it('a stored crop reaching outside the decoded image is clamped to it (C5); nothing left shows the image whole', () => {
+    const clamped = make(image({ crop: { x: 150, y: 50, width: 400, height: 400 } }))
+    expect(clamped).toMatchObject({ cropX: 150, cropY: 50, width: 50, height: 50 })
+    expect((toRecord(clamped) as ImageRecord).crop).toEqual({ x: 150, y: 50, width: 50, height: 50 })
+    const outside = make(image({ crop: { x: 500, y: 500, width: 10, height: 10 } }))
+    expect(outside).toMatchObject({ cropX: 0, cropY: 0, width: 200, height: 100 })
+    expect(toRecord(outside)).toEqual(image()) // same top-left and scale, shown whole
+  })
+
+  it('setImageCrop changes only what is shown; undefined shows the whole image', () => {
+    const img = make(image({ crop }))
+    setImageCrop(img as never, { x: 0, y: 0, width: 50, height: 50 })
+    expect(toRecord(img)).toEqual(image({ crop: { x: 0, y: 0, width: 50, height: 50 } }))
+    setImageCrop(img as never, undefined)
+    expect(toRecord(img)).toEqual(image())
+    expect(imageSizeOf(img as never)).toEqual({ width: 200, height: 100 })
+  })
+
+  it('survives a full save and load', () => {
+    const doc = { ...createEmptyDoc(), objects: [toRecord(make(image({ crop })))!] }
+    const loaded = parseDoc(JSON.parse(JSON.stringify(serializeDoc(doc))))
+    expect(loaded?.objects).toEqual([image({ crop })])
   })
 })

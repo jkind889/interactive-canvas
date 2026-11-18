@@ -22,12 +22,27 @@ export interface RecordBase {
   locked?: true
 }
 
+/** A rectangle of an original image, in its source pixels ((0, 0) is its top-left). */
+export interface CropRect {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
 export interface ImageRecord extends RecordBase {
   type: 'image'
   /** Key into the asset store; bytes are never inlined in the document. */
   assetId: string
   scaleX: number
   scaleY: number
+  /**
+   * The visible part of the original image, in source pixels. Absent: the whole image. The
+   * original bytes are never changed. With a crop, `left`/`top` are the top-left of the
+   * displayed (cropped) box and the displayed size is `crop.width * scaleX` by
+   * `crop.height * scaleY`. Never stored when it is the whole image.
+   */
+  crop?: CropRect
 }
 
 export interface TextRecord extends RecordBase {

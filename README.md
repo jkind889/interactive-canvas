@@ -28,6 +28,7 @@ npm run dev        # http://localhost:5173
 - **Frames**: named rectangles that structure a board without forcing everything into pages (see below).
 - **Layers**: a list of everything on the board in stacking order, so that something completely covered can still be selected (see below).
 - **Locking**: lock a background image, a finished frame or anything else, so that it cannot be grabbed, moved or changed by accident while everything around it stays reachable (see below).
+- **Images: crop, fit and fill**: crop a reference image down to the part that matters without losing the original, change the crop later or undo it, and fit or fill an image to its box (see below).
 - Undo / redo for every canvas change. Esc, or switching away from the window, cancels a drag, resize or frame that is still in progress.
 - Autosave to this browser (IndexedDB), including the original image bytes. The header always says what the save state really is, including failures.
 - Fail-closed loading: nothing is editable or saved until the stored board has loaded. If it cannot be fully restored (an image fails to decode, the document is unreadable, or storage is unavailable) the board opens **read-only** with a visible reason, pan/zoom still work, and the stored document and image bytes are never rewritten or deleted.
@@ -83,6 +84,29 @@ A locked image, text or frame stays exactly where it is until you unlock it. It 
 - **It still belongs to its frame.** Moving the frame carries a locked image with it. "Select with contents" leaves locked things out, so they follow a move but are not scaled with the frame; like anything else, a locked item is no longer the frame's once the frame is resized so that it no longer contains it. Deleting a frame leaves its locked things on the board. Things can still be moved into or out of a locked frame, and its unlocked contents can be edited as usual.
 - Locking and unlocking are undo steps and are saved, like any other change. They never move anything or change what belongs to which frame.
 
+## Images: crop, fit and fill
+
+Select one image and the panel on the right shows **Crop**, **Fit** and **Fill**.
+
+### Crop
+
+- **Start** with **Crop**, or double-click the image (with the Select tool). The whole original appears in place, the part outside the crop is dimmed, and a box with eight handles shows what will be kept. Nothing on the board moves: the part you keep stays exactly where it was.
+- **Drag a handle** to move that edge or corner (any shape you like), or **drag inside the box** to move it over the image. The box always stays on the image and never gets smaller than 8 units a side.
+- **Apply** with Enter, **Done**, or by clicking anywhere outside the box (that click does nothing else). **Cancel** with Esc or **Cancel**: the image is exactly as it was and nothing is recorded.
+- Pan and zoom work as usual while cropping (wheel, Space-drag, middle button, the zoom keys and buttons). Every other key waits. Clicking a tool, a layer row, Undo or another button applies the crop first and then does what you clicked.
+- **Cropping never throws anything away.** The original image is kept whole; crop it again later and the whole original comes back, so you can widen the crop or drag it back out to the full image (the crop is then gone). A crop is one undo step.
+- A crop counts as resizing the image: if what is left has its centre outside the frame it belonged to, it no longer belongs to it (and joins a frame in front that does contain its centre, as when you resize it).
+
+### Fit and Fill
+
+Both keep the image where it is and work on its current box: what you see of it now.
+
+- **Fill** keeps the box exactly as it is and fills it with as much of the image as fits, centred. For example, a 600 x 400 photo cropped to its top-left corner as a square: Fill keeps the square and shows the middle 400 x 400 of the photo in it instead.
+- **Fit** shows the whole image again, as large as fits inside the box, centred on it. The square from the example becomes a 3:2 picture as wide as the square, centred where the square was. Since an image has no empty area, the box shrinks to the image's shape.
+- Each is one undo step. A button that would change nothing is greyed out. Fit counts as resizing for frame belonging, like a crop; Fill never changes what belongs to which frame.
+
+A locked image cannot be cropped, fitted or filled until it is unlocked.
+
 ## Storage, tabs and older builds
 
 Everything is stored in this browser's IndexedDB, for this origin (`http://localhost:5173` and `http://127.0.0.1:5173` are different origins and have separate boards).
@@ -101,7 +125,11 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - A new text box is wider than what you type into it (ten times its font size), and belonging goes by the centre of that box. A text started in the right part of a frame can therefore end up not belonging to it, and one started just left of a frame can end up belonging to it; drag the text, or narrow it with a side handle, to settle it. Whether a new text should instead belong to the frame that was clicked in is an open design question.
 - Touch input is not supported.
 - The layer list cannot be stepped through with the arrow keys (Tab and Enter work), and it is not laid out for windows shorter than about 600 px.
-- Locks are stored as an extra field that the previous build (milestone 1) does not know. It can still open a board without frames that has a lock, but it ignores the lock, and when it saves that board the lock is gone.
+- Locks and crops are stored as extra fields that any older build does not know (milestone 1, and the frames build from before locking): such a build reads only the fields it knows. Where it can still open the board (milestone 1 cannot open one that has frames), it ignores locks, and it shows a cropped image whole, at the same scale, with the original's top-left corner where the crop's top-left corner was (so the image is larger and its content shifts). When that build saves the board, the locks and crops are gone.
+- The padlock on a layer row is a button inside a list option. Some screen readers may not announce it, and each row has two Tab stops (the row and its padlock).
+- While cropping, the dimmed part of the image and the crop box are drawn over everything, including anything that lies on top of the image; the image itself keeps its place in the stacking order.
+- Starting a crop with the Hand tool selected switches to the Select tool (as from the Text and Frame tools), so the crop box can be dragged straight away.
+- A crop handle is grabbed within 8 screen pixels. On a very small crop box the handles cover the whole box, so it can be resized but not moved; zoom in to move it.
 - On the board itself nothing shows that something is locked, apart from the plain cursor over it and the fact that it does not respond; the padlock in the layer list does show it.
 - A locked item selected from the list is let go as soon as you press on it on the board, because the press goes to whatever lies beneath it (or starts a marquee).
 - "Select with contents" stays available for a frame that owns only locked things; it then selects the frame alone.
@@ -116,14 +144,14 @@ npm run test:e2e:install   # once: downloads Playwright's bundled Chromium
 npm run test:e2e           # starts its own dev server on :5199 and runs e2e/*.spec.ts
 ```
 
-- **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, and the `Editor` state machines (hydration, gestures, frames, layers, locking) on a small fake of Fabric, since jsdom has no canvas.
-- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `layers.spec.ts` (selecting covered objects from the layer list and Alt-dragging them, reordering, multi-selections built from the list, leaving a text edit, the panel's place on screen), `locking.spec.ts` (presses, marquees and Shift-click passing through locked things, a locked member travelling with its frame, the three ways to lock, undo, save and reload) and `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
+- **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, crop, Fit and Fill geometry, and the `Editor` state machines (hydration, gestures, frames, layers, locking, crop mode, Fit and Fill) on a small fake of Fabric, since jsdom has no canvas.
+- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `layers.spec.ts` (selecting covered objects from the layer list and Alt-dragging them, reordering, multi-selections built from the list, leaving a text edit, the panel's place on screen), `locking.spec.ts` (presses, marquees and Shift-click passing through locked things, a locked member travelling with its frame, the three ways to lock, undo, save and reload), `images.spec.ts` (cropping by handles and by moving the box, on rotated and scaled images, proving with canvas pixel samples that the kept pixels do not move; cancelling; what a save and a reload see mid-crop; Fit and Fill; frame belonging; a cropped image in a multi-selection) and `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
 - Use a browser already on your machine instead of the bundled one with `PW_CHANNEL=msedge` or `PW_CHANNEL=chrome`; change the port with `E2E_PORT`.
 - Failure traces and screenshots go to `test-results/` (git-ignored).
 
 ## Keyboard shortcuts
 
-Shortcuts never fire while you are typing in a field or editing text. While a drag, resize or frame is in progress only `Esc` and the zoom keys respond.
+Shortcuts never fire while you are typing in a field or editing text. While a drag, resize or frame is in progress only `Esc` and the zoom keys respond. While cropping only `Enter`, `Esc`, the zoom keys and `Space` respond.
 
 | Key                         | Action                         |
 | --------------------------- | ------------------------------ |
@@ -137,7 +165,9 @@ Shortcuts never fire while you are typing in a field or editing text. While a dr
 | `Ctrl/Cmd+[` / `]`          | Send to back / bring to front  |
 | `Ctrl/Cmd+Shift+L`          | Lock the selection; unlock a locked one |
 | `+` / `-` / `0` / `Shift+1` | Zoom in / out / 100% / fit     |
-| `Esc`                       | Cancel what is in progress; otherwise leave the tool, or deselect |
+| `Esc`                       | Cancel what is in progress (also a crop); otherwise leave the tool, or deselect |
+| `Enter` (while cropping)    | Apply the crop                 |
+| Double-click an image       | Crop it                        |
 
 Only the primary mouse button edits. The middle button pans. Holding Alt while pressing acts on the selected object even when something lies on top of it (see Layers); without Alt a press goes to the front-most object (inside the box of a multi-selection, to the selection), and a frame's label or outline wins either way. A locked object is never what a press goes to.
 
@@ -146,7 +176,7 @@ Only the primary mouse button edits. The middle button pans. Holding Alt while p
 - **Fabric.js 7** (MIT) renders and edits the canvas. React renders only the chrome (header, toolbar, inspector, layer list) and never touches Fabric objects.
 - `src/editor/Editor.ts` is the single bridge: it owns the Fabric canvas, history, assets and autosave, and exposes an immutable `EditorState` snapshot through `subscribe`/`getState` (`useSyncExternalStore`). Fabric's event callbacks only record facts; a finished gesture is settled in a microtask after Fabric's own mouse-up handling, and a save during a gesture stores the board from before it.
 - `src/editor/FrameCanvas.ts` extends Fabric's canvas for frames (what counts as a hit, Shift-click and marquee rules) and `src/editor/frameLayer.ts` holds the one geometry used both to draw a frame's outline and label and to hit them.
-- `src/model/` is pure and unit-tested: document types and validation, the frame ownership rules and scale limits (`frames.ts`), snapshot `History` (with coalescing), layer reordering, viewport math.
+- `src/model/` is pure and unit-tested: document types and validation, the frame ownership rules and scale limits (`frames.ts`), crop, Fit and Fill geometry (`crop.ts`), snapshot `History` (with coalescing), layer reordering, viewport math. `src/editor/cropLayer.ts` draws crop mode's box and handles from the same geometry that is hit.
 - `src/persistence/` has the IndexedDB store (document and image bytes written in one transaction, guarded by a revision token) and the `Autosaver` status machine.
 - `src/input/shortcuts.ts` maps key events to actions and decides when to stay out of the way.
 

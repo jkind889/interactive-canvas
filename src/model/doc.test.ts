@@ -309,3 +309,73 @@ describe('locked: an optional field on both wire versions', () => {
     expect(sceneEqual(scene, { ...scene, objects: [{ ...image, locked: undefined }, text] })).toBe(true)
   })
 })
+
+describe('crop: an optional image field on both wire versions', () => {
+  const crop = { x: 10, y: 20.5, width: 100, height: 60.25 }
+  const cropped: ImageRecord = { ...image, crop }
+
+  it('parses and round-trips a crop on wire version 1 (no frames) and version 2', () => {
+    const v1 = wire({ ...good(), objects: [cropped, text] })
+    expect(v1.version).toBe(1)
+    expect(parseDoc(v1)?.objects[0]).toEqual(cropped)
+    const v2 = wire({ ...framed(), objects: [{ ...cropped, frameId: 'f1' }, text] })
+    expect(v2.version).toBe(2)
+    expect(parseDoc(v2)?.objects[0]).toEqual({ ...cropped, frameId: 'f1' })
+  })
+
+  it('a crop does not need a newer wire version: a frameless cropped board is still version 1', () => {
+    expect(serializeDoc({ ...good(), objects: [cropped] }).version).toBe(1)
+  })
+
+  it('drops a malformed crop (the image is shown whole) without rejecting the board', () => {
+    const bad: unknown[] = [
+      null,
+      'x',
+      [],
+      [1, 2, 3, 4],
+      { x: 1, y: 2, width: 3 },
+      { x: -1, y: 0, width: 10, height: 10 },
+      { x: 0, y: -0.5, width: 10, height: 10 },
+      { x: 0, y: 0, width: 0, height: 10 },
+      { x: 0, y: 0, width: 10, height: -1 },
+      { x: 0, y: 0, width: Number.POSITIVE_INFINITY, height: 10 },
+      { x: '0', y: 0, width: 10, height: 10 },
+    ]
+    for (const c of bad) {
+      const parsed = parseDoc({ ...wireV1(), objects: [{ ...image, crop: c }, text] })
+      expect(parsed).not.toBeNull()
+      expect(parsed?.objects[0]).toEqual(image)
+      expect(parsed?.objects[0]).not.toHaveProperty('crop')
+    }
+  })
+
+  it('keeps only the four crop fields', () => {
+    const parsed = parseDoc({ ...wireV1(), objects: [{ ...image, crop: { ...crop, junk: true } }] })
+    expect((parsed?.objects[0] as ImageRecord).crop).toEqual(crop)
+  })
+
+  it('a text never gets a crop', () => {
+    const parsed = parseDoc({ ...wireV1(), objects: [{ ...text, crop }] })
+    expect(parsed?.objects[0]).not.toHaveProperty('crop')
+  })
+
+  it('serializes a fresh copy of the crop, and never stores an undefined crop', () => {
+    const doc: BoardDoc = { ...good(), objects: [cropped, { ...image, id: 'i2', crop: undefined }] }
+    const out = serializeDoc(doc)
+    const [first, second] = out.objects as ImageRecord[]
+    expect(first!.crop).toEqual(crop)
+    expect(first!.crop).not.toBe(crop)
+    expect(Object.keys(second!)).not.toContain('crop')
+    expect(JSON.stringify(out)).not.toContain('undefined')
+  })
+
+  it('sceneEqual compares crops by content: two snapshots of the same cropped image are equal; a changed crop is a change', () => {
+    const a = { frames: [], objects: [{ ...image, crop: { ...crop } }] }
+    const b = { frames: [], objects: [{ ...image, crop: { height: 60.25, width: 100, y: 20.5, x: 10 } }] }
+    expect(sceneEqual(a, b)).toBe(true)
+    expect(sceneEqual(a, { frames: [], objects: [{ ...image, crop: { ...crop, x: 11 } }] })).toBe(false)
+    expect(sceneEqual(a, { frames: [], objects: [image] })).toBe(false)
+    expect(sceneEqual({ frames: [], objects: [image] }, { frames: [], objects: [{ ...image, crop: undefined }] })).toBe(true)
+    expect(sceneEqual({ frames: [], objects: [{ ...image, crop: { ...crop, x: Number.NaN } }] }, { frames: [], objects: [{ ...image, crop: { ...crop, x: Number.NaN } }] })).toBe(true)
+  })
+})

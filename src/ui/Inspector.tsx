@@ -96,14 +96,76 @@ function FramePanel({ editor, selection }: { editor: Editor; selection: Selectio
   )
 }
 
-export function Inspector({ editor, selection }: { editor: Editor; selection: SelectionInfo }) {
+/** Crop, Fit and Fill for a single image. Disabled while it is locked, and Fit/Fill when they would change nothing. */
+function ImageTools({ editor, selection }: { editor: Editor; selection: SelectionInfo }) {
+  const image = selection.image
+  return (
+    <div className="image-tools" role="group" aria-label="Image tools">
+      <button
+        type="button"
+        className="secondary-btn inspector-btn"
+        aria-label="Crop image"
+        title="Crop: choose the part of the image to show (double-click the image)"
+        disabled={selection.locked}
+        onClick={() => editor.startCrop()}
+      >
+        Crop
+      </button>
+      <button
+        type="button"
+        className="secondary-btn inspector-btn"
+        aria-label="Fit image"
+        title="Fit: show the whole image inside its current box"
+        disabled={!image?.canFit}
+        onClick={() => editor.fitImage()}
+      >
+        Fit
+      </button>
+      <button
+        type="button"
+        className="secondary-btn inspector-btn"
+        aria-label="Fill image"
+        title="Fill: cover the current box with the image, cropping what does not fit"
+        disabled={!image?.canFill}
+        onClick={() => editor.fillImage()}
+      >
+        Fill
+      </button>
+    </div>
+  )
+}
+
+/** While cropping, the inspector shows only how to finish the crop. */
+function CropPanel({ editor }: { editor: Editor }) {
+  return (
+    <aside className="floating inspector" aria-label="Selection">
+      <div className="inspector-title">Crop image</div>
+      <p className="inspector-note crop-help" data-testid="crop-help">
+        Drag the handles or the box. Enter applies, Esc cancels.
+      </p>
+      <div className="crop-actions">
+        <button type="button" className="secondary-btn inspector-btn" onClick={() => editor.cancelCrop()}>
+          Cancel
+        </button>
+        <button type="button" className="primary-btn inspector-btn" onClick={() => editor.applyCrop()}>
+          Done
+        </button>
+      </div>
+    </aside>
+  )
+}
+
+export function Inspector({ editor, selection, cropping = false }: { editor: Editor; selection: SelectionInfo; cropping?: boolean }) {
   const sizeId = useId()
   const isFrame = selection.kind === 'frame'
+  if (cropping) return <CropPanel editor={editor} />
   return (
     <aside className="floating inspector" aria-label="Selection">
       <div className="inspector-title">{heading(selection)}</div>
 
       {isFrame && <FramePanel editor={editor} selection={selection} />}
+
+      {selection.kind === 'image' && <ImageTools editor={editor} selection={selection} />}
 
       {selection.kind === 'text' && selection.fontSize !== null && (
         <div className="inspector-row">
