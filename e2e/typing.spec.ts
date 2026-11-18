@@ -485,3 +485,99 @@ test.describe('slice 3 review follow-ups', () => {
     expect(errors).toEqual([])
   })
 })
+
+test.describe('a pending bold never survives onto a heading line (QA final pass)', () => {
+  /** A new blank text from a Text tool click, being typed into. */
+  async function newText(page: Page) {
+    const { errors, at } = await open(page, [])
+    await page.keyboard.press('t')
+    await page.mouse.click(at(150, 150).x, at(150, 150).y)
+    return errors
+  }
+  const only = async (page: Page) => storedWhen(page, (d) => d.objects.length === 1).then((d) => d.objects[0]!)
+
+  for (const mode of ['control', 'panel H1', '`# `', '`## `'] as const) {
+    test(`${mode}: "Title", Enter, "Body" stores a plain body line and no bold at all`, async ({ page }) => {
+      const errors = await newText(page)
+      if (mode !== 'control') await page.keyboard.press('Control+b')
+      if (mode === '`# `') await typeKeys(page, '# ')
+      else if (mode === '`## `') await typeKeys(page, '## ')
+      else await button(page, 'H1 (Heading 1)').click()
+      await expect(button(page, 'Bold')).toHaveAttribute('aria-pressed', 'true') // the heading's own bold
+      await expect(button(page, 'Bold')).toBeDisabled()
+      await typeKeys(page, 'Title')
+      await page.keyboard.press('Enter')
+      await expect(button(page, 'Bold')).toHaveAttribute('aria-pressed', 'false') // the new normal line is plain
+      await typeKeys(page, 'Body')
+      await page.keyboard.press('Escape')
+      const rec = await only(page)
+      expect(rec).toMatchObject({ text: 'Title\nBody', headings: [mode === '`## `' ? 2 : 1] })
+      expect(rec.spans).toBeUndefined()
+      expect(errors).toEqual([])
+    })
+  }
+
+  test('bold pending, H1 from the panel, then Enter straight away (nothing typed on the heading line): the next line is plain', async ({ page }) => {
+    const errors = await newText(page)
+    await page.keyboard.press('Control+b')
+    await button(page, 'H1 (Heading 1)').click()
+    await page.keyboard.press('Enter')
+    await expect(button(page, 'Bold')).toHaveAttribute('aria-pressed', 'false')
+    await typeKeys(page, 'Body')
+    await page.keyboard.press('Escape')
+    const rec = await only(page)
+    expect(rec).toMatchObject({ text: '\nBody', headings: [1] })
+    expect(rec.spans).toBeUndefined()
+    expect(errors).toEqual([])
+  })
+
+  test('italic and bold pending, then H1: the heading and the line after it are italic, nothing is stored bold', async ({ page }) => {
+    const errors = await newText(page)
+    await page.keyboard.press('Control+i')
+    await page.keyboard.press('Control+b')
+    await button(page, 'H1 (Heading 1)').click()
+    await typeKeys(page, 'Title')
+    await page.keyboard.press('Enter')
+    await expect(button(page, 'Italic')).toHaveAttribute('aria-pressed', 'true')
+    await expect(button(page, 'Bold')).toHaveAttribute('aria-pressed', 'false')
+    await typeKeys(page, 'Body')
+    await page.keyboard.press('Escape')
+    const rec = await only(page)
+    expect(rec).toMatchObject({ text: 'Title\nBody', headings: [1], spans: [{ start: 0, end: 10, italic: true }] })
+    expect(errors).toEqual([])
+  })
+
+  test('Backspace straight after `# ` brings back the literal characters and the pending bold: what is typed next is bold', async ({ page }) => {
+    const errors = await newText(page)
+    await page.keyboard.press('Control+b')
+    await typeKeys(page, '# ')
+    await page.keyboard.press('Backspace')
+    expect(await textarea(page)).toMatchObject({ value: '# ', start: 2, end: 2 })
+    await expect(button(page, 'Bold')).toHaveAttribute('aria-pressed', 'true')
+    await expect(button(page, 'Bold')).toBeEnabled() // a normal line again: bold can be chosen
+    await typeKeys(page, 'x')
+    await page.keyboard.press('Escape')
+    const rec = await only(page)
+    expect(rec).toMatchObject({ text: '# x', spans: [{ start: 0, end: 3, bold: true }] })
+    expect(rec.headings).toBeUndefined()
+    expect(errors).toEqual([])
+  })
+
+  test('a normal line with bold pending joined into the heading above it (Backspace at its start): what follows the heading is plain', async ({ page }) => {
+    const errors = await newText(page)
+    await button(page, 'H1 (Heading 1)').click()
+    await typeKeys(page, 'Title')
+    await page.keyboard.press('Enter')
+    await page.keyboard.press('Control+b') // on the new, normal line
+    await expect(button(page, 'Bold')).toHaveAttribute('aria-pressed', 'true')
+    await page.keyboard.press('Backspace') // joins it into "Title"
+    await typeKeys(page, 'A')
+    await page.keyboard.press('Enter')
+    await typeKeys(page, 'Body')
+    await page.keyboard.press('Escape')
+    const rec = await only(page)
+    expect(rec).toMatchObject({ text: 'TitleA\nBody', headings: [1] })
+    expect(rec.spans).toBeUndefined()
+    expect(errors).toEqual([])
+  })
+})

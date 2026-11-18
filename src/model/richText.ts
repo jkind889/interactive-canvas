@@ -590,13 +590,28 @@ export function formatAtCaret(text: string, fmt: TextFormatting, caret: number, 
  * on a heading line cannot be changed. Returns the new pending marks ({}: none).
  */
 export function togglePendingMark(text: string, fmt: TextFormatting, caret: number, pending: PendingMarks, mark: Mark): PendingMarks {
-  if (mark === 'bold' && isHeadingLine(fmt.headings, lineAt(lineBounds(text), caret))) return pending
+  if (mark === 'bold' && caretOnHeading(text, fmt, caret)) return pending
   const natural = marksAtCaret(text, fmt, caret)
   const want = !(pending[mark] ?? natural[mark])
   const next: PendingMarks = { ...pending }
   if (want === natural[mark]) delete next[mark]
   else next[mark] = want
   return next
+}
+
+/** The caret's line is a heading line, where bold is the heading's own and cannot be chosen. */
+const caretOnHeading = (text: string, fmt: TextFormatting, caret: number) => isHeadingLine(fmt.headings, lineAt(lineBounds(text), caret))
+
+/**
+ * The pending marks that may stand at a caret: on a heading line a pending bold (on or off) is
+ * dropped, because a heading line is always bold; every other pending mark is kept as it is.
+ * Returns `pending` itself when nothing is dropped.
+ */
+export function pendingMarksAt(text: string, fmt: TextFormatting, caret: number, pending: PendingMarks): PendingMarks {
+  if (pending.bold === undefined || !caretOnHeading(text, fmt, caret)) return pending
+  const { bold: _dropped, ...rest } = pending
+  void _dropped
+  return rest
 }
 
 /** A typed character's marks (a mask, see `markMask`) with the pending choices applied. */

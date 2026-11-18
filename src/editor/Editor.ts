@@ -32,6 +32,7 @@ import {
   formatOfText,
   marksAtCaret,
   matchTypingShortcut,
+  pendingMarksAt,
   setHeading as setHeadingOfRange,
   setHeadingEverywhere,
   toggleMark as toggleMarkOfRange,
@@ -551,6 +552,22 @@ export class Editor {
   }
 
   /**
+   * A heading line is always bold, so bold is never pending while the caret is on one: called
+   * wherever the caret's line can become a heading while marks are pending (the heading
+   * command, and every text change, which covers the `# ` shortcut and joining lines). Only a
+   * pending bold is dropped; italic, underline and strikethrough stay. It does not come back
+   * if the line goes back to body text.
+   */
+  private dropPendingBoldOnHeading(tb: Textbox) {
+    const p = this.pending
+    if (!p || p.target !== tb || !tb.isEditing) return
+    const caret = selectedRange(tb)?.end
+    if (caret === undefined) return
+    const marks = pendingMarksAt(tb.text, readTextFormatting(tb), caret, p.marks)
+    if (marks !== p.marks) this.pending = Object.keys(marks).length > 0 ? { target: tb, marks } : null
+  }
+
+  /**
    * Refreshes only the selection info, and only tells React when it really changed: the caret
    * moving inside a text being edited fires often, mostly without changing what the
    * formatting controls show.
@@ -715,6 +732,9 @@ export class Editor {
         let edit = undefined as TextEdit | undefined
         reconcileTextFormatting(target, target.isEditing ? this.pendingFor(target) : undefined, (e) => (edit = e))
         if (edit && typed !== null) this.typingShortcut(target, edit, typed)
+        // The change (a `# ` shortcut, or Backspace joining a line into the heading above it)
+        // may have left the caret on a heading line: no pending bold there.
+        this.dropPendingBoldOnHeading(target)
       }
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
       this.queueSelectionSync()
@@ -1677,6 +1697,10 @@ export class Editor {
     if (!tb) return
     const range = tb.isEditing ? selectedRange(tb) : undefined
     this.formatText(tb, 'heading', (fmt, text) => (range ? setHeadingOfRange(text, fmt, level, range.start, range.end) : setHeadingEverywhere(text, fmt, level)))
+    if (tb.isEditing) {
+      this.dropPendingBoldOnHeading(tb) // the caret's line may now be a heading
+      this.syncSelection()
+    }
   }
 
   /** The font of the whole box, also while it is being edited. */

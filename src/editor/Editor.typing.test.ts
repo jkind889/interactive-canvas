@@ -463,3 +463,100 @@ describe('held formatting keys (auto-repeat)', () => {
     expect(rec()?.spans).toEqual([{ start: 0, end: 3, underline: true }])
   })
 })
+
+describe('a pending bold and a heading line (a heading is always bold, so bold is never pending on one)', () => {
+  /** A new blank text from the Text tool's command, being typed into at its start. */
+  async function blank() {
+    const ctx = await setup([])
+    ctx.editor.addText()
+    const tb = ctx.canvas.objects.at(-1) as Tb
+    withTextarea(tb)
+    tb.selectionStart = tb.selectionEnd = 0
+    const pending = () => (ctx.editor as unknown as { pending: { marks: Record<string, boolean> } | null }).pending?.marks ?? {}
+    return { ...ctx, tb, pending, made: () => ctx.scene()[0] as TextRecord }
+  }
+
+  it('the panel\'s heading: a pending bold is dropped, so the normal line after Enter is plain', async () => {
+    const { editor, tb, pending, made } = await blank()
+    editor.toggleMark('bold')
+    editor.setHeading(1)
+    expect(pending()).toStrictEqual({})
+    await tick()
+    expect(editor.getState().selection?.text).toMatchObject({ heading: 1, boldFromHeading: true })
+    typeKeys(tb, 'Title\nBody')
+    await tick()
+    expect(editor.getState().selection?.text?.marks.bold).toBe('off')
+    tb.exitEditing()
+    expect(made()).toMatchObject({ text: 'Title\nBody', headings: [1] })
+    expect(made().spans).toBeUndefined()
+  })
+
+  for (const [marker, level] of [['# ', 1], ['## ', 2]] as const) {
+    it(`the \`${marker.trim()}\` shortcut: a pending bold is dropped, and the normal line after Enter is plain`, async () => {
+      const { editor, tb, pending, made } = await blank()
+      editor.toggleMark('bold')
+      typeKeys(tb, marker)
+      expect(pending()).toStrictEqual({})
+      typeKeys(tb, 'Title\nBody')
+      tb.exitEditing()
+      expect(made()).toMatchObject({ text: 'Title\nBody', headings: [level] })
+      expect(made().spans).toBeUndefined()
+    })
+  }
+
+  it('a line joined into the heading above it (Backspace at its start): a pending bold is dropped', async () => {
+    const { editor, tb, pending, made } = await blank()
+    editor.setHeading(1)
+    typeKeys(tb, 'Title\n')
+    editor.toggleMark('bold') // on the new, normal line
+    expect(pending()).toStrictEqual({ bold: true })
+    backspace(tb) // joins it into "Title"
+    expect(pending()).toStrictEqual({})
+    typeKeys(tb, 'A\nBody')
+    tb.exitEditing()
+    expect(made()).toMatchObject({ text: 'TitleA\nBody', headings: [1] })
+    expect(made().spans).toBeUndefined()
+  })
+
+  for (const how of ['panel', 'shortcut'] as const) {
+    it(`italic pending before the heading (${how}) still applies, to the heading and to the line after it; only bold is dropped`, async () => {
+      const { editor, tb, pending, made } = await blank()
+      editor.toggleMark('italic')
+      editor.toggleMark('bold')
+      if (how === 'panel') editor.setHeading(1)
+      else typeKeys(tb, '# ')
+      expect(pending()).toStrictEqual({ italic: true })
+      typeKeys(tb, 'Title\nBody')
+      tb.exitEditing()
+      expect(made()).toStrictEqual({ ...made(), text: 'Title\nBody', headings: [1], spans: [{ start: 0, end: 10, italic: true }] })
+    })
+  }
+
+  it('a pending "bold off" next to bold text, then a heading: only the bold is dropped', async () => {
+    const { editor, canvas, tb } = await setup([text({ text: 'ab', spans: [{ start: 0, end: 2, bold: true }] })])
+    edit(canvas, tb)
+    editor.toggleMark('bold') // off, for what is typed next
+    editor.toggleMark('underline')
+    const pending = () => (editor as unknown as { pending: { marks: Record<string, boolean> } | null }).pending?.marks
+    expect(pending()).toStrictEqual({ bold: false, underline: true })
+    editor.setHeading(2)
+    expect(pending()).toStrictEqual({ underline: true })
+    tb.exitEditing()
+  })
+
+  it('Backspace straight after `# ` restores the literal text and the pending bold; what is typed next is bold on that normal line', async () => {
+    const { editor, tb, pending, made } = await blank()
+    editor.toggleMark('bold')
+    typeKeys(tb, '# ')
+    expect(pending()).toStrictEqual({})
+    backspace(tb)
+    expect(tb.text).toBe('# ')
+    expect(pending()).toStrictEqual({ bold: true })
+    await tick()
+    expect(editor.getState().selection?.text?.marks.bold).toBe('on')
+    typeKeys(tb, 'x')
+    tb.exitEditing()
+    expect(made()).toStrictEqual({ ...made(), text: '# x', spans: [{ start: 0, end: 3, bold: true }] })
+    expect(made().headings).toBeUndefined()
+  })
+})

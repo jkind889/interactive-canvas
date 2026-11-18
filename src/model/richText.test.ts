@@ -25,6 +25,7 @@ import {
   textAfterEdit,
   toggleMark,
   togglePendingMark,
+  pendingMarksAt,
   withPendingMarks,
 } from './richText.ts'
 import type { Mark, TextFormatting } from './richText.ts'
@@ -718,5 +719,25 @@ describe('typing shortcuts: what they leave', () => {
   it('never produces a carriage return', () => {
     expect(run('a\r\n**b**\r\nc', 8, '*').text).toBe('a\r\nb\r\nc')
     expect(run('a\n**b**\nc', 7, '*').text).not.toContain('\r')
+  })
+})
+
+describe('pending marks that may stand at a caret', () => {
+  const fmt: TextFormatting = { headings: [1] } // "Title" is a heading, "body" is not
+  const text = 'Title\nbody'
+
+  it('on a heading line a pending bold (on or off) is dropped; every other pending mark is kept', () => {
+    expect(pendingMarksAt(text, fmt, 3, { bold: true })).toStrictEqual({})
+    expect(pendingMarksAt(text, fmt, 5, { bold: false, italic: true, underline: false, strike: true })).toStrictEqual({ italic: true, underline: false, strike: true })
+    expect(pendingMarksAt('', { headings: [2] }, 0, { bold: true, italic: true })).toStrictEqual({ italic: true }) // an empty heading line
+  })
+
+  it('on a normal line nothing changes, and the same object comes back when nothing is dropped', () => {
+    const pending = { bold: true, italic: true }
+    expect(pendingMarksAt(text, fmt, 6, pending)).toBe(pending) // start of "body"
+    expect(pendingMarksAt(text, fmt, 10, pending)).toBe(pending)
+    const noBold = { italic: true }
+    expect(pendingMarksAt(text, fmt, 3, noBold)).toBe(noBold)
+    expect(pendingMarksAt(text, {}, 3, pending)).toBe(pending)
   })
 })
