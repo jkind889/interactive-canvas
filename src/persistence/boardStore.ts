@@ -1,10 +1,35 @@
-import { parseDoc, serializeDoc } from '../model/doc.ts'
+import { parseDoc, referencedAssetIds, serializeDoc } from '../model/doc.ts'
+import { newId } from '../model/id.ts'
 import type { BoardDoc, StoredAsset, StoredDoc } from '../model/types.ts'
+
+/**
+ * What a tab believes is stored, captured when it loaded or last saved. Every write
+ * re-checks it inside its own transaction, so a tab whose view is stale can never
+ * overwrite (or prune under) a board another tab has changed.
+ */
+export type RevisionToken =
+  /** No row at all. */
+  | { kind: 'absent' }
+  /** A row written by this build: an opaque id that changes on every write. */
+  | { kind: 'rev'; rev: string }
+  /**
+   * A row written by milestone 1, which has no revision id. It is identified by its
+   * timestamp and its exact document, so two legacy rows that match are byte-identical
+   * documents and writing over them loses nothing. `docJson` is null when the stored
+   * document cannot be serialized; such a token never matches anything.
+   */
+  | { kind: 'legacy'; updatedAt: number | null; docJson: string | null }
+
+export const ABSENT: RevisionToken = { kind: 'absent' }
 
 export interface LoadedBoard {
   doc: BoardDoc
   assets: Map<string, StoredAsset>
+  token: RevisionToken
 }
+
+/** Supplies the original bytes of an asset this session has seen, if it still has them. */
+export type AssetBytes = (assetId: string) => StoredAsset | undefined
 
 /** Thrown by load() when something is stored but cannot be understood. */
 export class UnreadableBoardError extends Error {
@@ -14,26 +39,65 @@ export class UnreadableBoardError extends Error {
   }
 }
 
+/** The database was written by a newer build; this one must neither read nor write it. */
+export class NewerBoardError extends Error {
+  constructor(message = 'This board was saved by a newer version of yuriful.') {
+    super(message)
+    this.name = 'NewerBoardError'
+  }
+}
+
+/** The stored board is not the one this tab loaded or last saved. Nothing was written. */
+export class BoardConflictError extends Error {
+  constructor(message = 'This board was changed in another tab.') {
+    super(message)
+    this.name = 'BoardConflictError'
+  }
+}
+
+/** The document references an image whose bytes are neither stored nor available. Nothing was written. */
+export class MissingAssetError extends Error {
+  constructor(message = 'An image on this board has no stored data, so the board was not saved.') {
+    super(message)
+    this.name = 'MissingAssetError'
+  }
+}
+
+/** Storage did not become available in time (another tab is holding it). Nothing was written; retry later. */
+export class StorageBusyError extends Error {
+  constructor(message = 'Storage is held by another yuriful tab. Close other yuriful tabs, then Retry.') {
+    super(message)
+    this.name = 'StorageBusyError'
+  }
+}
+
 export interface BoardStore {
-  /** Resolves null when nothing has been saved yet. */
+  /** Resolves null when nothing has been saved yet (the token is then `ABSENT`). */
   load(): Promise<LoadedBoard | null>
-  /** Atomically writes the document together with any new asset bytes. */
-  save(doc: BoardDoc, newAssets: readonly StoredAsset[]): Promise<void>
-  /** Best-effort cleanup of asset bytes the document no longer references. */
-  pruneAssets(keep: ReadonlySet<string>): Promise<void>
+  /**
+   * Atomically writes the document, provided the stored board still matches `expected`,
+   * together with the bytes of any referenced asset that is not stored. Resolves with
+   * the token of the new revision only once the write is durable.
+   */
+  save(doc: BoardDoc, expected: RevisionToken, bytes: AssetBytes): Promise<RevisionToken>
+  /** Best-effort cleanup of asset bytes the document no longer references. Does nothing when `expected` is stale. */
+  pruneAssets(keep: ReadonlySet<string>, expected: RevisionToken): Promise<void>
 }
 
 const DB_NAME = 'yuriful'
-const DB_VERSION = 1
+/** Version of a database that holds (or has held) a board with frames. Milestone 1 cannot open it. */
+const FENCED_DB_VERSION = 2
 const BOARDS = 'boards'
 const ASSETS = 'assets'
-/** Milestone 1 has a single board; the key leaves room for a board list later. */
+/** There is a single board; the key leaves room for a board list later. */
 const CURRENT_BOARD = 'current'
+const DEFAULT_DEADLINE_MS = 5000
 
-/** As written. On read, `doc` is untrusted and goes through parseDoc. */
+/** As written. On read every field is untrusted. */
 interface BoardRow {
   id: string
   doc: StoredDoc
+  rev: string
   updatedAt: number
 }
 
@@ -41,6 +105,7 @@ const describe = (e: unknown, fallback: string) => (e instanceof Error && e.mess
 
 /** instanceof breaks across realms (iframes, test environments); the tag does not. */
 const isArrayBuffer = (v: unknown): v is ArrayBuffer => Object.prototype.toString.call(v) === '[object ArrayBuffer]'
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
 function request<T>(req: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -57,75 +122,215 @@ function transactionDone(tx: IDBTransaction): Promise<void> {
   })
 }
 
+function abortQuietly(tx: IDBTransaction) {
+  try {
+    tx.abort()
+  } catch {
+    /* already finished */
+  }
+}
+
+function tokenOf(row: unknown): RevisionToken {
+  if (!isRecord(row)) return ABSENT
+  if (typeof row.rev === 'string') return { kind: 'rev', rev: row.rev }
+  let docJson: string | null
+  try {
+    docJson = JSON.stringify(row.doc) ?? null
+  } catch {
+    docJson = null
+  }
+  return { kind: 'legacy', updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : null, docJson }
+}
+
+/** Different kinds never match, so a legacy write over a revisioned row (or the reverse) is always a mismatch. */
+export function tokensMatch(actual: RevisionToken, expected: RevisionToken): boolean {
+  if (actual.kind === 'absent') return expected.kind === 'absent'
+  if (actual.kind === 'rev') return expected.kind === 'rev' && actual.rev === expected.rev
+  return (
+    expected.kind === 'legacy' &&
+    actual.docJson !== null &&
+    actual.docJson === expected.docJson &&
+    actual.updatedAt !== null &&
+    actual.updatedAt === expected.updatedAt
+  )
+}
+
+function ensureStores(db: IDBDatabase) {
+  if (!db.objectStoreNames.contains(BOARDS)) db.createObjectStore(BOARDS, { keyPath: 'id' })
+  if (!db.objectStoreNames.contains(ASSETS)) db.createObjectStore(ASSETS, { keyPath: 'id' })
+}
+
+/**
+ * The single write routine. Runs entirely inside `tx` (which must cover both stores)
+ * and throws without having put the row when anything is wrong; the caller aborts.
+ */
+async function writeBoard(tx: IDBTransaction, doc: BoardDoc, wire: StoredDoc, expected: RevisionToken, bytes: AssetBytes): Promise<string> {
+  const boards = tx.objectStore(BOARDS)
+  const assets = tx.objectStore(ASSETS)
+  const row: unknown = await request(boards.get(CURRENT_BOARD))
+  if (!tokensMatch(tokenOf(row), expected)) throw new BoardConflictError()
+  // A document is never written with a reference that has no stored bytes.
+  for (const id of referencedAssetIds(doc.objects)) {
+    if ((await request(assets.getKey(id))) !== undefined) continue
+    const asset = bytes(id)
+    if (!asset) throw new MissingAssetError()
+    assets.put(asset)
+  }
+  const next: BoardRow = { id: CURRENT_BOARD, doc: wire, rev: newId(), updatedAt: Date.now() }
+  boards.put(next)
+  return next.rev
+}
+
+const isDomainError = (e: unknown) => e instanceof BoardConflictError || e instanceof MissingAssetError || e instanceof StorageBusyError
+
+export interface IndexedDbBoardStoreOptions {
+  /** How long a save or open may wait for another tab before failing with a retryable error. */
+  deadlineMs?: number
+}
+
 export class IndexedDbBoardStore implements BoardStore {
   private dbPromise: Promise<IDBDatabase> | null = null
+  private readonly deadlineMs: number
+  /** Promotion requests this store gave up on that are still queued in the browser. */
+  private abandonedFences = 0
+  private fenceSeq = 0
 
-  constructor(private readonly factory: IDBFactory | undefined = globalThis.indexedDB) {}
+  constructor(
+    private readonly factory: IDBFactory | undefined = globalThis.indexedDB,
+    opts: IndexedDbBoardStoreOptions = {},
+  ) {
+    this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS
+  }
 
   private open(): Promise<IDBDatabase> {
     if (!this.factory) return Promise.reject(new Error('IndexedDB is not available in this browser.'))
-    this.dbPromise ??= new Promise<IDBDatabase>((resolve, reject) => {
+    if (!this.dbPromise) {
+      const opening = this.connect(this.factory)
+      this.dbPromise = opening
+      // A failed open must be retryable.
+      opening.catch(() => {
+        if (this.dbPromise === opening) this.dbPromise = null
+      })
+    }
+    return this.dbPromise
+  }
+
+  /** Keeps `db` as this store's connection, giving it up as soon as another tab needs to change the version. */
+  private adopt(db: IDBDatabase): Promise<IDBDatabase> {
+    const mine = Promise.resolve(db)
+    const release = () => {
+      db.close()
+      if (this.dbPromise === mine) this.dbPromise = null
+    }
+    db.onversionchange = release
+    db.onclose = release
+    this.dbPromise = mine
+    return mine
+  }
+
+  /**
+   * Opens without naming a version: connects to whatever exists (version 1 or 2), or
+   * creates version 1 with the two stores. Never changes an existing database.
+   */
+  private connect(factory: IDBFactory): Promise<IDBDatabase> {
+    return new Promise<IDBDatabase>((resolve, reject) => {
       let req: IDBOpenDBRequest
       try {
-        req = this.factory!.open(DB_NAME, DB_VERSION)
+        req = factory.open(DB_NAME)
       } catch (e) {
         reject(new Error(describe(e, 'Could not open local storage.')))
         return
       }
-      req.onupgradeneeded = () => {
-        const db = req.result
-        if (!db.objectStoreNames.contains(BOARDS)) db.createObjectStore(BOARDS, { keyPath: 'id' })
-        if (!db.objectStoreNames.contains(ASSETS)) db.createObjectStore(ASSETS, { keyPath: 'id' })
-      }
+      let abandoned = false
+      // An open only has to wait when it is queued behind a promotion this store gave up on.
+      const timer =
+        this.abandonedFences > 0
+          ? setTimeout(() => {
+              abandoned = true
+              reject(new StorageBusyError())
+            }, this.deadlineMs)
+          : null
+      req.onupgradeneeded = () => ensureStores(req.result) // only when the database did not exist
       req.onsuccess = () => {
+        if (timer !== null) clearTimeout(timer)
         const db = req.result
-        db.onversionchange = () => {
+        if (abandoned) {
           db.close()
-          this.dbPromise = null
+          return
         }
+        if (db.version > FENCED_DB_VERSION) {
+          db.close()
+          reject(new NewerBoardError())
+          return
+        }
+        void this.adopt(db)
         resolve(db)
       }
-      req.onerror = () => reject(new Error(describe(req.error, 'Could not open local storage.')))
-      req.onblocked = () => reject(new Error('Local storage is blocked by another yuriful tab.'))
+      req.onerror = () => {
+        if (timer !== null) clearTimeout(timer)
+        reject(new Error(describe(req.error, 'Could not open local storage.')))
+      }
     })
-    // A failed open must be retryable.
-    this.dbPromise.catch(() => {
-      this.dbPromise = null
-    })
-    return this.dbPromise
   }
 
   async load(): Promise<LoadedBoard | null> {
     const db = await this.open()
     const tx = db.transaction([BOARDS, ASSETS], 'readonly')
-    const row = (await request(tx.objectStore(BOARDS).get(CURRENT_BOARD))) as { doc?: unknown } | undefined
-    if (!row) return null
-    const doc = parseDoc(row.doc)
+    const row: unknown = await request(tx.objectStore(BOARDS).get(CURRENT_BOARD))
+    if (row === undefined) return null
+    const doc = parseDoc(isRecord(row) ? row.doc : undefined)
     if (!doc) throw new UnreadableBoardError()
     const all = (await request(tx.objectStore(ASSETS).getAll())) as StoredAsset[]
     const assets = new Map<string, StoredAsset>()
     for (const a of all) {
       if (a && typeof a.id === 'string' && isArrayBuffer(a.bytes)) assets.set(a.id, a)
     }
-    return { doc, assets }
+    return { doc, assets, token: tokenOf(row) }
   }
 
-  async save(doc: BoardDoc, newAssets: readonly StoredAsset[]): Promise<void> {
+  async save(doc: BoardDoc, expected: RevisionToken, bytes: AssetBytes): Promise<RevisionToken> {
+    const wire = serializeDoc(doc)
+    let db = await this.open()
+    if (wire.version === 2 && db.version < FENCED_DB_VERSION) {
+      // The first save of a board with a frame: promote the database and write the
+      // board in one atomic step, so milestone 1 can never open (and flatten) it.
+      const fenced = await this.fence(doc, wire, expected, bytes)
+      if ('token' in fenced) return fenced.token
+      db = fenced.db // another tab promoted first: an ordinary write on that connection
+    }
+    const rev = await this.transact(db, (tx) => writeBoard(tx, doc, wire, expected, bytes))
+    return { kind: 'rev', rev }
+  }
+
+  async pruneAssets(keep: ReadonlySet<string>, expected: RevisionToken): Promise<void> {
     const db = await this.open()
-    const tx = db.transaction([BOARDS, ASSETS], 'readwrite')
-    const done = transactionDone(tx)
-    done.catch(() => {}) // surfaced via the await below; avoid an unhandled duplicate
+    await this.transact(db, async (tx) => {
+      const row: unknown = await request(tx.objectStore(BOARDS).get(CURRENT_BOARD))
+      // Stale view (the board changed since `keep` was computed): deleting could remove bytes it now needs.
+      if (!tokensMatch(tokenOf(row), expected)) return
+      const store = tx.objectStore(ASSETS)
+      const keys = (await request(store.getAllKeys())) as IDBValidKey[]
+      for (const k of keys) if (typeof k === 'string' && !keep.has(k)) store.delete(k)
+    })
+  }
+
+  /** Runs `work` in one read-write transaction over both stores; any failure aborts all of it. */
+  private async transact<T>(db: IDBDatabase, work: (tx: IDBTransaction) => Promise<T>): Promise<T> {
+    let tx: IDBTransaction
     try {
-      const assets = tx.objectStore(ASSETS)
-      for (const a of newAssets) assets.put(a)
-      const row: BoardRow = { id: CURRENT_BOARD, doc: serializeDoc(doc), updatedAt: Date.now() }
-      tx.objectStore(BOARDS).put(row)
+      tx = db.transaction([BOARDS, ASSETS], 'readwrite')
     } catch (e) {
-      try {
-        tx.abort()
-      } catch {
-        /* already finished */
-      }
+      throw new Error(describe(e, 'Could not write to local storage.'), { cause: e })
+    }
+    const done = transactionDone(tx)
+    done.catch(() => {}) // surfaced via the awaits below; avoid an unhandled duplicate
+    let result: T
+    try {
+      result = await work(tx)
+    } catch (e) {
+      abortQuietly(tx)
+      await done.catch(() => {})
+      if (isDomainError(e)) throw e
       throw new Error(describe(e, 'Could not write to local storage.'), { cause: e })
     }
     try {
@@ -133,15 +338,98 @@ export class IndexedDbBoardStore implements BoardStore {
     } catch (e) {
       throw new Error(describe(e, 'Could not write to local storage (it may be full).'), { cause: e })
     }
+    return result
   }
 
-  async pruneAssets(keep: ReadonlySet<string>): Promise<void> {
-    const db = await this.open()
-    const tx = db.transaction(ASSETS, 'readwrite')
-    const done = transactionDone(tx)
-    const store = tx.objectStore(ASSETS)
-    const keys = (await request(store.getAllKeys())) as IDBValidKey[]
-    for (const k of keys) if (typeof k === 'string' && !keep.has(k)) store.delete(k)
-    await done
+  /**
+   * Promotes the database to the fenced version and writes the board inside the very
+   * same `versionchange` transaction. Either both happen or neither does: a conflict,
+   * missing bytes, a failed write or an expired attempt aborts the upgrade, which leaves
+   * the row and the database version exactly as they were.
+   */
+  private fence(doc: BoardDoc, wire: StoredDoc, expected: RevisionToken, bytes: AssetBytes): Promise<{ token: RevisionToken } | { db: IDBDatabase }> {
+    const factory = this.factory
+    if (!factory) return Promise.reject(new Error('IndexedDB is not available in this browser.'))
+    const attempt = ++this.fenceSeq
+    return this.releaseConnection().then(
+      () =>
+        new Promise((resolve, reject) => {
+          let req: IDBOpenDBRequest
+          try {
+            req = factory.open(DB_NAME, FENCED_DB_VERSION)
+          } catch (e) {
+            reject(new Error(describe(e, 'Could not open local storage.')))
+            return
+          }
+          let expired = false
+          let rev: string | null = null
+          let failure: unknown = null
+          // `blocked` is not an error: the request waits for other tabs. We only wait so long.
+          const timer = setTimeout(() => {
+            expired = true
+            this.abandonedFences++
+            reject(new StorageBusyError())
+          }, this.deadlineMs)
+          const settleAbandoned = () => {
+            this.abandonedFences = Math.max(0, this.abandonedFences - 1)
+          }
+
+          req.onupgradeneeded = () => {
+            const tx = req.transaction
+            if (!tx) return
+            // An attempt that was given up on, or replaced by a newer one, must never write,
+            // however late it finally gets to run.
+            if (expired || attempt !== this.fenceSeq) {
+              abortQuietly(tx)
+              return
+            }
+            clearTimeout(timer) // from here on the outcome is decided by the transaction alone
+            ensureStores(req.result)
+            writeBoard(tx, doc, wire, expected, bytes).then(
+              (written) => {
+                rev = written
+              },
+              (e: unknown) => {
+                failure = e
+                abortQuietly(tx)
+              },
+            )
+          }
+          req.onsuccess = () => {
+            clearTimeout(timer)
+            const db = req.result
+            if (expired) {
+              settleAbandoned()
+              db.close()
+              return
+            }
+            void this.adopt(db)
+            if (rev !== null) resolve({ token: { kind: 'rev', rev } })
+            else resolve({ db }) // no upgrade ran: the database was already promoted
+          }
+          req.onerror = (event) => {
+            event.preventDefault()
+            clearTimeout(timer)
+            if (expired) {
+              settleAbandoned()
+              return
+            }
+            if (isDomainError(failure)) reject(failure)
+            else reject(new Error(describe(failure ?? req.error, 'Could not write to local storage (it may be full).'), { cause: failure ?? req.error }))
+          }
+        }),
+    )
+  }
+
+  /** Closes this store's own connection so that it cannot block its own version change. */
+  private async releaseConnection(): Promise<void> {
+    const current = this.dbPromise
+    this.dbPromise = null
+    if (!current) return
+    try {
+      ;(await current).close()
+    } catch {
+      /* it never opened */
+    }
   }
 }

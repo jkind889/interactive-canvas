@@ -244,5 +244,6 @@ describe('nextFrameName', () => {
   it('ignores absurdly large numbers instead of producing a repeated or exponent name', () => {
     expect(nextFrameName(['Frame 99999999999999999999', 'Frame 4'])).toBe('Frame 5')
     expect(nextFrameName(['Frame 999999999'])).toBe('Frame 1000000000')
+    expect(nextFrameName(['Frame 999999999', 'Frame 1000000000'])).toBe('Frame 1000000001') // its own output still counts
   })
 })

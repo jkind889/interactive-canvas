@@ -9,6 +9,7 @@ import type { BoardDoc, ObjectRecord, SaveState, TextRecord, Viewport } from '..
 import { fitImageScale, fitViewport, screenToScene, zoomAround } from '../model/viewport.ts'
 import type { Point, Rect } from '../model/viewport.ts'
 import { Autosaver } from '../persistence/autosave.ts'
+import { ABSENT } from '../persistence/boardStore.ts'
 import type { BoardStore } from '../persistence/boardStore.ts'
 import { hydrateBoard } from '../persistence/hydrate.ts'
 import { isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
@@ -114,6 +115,8 @@ export class Editor {
     this.autosaver = new Autosaver({
       store,
       getDoc: () => this.getDoc(),
+      bytes: (id) => this.assets.bytes(id),
+      onConflict: (message) => this.enterReadOnly(message),
       onStatus: (save) => {
         const failedNow = save.kind === 'error' && this.state.save.kind !== 'error'
         this.setState({ save })
@@ -159,35 +162,48 @@ export class Editor {
 
     switch (outcome.kind) {
       case 'empty':
-        this.autosaver.markLoaded(false)
+        this.autosaver.markLoaded(ABSENT)
         break
       case 'restored':
         if (outcome.doc.frames.length > 0) {
           // Interim (until the editor understands frames): a board that has frames is shown
           // read-only, exactly like any board this build cannot fully restore, so its
           // frames and ownership can never be flattened away by a save.
-          const message = 'This board contains frames, which this build cannot edit yet. It is read-only so nothing is lost.'
           this.showStoredBoard(outcome.doc)
-          this.autosaver.disable(message)
-          this.setState({ readOnly: message, tool: 'hand' })
+          this.enterReadOnly('This board contains frames, which this build cannot edit yet. It is read-only so nothing is lost.')
           break
         }
         this.showStoredBoard(outcome.doc)
-        this.autosaver.markLoaded(true)
+        this.autosaver.markLoaded(outcome.token)
         // Only after a complete, successful restore: drop bytes the stored board never referenced.
-        void this.store.pruneAssets(referencedAssetIds(outcome.doc.objects)).catch(() => {
+        // The store re-checks the token, so a prune that arrives after the board changed does nothing.
+        void this.store.pruneAssets(referencedAssetIds(outcome.doc.objects), outcome.token).catch(() => {
           /* cleanup only; unreferenced bytes are harmless */
         })
         break
       case 'blocked':
         // Fail closed: show what could be shown, but never write or prune anything.
         if (outcome.partial) this.showStoredBoard(outcome.partial)
-        this.autosaver.disable(outcome.message)
-        this.setState({ readOnly: outcome.message, tool: 'hand' }) // surfaced by a persistent banner
+        this.enterReadOnly(outcome.message) // surfaced by a persistent banner
         break
     }
     this.history.reset(this.snapshot())
     this.setState({ ready: true })
+    this.applyToolState()
+    this.syncState()
+  }
+
+  /**
+   * Makes the session read-only for good (a board that could not be loaded in full, or
+   * one another tab has changed since this tab's last save). Nothing is written from
+   * here on. Any text being typed stays visible but is not committed.
+   */
+  private enterReadOnly(message: string) {
+    if (this.disposed) return
+    this.autosaver.disable(message)
+    this.setState({ readOnly: message, tool: 'hand' }) // not editable from here on, so leaving the edit below commits nothing
+    this.finishEditing()
+    this.canvas.discardActiveObject()
     this.applyToolState()
     this.syncState()
   }
@@ -667,8 +683,7 @@ export class Editor {
         )
         if (!obj) throw new Error('Could not create image.')
         this.canvas.add(obj)
-        this.autosaver.addAsset(asset)
-        added.push(obj)
+        added.push(obj) // the asset cache keeps the bytes; the save stores any that are not stored yet
       } catch {
         failed.push(file.name || 'image')
       }

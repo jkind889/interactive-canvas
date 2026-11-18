@@ -1,26 +1,34 @@
-import type { BoardDoc, SaveState, StoredAsset } from '../model/types.ts'
-import type { BoardStore } from './boardStore.ts'
+import type { BoardDoc, SaveState } from '../model/types.ts'
+import { ABSENT, BoardConflictError } from './boardStore.ts'
+import type { AssetBytes, BoardStore, RevisionToken } from './boardStore.ts'
 
 export interface AutosaverOptions {
   store: BoardStore
-  /** Called at save time, so it must reflect the live board. */
+  /** Called at save time, so it must reflect the board that should be durable right now. */
   getDoc: () => BoardDoc
+  /** Original bytes of every image this session has seen; the store re-stores any that are missing. */
+  bytes: AssetBytes
   onStatus: (s: SaveState) => void
+  /** The stored board is no longer the one this tab loaded or saved. Saving is off for good. */
+  onConflict?: (message: string) => void
   debounceMs?: number
   now?: () => number
   setTimer?: (fn: () => void, ms: number) => unknown
   clearTimer?: (handle: unknown) => void
 }
 
+export const CONFLICT_MESSAGE =
+  'This board was changed in another tab, so this tab stopped saving. Reload to continue from the saved board; changes made here since its last save are not saved.'
+
 /**
  * Debounced saver with an honest status machine:
- * new/saved -> dirty -> saving -> saved | error. Assets added since the last
- * successful save are written in the same transaction as the document and are
- * only forgotten after that transaction commits.
+ * new/saved -> dirty -> saving -> saved | error. It holds the revision token of the
+ * stored board: every save must match it, and a save that finds a different board
+ * stored (another tab wrote) is never retried.
  */
 export class Autosaver {
   private status: SaveState = { kind: 'loading' }
-  private pending = new Map<string, StoredAsset>()
+  private token: RevisionToken = ABSENT
   private timer: unknown = null
   private inFlight: Promise<void> | null = null
   /** Something changed after the in-flight save snapshot was taken. */
@@ -55,11 +63,12 @@ export class Autosaver {
     return k === 'dirty' || k === 'saving' || k === 'error'
   }
 
-  /** Board finished loading from storage (or nothing was stored). */
-  markLoaded(hadStoredBoard: boolean) {
+  /** Board finished loading from storage. `token` is what was found there (`ABSENT` for nothing). */
+  markLoaded(token: RevisionToken) {
     if (this.disabled) return
     this.armed = true
-    this.setStatus(hadStoredBoard ? { kind: 'saved', at: this.now() } : { kind: 'new' })
+    this.token = token
+    this.setStatus(token.kind === 'absent' ? { kind: 'new' } : { kind: 'saved', at: this.now() })
   }
 
   /** Saving is impossible; keeps the reason visible and never touches storage. */
@@ -68,10 +77,6 @@ export class Autosaver {
     this.armed = false
     this.clearScheduled()
     this.setStatus({ kind: 'unavailable', message })
-  }
-
-  addAsset(asset: StoredAsset) {
-    this.pending.set(asset.id, asset)
   }
 
   markDirty() {
@@ -126,15 +131,23 @@ export class Autosaver {
   private async run(): Promise<void> {
     this.changedWhileSaving = false
     this.setStatus({ kind: 'saving' })
-    const batch = [...this.pending.values()]
     try {
-      await this.opts.store.save(this.opts.getDoc(), batch)
+      this.token = await this.opts.store.save(this.opts.getDoc(), this.token, this.opts.bytes)
     } catch (e) {
+      if (this.disabled) return // switched off while the save was in flight; its reason stays visible
+      if (e instanceof BoardConflictError) {
+        // Never overwrite, never retry: the other tab's board is the stored truth.
+        this.disable(CONFLICT_MESSAGE)
+        this.opts.onConflict?.(CONFLICT_MESSAGE)
+        return
+      }
+      // Everything else (quota, missing image bytes, storage held by another tab) wrote
+      // nothing and can be retried.
       const message = e instanceof Error && e.message ? e.message : 'Unknown storage error.'
       this.setStatus({ kind: 'error', message })
       return
     }
-    for (const a of batch) if (this.pending.get(a.id) === a) this.pending.delete(a.id)
+    if (this.disabled) return
     if (this.changedWhileSaving) {
       this.markDirty()
     } else {

@@ -3,7 +3,8 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyDoc } from '../model/doc.ts'
 import type { BoardDoc, StoredAsset } from '../model/types.ts'
 import { UnreadableBoardError } from './boardStore.ts'
-import type { BoardStore, LoadedBoard } from './boardStore.ts'
+import { NewerBoardError } from './boardStore.ts'
+import type { BoardStore, LoadedBoard, RevisionToken } from './boardStore.ts'
 import { hydrateBoard } from './hydrate.ts'
 
 const asset = (id: string): StoredAsset => ({ id, name: `${id}.png`, type: 'image/png', bytes: new ArrayBuffer(3) })
@@ -15,13 +16,25 @@ const doc = (): BoardDoc => ({
     { type: 'image', id: 'i2', left: 0, top: 0, angle: 0, assetId: 'a2', scaleX: 1, scaleY: 1 },
   ],
 })
-const board = (ids = ['a1', 'a2']): LoadedBoard => ({ doc: doc(), assets: new Map(ids.map((i) => [i, asset(i)] as const)) })
+const TOKEN: RevisionToken = { kind: 'legacy', updatedAt: 42, docJson: '{"version":1}' }
+const board = (ids = ['a1', 'a2']): LoadedBoard => ({ doc: doc(), assets: new Map(ids.map((i) => [i, asset(i)] as const)), token: TOKEN })
+const framedBoard = (ids = ['a1', 'a2']): LoadedBoard => ({
+  ...board(ids),
+  doc: {
+    ...doc(),
+    frames: [{ id: 'f1', name: 'Cover', left: 0, top: 0, width: 300, height: 200 }],
+    objects: doc().objects.map((o) => ({ ...o, frameId: 'f1' })),
+  },
+})
 
 function store(load: () => Promise<LoadedBoard | null>) {
   const writes: string[] = []
   const s: BoardStore = {
     load,
-    save: async () => void writes.push('save'),
+    save: async () => {
+      writes.push('save')
+      return TOKEN
+    },
     pruneAssets: async () => void writes.push('prune'),
   }
   return { s, writes }
@@ -50,6 +63,38 @@ describe('hydrateBoard', () => {
     const out = await hydrateBoard(store(async () => board()).s, decodeAll)
     expect(out).toMatchObject({ kind: 'restored' })
     expect(out.kind === 'restored' && out.doc.objects).toHaveLength(3)
+  })
+
+  it('passes the stored revision token and the frames through a successful restore', async () => {
+    const out = await hydrateBoard(store(async () => framedBoard()).s, decodeAll)
+    expect(out.kind).toBe('restored')
+    if (out.kind !== 'restored') return
+    expect(out.token).toBe(TOKEN)
+    expect(out.doc.frames.map((f) => f.id)).toEqual(['f1'])
+    expect(out.doc.objects.map((o) => o.frameId)).toEqual(['f1', 'f1', 'f1'])
+  })
+
+  it('keeps frames and ownership in the partial board shown when an image fails', async () => {
+    const out = await hydrateBoard(store(async () => framedBoard(['a1'])).s, decodeAll)
+    expect(out.kind).toBe('blocked')
+    if (out.kind !== 'blocked') return
+    expect(out.partial?.frames.map((f) => f.id)).toEqual(['f1'])
+    expect(out.partial?.objects.map((o) => [o.id, o.frameId])).toEqual([
+      ['i1', 'f1'],
+      ['t1', 'f1'],
+    ])
+    expect(out).not.toHaveProperty('token') // a blocked board is never written, so it carries no token
+  })
+
+  it('blocks on a database from a newer build, with nothing to show', async () => {
+    const out = await hydrateBoard(
+      store(async () => {
+        throw new NewerBoardError()
+      }).s,
+      decodeAll,
+    )
+    expect(out).toMatchObject({ kind: 'blocked', partial: null })
+    expect(out.kind === 'blocked' && out.message).toMatch(/newer yuriful.*read-only/)
   })
 
   it('fails closed when one image fails to decode, exposing only the loaded part', async () => {

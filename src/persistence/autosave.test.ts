@@ -2,31 +2,39 @@
 import { describe, expect, it } from 'vitest'
 import { createEmptyDoc } from '../model/doc.ts'
 import type { BoardDoc, SaveState, StoredAsset } from '../model/types.ts'
-import { Autosaver } from './autosave.ts'
-import type { BoardStore } from './boardStore.ts'
+import { Autosaver, CONFLICT_MESSAGE } from './autosave.ts'
+import { ABSENT, BoardConflictError, MissingAssetError, StorageBusyError } from './boardStore.ts'
+import type { AssetBytes, BoardStore, RevisionToken } from './boardStore.ts'
 
 const asset = (id: string): StoredAsset => ({ id, name: `${id}.png`, type: 'image/png', bytes: new ArrayBuffer(4) })
+const STORED: RevisionToken = { kind: 'rev', rev: 'stored' }
 
 /** `hydrated: false` leaves the saver in its pre-hydration (inert) state. */
 function setup({ hydrated = true } = {}) {
   const statuses: SaveState[] = []
-  const saves: Array<{ doc: BoardDoc; assets: string[] }> = []
+  const saves: Array<{ doc: BoardDoc; expected: RevisionToken; bytes: AssetBytes }> = []
+  const conflicts: string[] = []
   const timers: Array<{ fn: () => void; ms: number; id: number; live: boolean }> = []
-  const gate = { fail: null as Error | null, hold: null as Promise<void> | null }
+  const gate = { fail: null as Error | null, hold: null as Promise<void> | null, attempts: 0 }
   const store: BoardStore = {
     load: async () => null,
     pruneAssets: async () => {},
-    save: async (doc, newAssets) => {
+    save: async (doc, expected, bytes) => {
+      gate.attempts++
       if (gate.hold) await gate.hold
       if (gate.fail) throw gate.fail
-      saves.push({ doc, assets: newAssets.map((a) => a.id) })
+      saves.push({ doc, expected, bytes })
+      return { kind: 'rev', rev: `r${saves.length}` }
     },
   }
+  const session = new Map<string, StoredAsset>()
   let version = 0
   const saver = new Autosaver({
     store,
     getDoc: () => ({ ...createEmptyDoc(), title: `v${++version}` }),
+    bytes: (id) => session.get(id),
     onStatus: (s) => statuses.push(s),
+    onConflict: (m) => conflicts.push(m),
     now: () => 1234,
     setTimer: (fn, ms) => {
       const t = { fn, ms, id: timers.length, live: true }
@@ -37,7 +45,7 @@ function setup({ hydrated = true } = {}) {
       ;(h as (typeof timers)[number]).live = false
     },
   })
-  if (hydrated) saver.markLoaded(false)
+  if (hydrated) saver.markLoaded(ABSENT)
   statuses.length = 0
   const fire = async () => {
     const live = timers.filter((t) => t.live)
@@ -47,21 +55,23 @@ function setup({ hydrated = true } = {}) {
     }
     await saver.flush() // lets an in-flight save settle
   }
-  return { saver, statuses, saves, timers, gate, fire, kinds: () => statuses.map((s) => s.kind) }
+  return { saver, statuses, saves, conflicts, timers, gate, session, fire, kinds: () => statuses.map((s) => s.kind) }
 }
 
 describe('Autosaver status machine', () => {
   it('reports "new" for a board with nothing stored and "saved" after loading one', () => {
     const a = setup()
-    a.saver.markLoaded(false)
+    a.saver.markLoaded(ABSENT)
     expect(a.saver.state.kind).toBe('new')
-    a.saver.markLoaded(true)
+    a.saver.markLoaded(STORED)
     expect(a.saver.state).toEqual({ kind: 'saved', at: 1234 })
+    a.saver.markLoaded({ kind: 'legacy', updatedAt: 1, docJson: '{}' }) // a milestone 1 row is a stored board too
+    expect(a.saver.state.kind).toBe('saved')
   })
 
   it('goes dirty -> saving -> saved and writes the live document', async () => {
     const a = setup()
-    a.saver.markLoaded(false)
+    a.saver.markLoaded(ABSENT)
     a.saver.markDirty()
     expect(a.saver.state.kind).toBe('dirty')
     expect(a.saves).toHaveLength(0) // debounced, nothing written yet
@@ -78,21 +88,9 @@ describe('Autosaver status machine', () => {
     expect(a.saves).toHaveLength(1)
   })
 
-  it('writes new assets with the document, and only once', async () => {
+  it('surfaces a failed save as an error and retries with the same token', async () => {
     const a = setup()
-    a.saver.addAsset(asset('x'))
-    a.saver.addAsset(asset('y'))
-    a.saver.markDirty()
-    await a.fire()
-    expect(a.saves[0]?.assets).toEqual(['x', 'y'])
-    a.saver.markDirty()
-    await a.fire()
-    expect(a.saves[1]?.assets).toEqual([])
-  })
-
-  it('surfaces a failed save as an error and keeps assets for the retry', async () => {
-    const a = setup()
-    a.saver.addAsset(asset('x'))
+    a.saver.markLoaded(STORED)
     a.gate.fail = new Error('quota exceeded')
     a.saver.markDirty()
     await a.fire()
@@ -102,13 +100,13 @@ describe('Autosaver status machine', () => {
     a.gate.fail = null
     await a.saver.retry()
     expect(a.saver.state.kind).toBe('saved')
-    expect(a.saves[0]?.assets).toEqual(['x']) // bytes were not lost by the failure
+    expect(a.saves[0]?.expected).toEqual(STORED) // the failure did not advance or lose the token
     expect(a.saver.hasUnsavedChanges).toBe(false)
   })
 
   it('retry is a no-op unless the last save failed', async () => {
     const a = setup()
-    a.saver.markLoaded(true)
+    a.saver.markLoaded(STORED)
     await a.saver.retry()
     expect(a.saves).toHaveLength(0)
   })
@@ -175,7 +173,7 @@ describe('Autosaver status machine', () => {
     expect(a.saver.state.kind).toBe('loading')
     expect(a.saver.hasUnsavedChanges).toBe(false)
 
-    a.saver.markLoaded(true) // hydration finished
+    a.saver.markLoaded(STORED) // hydration finished
     a.saver.markDirty()
     await a.fire()
     expect(a.saves).toHaveLength(1)
@@ -183,7 +181,7 @@ describe('Autosaver status machine', () => {
 
   it('a timer armed before disable() cannot write afterwards', async () => {
     const a = setup()
-    a.saver.markLoaded(true)
+    a.saver.markLoaded(STORED)
     a.saver.markDirty() // debounce timer pending
     a.saver.disable('stored board could not be fully loaded')
     for (const t of a.timers) t.fn() // even if the timer fires anyway
@@ -195,7 +193,7 @@ describe('Autosaver status machine', () => {
   it('markLoaded after disable() cannot re-enable saving', async () => {
     const a = setup()
     a.saver.disable('blocked')
-    a.saver.markLoaded(true)
+    a.saver.markLoaded(STORED)
     a.saver.markDirty()
     await a.saver.flush()
     expect(a.saves).toHaveLength(0)
@@ -205,17 +203,108 @@ describe('Autosaver status machine', () => {
   it('treats a throwing getDoc as a save error rather than crashing', async () => {
     const statuses: SaveState[] = []
     const saver = new Autosaver({
-      store: { load: async () => null, pruneAssets: async () => {}, save: async () => {} },
+      store: { load: async () => null, pruneAssets: async () => {}, save: async () => STORED },
       getDoc: () => {
         throw new Error('serialize failed')
       },
+      bytes: () => undefined,
       onStatus: (s) => statuses.push(s),
       setTimer: (fn) => fn,
       clearTimer: () => {},
     })
-    saver.markLoaded(true)
+    saver.markLoaded(STORED)
     saver.markDirty()
     await saver.flush()
     expect(saver.state).toEqual({ kind: 'error', message: 'serialize failed' })
+  })
+})
+
+describe('Autosaver: revision token and asset bytes', () => {
+  it('passes the loaded token to the first save and the returned token to the next', async () => {
+    const a = setup()
+    a.saver.markLoaded(STORED)
+    a.saver.markDirty()
+    await a.fire()
+    a.saver.markDirty()
+    await a.fire()
+    a.saver.markDirty()
+    await a.fire()
+    expect(a.saves.map((s) => s.expected)).toEqual([STORED, { kind: 'rev', rev: 'r1' }, { kind: 'rev', rev: 'r2' }])
+  })
+
+  it('a brand-new board saves against "nothing stored"', async () => {
+    const a = setup()
+    a.saver.markDirty()
+    await a.fire()
+    expect(a.saves[0]?.expected).toEqual(ABSENT)
+  })
+
+  it('hands every save the session bytes lookup (no one-shot pending list)', async () => {
+    const a = setup()
+    a.session.set('x', asset('x'))
+    a.saver.markDirty()
+    await a.fire()
+    a.saver.markDirty()
+    await a.fire()
+    for (const s of a.saves) {
+      expect(s.bytes('x')?.id).toBe('x') // still available on a later save, e.g. after another tab pruned it
+      expect(s.bytes('unknown')).toBeUndefined()
+    }
+  })
+
+  it('a conflict disables saving for good and is never retried', async () => {
+    const a = setup()
+    a.saver.markLoaded(STORED)
+    a.gate.fail = new BoardConflictError()
+    a.saver.markDirty()
+    await a.fire()
+    expect(a.conflicts).toEqual([CONFLICT_MESSAGE])
+    expect(a.saver.state).toEqual({ kind: 'unavailable', message: CONFLICT_MESSAGE })
+    expect(a.saver.hasUnsavedChanges).toBe(false)
+    expect(a.gate.attempts).toBe(1)
+
+    a.gate.fail = null // even if the store would now accept a write
+    a.saver.markDirty()
+    await a.saver.retry()
+    await a.saver.flush()
+    for (const t of a.timers) t.fn()
+    await a.saver.flush()
+    expect(a.gate.attempts).toBe(1)
+    expect(a.saves).toHaveLength(0)
+    expect(a.timers.filter((t) => t.live)).toHaveLength(0)
+    expect(a.conflicts).toHaveLength(1)
+  })
+
+  it('missing bytes and a storage deadline are ordinary retryable errors', async () => {
+    for (const failure of [new MissingAssetError(), new StorageBusyError()]) {
+      const a = setup()
+      a.saver.markLoaded(STORED)
+      a.gate.fail = failure
+      a.saver.markDirty()
+      await a.fire()
+      expect(a.saver.state).toEqual({ kind: 'error', message: failure.message })
+      expect(a.conflicts).toEqual([])
+      a.gate.fail = null
+      await a.saver.retry()
+      expect(a.saver.state.kind).toBe('saved')
+      expect(a.saves[0]?.expected).toEqual(STORED) // nothing was written by the failed attempt
+    }
+  })
+
+  it('a save that fails after saving was switched off keeps the switch-off reason', async () => {
+    const a = setup()
+    let release!: () => void
+    a.gate.hold = new Promise<void>((r) => (release = r))
+    a.gate.fail = new Error('late failure')
+    a.saver.markDirty()
+    for (const t of a.timers.filter((t) => t.live)) {
+      t.live = false
+      t.fn()
+    }
+    a.saver.disable('read-only now')
+    release()
+    await Promise.resolve()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(a.saver.state).toEqual({ kind: 'unavailable', message: 'read-only now' })
   })
 })

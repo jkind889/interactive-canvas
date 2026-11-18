@@ -1,12 +1,15 @@
 import type { BoardDoc, ObjectRecord, StoredAsset } from '../model/types.ts'
-import { UnreadableBoardError } from './boardStore.ts'
-import type { BoardStore } from './boardStore.ts'
+import { NewerBoardError, UnreadableBoardError } from './boardStore.ts'
+import type { BoardStore, RevisionToken } from './boardStore.ts'
 
 export type HydrationOutcome =
   /** Nothing stored yet: a genuinely new board. */
   | { kind: 'empty' }
-  /** Everything stored was restored; saving may be enabled. */
-  | { kind: 'restored'; doc: BoardDoc }
+  /**
+   * Everything stored was restored; saving may be enabled. `token` identifies the
+   * stored revision that was read, and every later write must still match it.
+   */
+  | { kind: 'restored'; doc: BoardDoc; token: RevisionToken }
   /**
    * The stored board could not be fully restored. The session must be read-only
    * (no edits, no saving, no pruning) so the original document and image bytes are
@@ -17,24 +20,23 @@ export type HydrationOutcome =
 
 const reason = (e: unknown) => (e instanceof Error && e.message ? e.message : 'unknown error')
 
+function describeLoadFailure(e: unknown): string {
+  if (e instanceof UnreadableBoardError) return 'The saved board could not be read. It is shown read-only so it cannot be overwritten.'
+  if (e instanceof NewerBoardError) return 'This board was saved by a newer yuriful. It is read-only here so that nothing in it is lost.'
+  return `Local storage is unavailable (${reason(e)}). The board is read-only because changes could not be saved.`
+}
+
 /**
  * Loads the stored board and proves every image in it can be decoded. Fails
  * closed: any unreadable document, storage error, missing asset or undecodable
- * asset yields `blocked`, never a silently reduced board.
+ * asset yields `blocked`, never a silently reduced board. Loading writes nothing.
  */
 export async function hydrateBoard(store: BoardStore, decode: (asset: StoredAsset) => Promise<unknown>): Promise<HydrationOutcome> {
   let loaded
   try {
     loaded = await store.load()
   } catch (e) {
-    return {
-      kind: 'blocked',
-      partial: null,
-      message:
-        e instanceof UnreadableBoardError
-          ? 'The saved board could not be read. It is shown read-only so it cannot be overwritten.'
-          : `Local storage is unavailable (${reason(e)}). The board is read-only because changes could not be saved.`,
-    }
+    return { kind: 'blocked', partial: null, message: describeLoadFailure(e) }
   }
   if (!loaded) return { kind: 'empty' }
 
@@ -65,5 +67,5 @@ export async function hydrateBoard(store: BoardStore, decode: (asset: StoredAsse
       message: `${failed} saved image${failed === 1 ? '' : 's'} could not be loaded. The board is read-only so the original and its images stay exactly as stored.`,
     }
   }
-  return { kind: 'restored', doc: loaded.doc }
+  return { kind: 'restored', doc: loaded.doc, token: loaded.token }
 }

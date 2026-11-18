@@ -2,7 +2,8 @@ import { IDBFactory } from 'fake-indexeddb'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createEmptyDoc } from '../model/doc.ts'
 import type { BoardDoc, StoredAsset } from '../model/types.ts'
-import { IndexedDbBoardStore } from '../persistence/boardStore.ts'
+import { CONFLICT_MESSAGE } from '../persistence/autosave.ts'
+import { ABSENT, BoardConflictError, IndexedDbBoardStore } from '../persistence/boardStore.ts'
 import { Editor } from './Editor.ts'
 import { FakeAssets, SpyStore } from './testing/fakes.ts'
 
@@ -234,7 +235,8 @@ describe('Editor: a stored image that fails to decode fails closed', () => {
     const factory = new IDBFactory()
     const seed = new IndexedDbBoardStore(factory)
     const original = storedDoc()
-    await seed.save(original, [asset('a1', 1, 2, 3), asset('a2', 4, 5, 6)])
+    const seedAssets = [asset('a1', 1, 2, 3), asset('a2', 4, 5, 6)]
+    await seed.save(original, ABSENT, (id) => seedAssets.find((a) => a.id === id))
 
     const store = new IndexedDbBoardStore(factory)
     const editor = make(store, new FakeAssets(new Set(['a2'])))
@@ -262,7 +264,88 @@ describe('Editor: a stored image that fails to decode fails closed', () => {
     await editor.init()
     expect(editor.getState().save.kind).toBe('saved')
     expect(editor.getState().readOnly).toBeNull() // a healthy board stays editable
-    expect(store.prunes).toEqual([['a1', 'a2']])
+    expect(store.prunes).toEqual([{ keep: ['a1', 'a2'], expected: { kind: 'rev', rev: 'stored' } }]) // guarded by the loaded token
+  })
+
+  it('restoring is not an edit: the first save expects exactly the token that was loaded', async () => {
+    const token = { kind: 'legacy', updatedAt: 7, docJson: '{}' } as const
+    const store = new SpyStore({ doc: storedDoc(), assets: storedAssets(), token })
+    store.holdLoad = false
+    const editor = make(store, new FakeAssets())
+    await editor.init()
+    await flush()
+    expect(store.attempts).toHaveLength(0)
+    expect(store.prunes[0]?.expected).toEqual(token)
+    editor.setTitle('First edit')
+    await flush()
+    editor.setTitle('Second edit')
+    await flush()
+    expect(store.saves.map((s) => s.expected)).toEqual([token, { kind: 'rev', rev: 'spy-1' }])
+    expect(store.saves[0]!.assets).toEqual(['a1', 'a2']) // bytes of every restored image stay available to saves
+  })
+
+  it('a brand-new board saves against "nothing stored"', async () => {
+    const store = new SpyStore(null)
+    store.holdLoad = false
+    const editor = make(store, new FakeAssets())
+    await editor.init()
+    editor.setTitle('New')
+    await flush()
+    expect(store.saves[0]?.expected).toEqual(ABSENT)
+    expect(store.prunes).toHaveLength(0)
+  })
+})
+
+describe('Editor: a save conflict makes the tab read-only', () => {
+  it('never overwrites: the board becomes read-only with the conflict reason and stops saving', async () => {
+    const store = new SpyStore({ doc: storedDoc(), assets: storedAssets() })
+    store.holdLoad = false
+    const editor = make(store, new FakeAssets())
+    await editor.init()
+    editor.handleKeyDown(key('a', { ctrlKey: true }))
+
+    store.saveError = new BoardConflictError()
+    editor.setTitle('Edited in a stale tab')
+    await flush()
+    const state = editor.getState()
+    expect(state.readOnly).toBe(CONFLICT_MESSAGE)
+    expect(state.save).toEqual({ kind: 'unavailable', message: CONFLICT_MESSAGE })
+    expect(state.tool).toBe('hand')
+    expect(state.selection).toBeNull()
+    expect(store.attempts).toHaveLength(1)
+
+    // Nothing can be edited or saved afterwards, even once the store would accept a write.
+    store.saveError = null
+    editor.setTitle('again')
+    editor.addText()
+    editor.setTool('select')
+    editor.handleKeyDown(key('a', { ctrlKey: true }))
+    editor.handleKeyDown(key('Delete'))
+    editor.retrySave()
+    await flush()
+    expect(editor.getState().title).toBe('Edited in a stale tab')
+    expect(editor.getState().objectCount).toBe(3)
+    expect(editor.getState().tool).toBe('hand')
+    expect(store.attempts).toHaveLength(1)
+    expect(store.saves).toHaveLength(0)
+  })
+
+  it('leaves a text edit without committing it', async () => {
+    const store = new SpyStore(null)
+    store.holdLoad = false
+    const editor = make(store, new FakeAssets())
+    await editor.init()
+    editor.setTitle('Saved once')
+    await flush()
+    store.saveError = new BoardConflictError()
+    editor.addText() // enters editing on a new textbox
+    expect(editor.getState().editingText).toBe(true)
+    editor.setTitle('Triggers the conflicting save')
+    await flush()
+    const state = editor.getState()
+    expect(state.readOnly).toBe(CONFLICT_MESSAGE)
+    expect(state.editingText).toBe(false)
+    expect(state.canUndo).toBe(false) // the half-typed text was not committed to history
   })
 })
 

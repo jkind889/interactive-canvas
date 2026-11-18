@@ -1,5 +1,5 @@
+import { newId } from '../model/id.ts'
 import type { StoredAsset } from '../model/types.ts'
-import { newId } from './objects.ts'
 
 export function isImageFile(file: Pick<File, 'type'>): boolean {
   return file.type.startsWith('image/')
@@ -15,6 +15,12 @@ export async function readImageFile(file: File): Promise<StoredAsset> {
 export interface AssetSource {
   get(id: string): HTMLImageElement | undefined
   load(asset: StoredAsset): Promise<HTMLImageElement>
+  /**
+   * The original stored form of an image loaded this session. Kept for the whole
+   * session, because undo can bring back an image whose bytes another tab has since
+   * pruned from storage; the next save then stores them again.
+   */
+  bytes(id: string): StoredAsset | undefined
   dispose(): void
 }
 
@@ -23,10 +29,14 @@ export interface AssetSource {
  * elements synchronously (undo/redo/restore), so decoding happens only once.
  */
 export class AssetCache implements AssetSource {
-  private entries = new Map<string, { url: string; element: HTMLImageElement }>()
+  private entries = new Map<string, { url: string; element: HTMLImageElement; asset: StoredAsset }>()
 
   get(id: string): HTMLImageElement | undefined {
     return this.entries.get(id)?.element
+  }
+
+  bytes(id: string): StoredAsset | undefined {
+    return this.entries.get(id)?.asset
   }
 
   async load(asset: StoredAsset): Promise<HTMLImageElement> {
@@ -42,7 +52,7 @@ export class AssetCache implements AssetSource {
       URL.revokeObjectURL(url)
       throw new Error(`${asset.name} could not be decoded as an image.`)
     }
-    this.entries.set(asset.id, { url, element })
+    this.entries.set(asset.id, { url, element, asset })
     return element
   }
 
