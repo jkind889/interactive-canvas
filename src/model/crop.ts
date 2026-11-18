@@ -278,10 +278,25 @@ export function coverBox(size: Size, box: Size): { crop: CropRect | undefined; s
  * the box's aspect ratio and one uniform scale. Idempotent: a second Fill changes nothing.
  */
 export function fillRecord<T extends ImageRecord>(rec: T, size: Size): T {
-  const box = displayBox(rec, size)
+  return coverRecord(rec, displayBox(rec, size), size)
+}
+
+/** The record showing an image of `size` that covers `box` (see `coverBox`), centred on the box. */
+function coverRecord<T extends ImageRecord>(rec: T, box: DisplayBox, size: Size): T {
   const { crop, scale } = coverBox(size, box)
   const shown = crop ?? wholeRect(size)
   return placeCentred(rec, box.centre, shown.width * scale, shown.height * scale, scale, crop)
+}
+
+/**
+ * Replace image: the record showing a different picture (`newAssetId`, `newSize` source
+ * pixels) in the same box (centre, displayed size and angle, to stored precision), covering it
+ * like Fill. The old crop referred to the old picture's pixels and is discarded; when the new
+ * picture has the box's aspect ratio there is no crop at all. Id, owner, lock and angle are
+ * unchanged.
+ */
+export function replaceRecord<T extends ImageRecord>(rec: T, oldSize: Size, newAssetId: string, newSize: Size): T {
+  return coverRecord({ ...rec, assetId: newAssetId }, displayBox(rec, oldSize), newSize)
 }
 
 /**

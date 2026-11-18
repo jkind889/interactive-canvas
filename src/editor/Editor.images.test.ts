@@ -930,3 +930,18 @@ describe('review fixes', () => {
     expect(b.sel()?.image).toEqual({ cropped: false, canFit: false, canFill: false })
   })
 })
+
+describe('re-review fixes', () => {
+  it('the board going read-only during a crop shows the hand cursor at once, not the arrow until the mouse moves', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    b.editor.startCrop()
+    b.canvas.upperCanvasEl.style.cursor = 'nwse-resize' // what Fabric shows over a handle
+    b.store.saveError = new BoardConflictError()
+    b.editor.setTitle('conflict')
+    await flush()
+    expect(b.editor.getState().readOnly).toBe(CONFLICT_MESSAGE)
+    expect(b.editor.getState().tool).toBe('hand')
+    expect(b.canvas.upperCanvasEl.style.cursor).toBe('grab')
+  })
+})

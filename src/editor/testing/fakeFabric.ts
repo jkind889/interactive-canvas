@@ -135,7 +135,13 @@ export class FabricImage extends FakeObject {
   cropY = 0
   hasControls = true
   hasBorders = true
-  private readonly natural: { width: number; height: number }
+  private natural: { width: number; height: number }
+  /** Like Fabric: a new element, shown at its own size. */
+  setElement(el: { naturalWidth?: number; naturalHeight?: number }) {
+    this.natural = { width: el.naturalWidth ?? 100, height: el.naturalHeight ?? 100 }
+    this.width = this.natural.width
+    this.height = this.natural.height
+  }
   constructor(el: { naturalWidth?: number; naturalHeight?: number }, opts: Record<string, unknown> = {}) {
     super(opts)
     Object.assign(this, opts) // field initializers above ran after super(): apply the options again

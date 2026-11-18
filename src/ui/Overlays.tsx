@@ -7,6 +7,17 @@ import { LayerPanel } from './LayerPanel.tsx'
 import { Toolbar } from './Toolbar.tsx'
 import { useEditorState } from './useEditorState.ts'
 
+/**
+ * One file input serves Add image (several files) and Replace image (one file, for the image
+ * that was selected when the button was pressed). The input itself remembers which.
+ */
+function setPickerMode(input: HTMLInputElement | null, replaceFor: string | null) {
+  if (!input) return
+  input.multiple = replaceFor === null
+  if (replaceFor === null) delete input.dataset.replaceFor
+  else input.dataset.replaceFor = replaceFor
+}
+
 /** Everything floating over the canvas, plus the file input and drop target. */
 export function Overlays({ editor }: { editor: Editor }) {
   const state = useEditorState(editor)
@@ -19,7 +30,10 @@ export function Overlays({ editor }: { editor: Editor }) {
   const toggleLayers = useCallback(() => setLayersOpen((v) => !v), [])
 
   useEffect(() => {
-    editor.setImagePicker(() => fileInput.current?.click())
+    editor.setImagePicker(() => {
+      setPickerMode(fileInput.current, null) // the `i` shortcut always adds
+      fileInput.current?.click()
+    })
     return () => editor.setImagePicker(null)
   }, [editor])
 
@@ -65,8 +79,23 @@ export function Overlays({ editor }: { editor: Editor }) {
     }
   }, [editor])
 
+  useEffect(() => {
+    const input = fileInput.current
+    if (!input) return
+    // The dialog was closed without a file: nothing happens, and the next pick adds again.
+    const onCancel = () => setPickerMode(input, null)
+    input.addEventListener('cancel', onCancel)
+    return () => input.removeEventListener('cancel', onCancel)
+  }, [])
   const openPicker = () => {
     editor.applyCrop() // like every command: an open crop is applied first
+    setPickerMode(fileInput.current, null)
+    fileInput.current?.click()
+  }
+  const openReplace = () => {
+    const target = editor.replaceTarget() // leaves the current edit and fixes the target now
+    if (!target) return
+    setPickerMode(fileInput.current, target)
     fileInput.current?.click()
   }
   const readOnly = state?.readOnly ?? null
@@ -95,7 +124,11 @@ export function Overlays({ editor }: { editor: Editor }) {
         onChange={(e) => {
           const files = Array.from(e.currentTarget.files ?? [])
           e.currentTarget.value = ''
-          if (files.length > 0) void editor.addImageFiles(files)
+          const target = e.currentTarget.dataset.replaceFor
+          setPickerMode(e.currentTarget, null)
+          if (target !== undefined) {
+            if (files[0]) void editor.replaceImageFile(target, files[0])
+          } else if (files.length > 0) void editor.addImageFiles(files)
         }}
       />
 
@@ -117,7 +150,7 @@ export function Overlays({ editor }: { editor: Editor }) {
       {state?.ready && (
         // The inspector on top and the layer list anchored at the bottom share one column, so they never overlap.
         <div className="side-stack">
-          {state.selection && <Inspector editor={editor} selection={state.selection} cropping={state.cropping} />}
+          {state.selection && <Inspector editor={editor} selection={state.selection} cropping={state.cropping} onReplace={openReplace} />}
           {state.layers.length > 0 && (
             <LayerPanel editor={editor} layers={state.layers} readOnly={readOnly !== null} open={layersOpen} onToggleOpen={toggleLayers} />
           )}

@@ -241,6 +241,19 @@ export function imageCropOf(img: FabricImage): CropRect | undefined {
 }
 
 /**
+ * Replace image: the same object (identity, owner, lock, stacking) now shows another decoded
+ * picture, whole and uncropped. The caller then crops and places it (see `replaceRecord`).
+ */
+export function setImageElement(img: FabricImage, assetId: string, el: HTMLImageElement) {
+  const m = meta.get(img)
+  if (!m || m.kind !== 'image') return
+  m.assetId = assetId
+  img.setElement(el)
+  img.set({ cropX: 0, cropY: 0, dirty: true })
+  img.setCoords()
+}
+
+/**
  * Shows only `crop` of the original (undefined: all of it). Changes nothing else: the caller
  * places the image (see `model/crop.ts`) so that the kept pixels do not move.
  */

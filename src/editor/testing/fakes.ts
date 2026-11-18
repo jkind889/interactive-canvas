@@ -73,11 +73,21 @@ export class SpyStore implements BoardStore {
   }
 }
 
-/** Asset source that "decodes" instantly, except for ids in `broken`. */
+/**
+ * Asset source that "decodes" instantly as 200 x 100, except for ids (or file names) in
+ * `broken`. A file named like `wide-400x100.png` decodes at that size, and a decode can be held
+ * open by file name with `hold(name)` (released by resolving the returned deferred).
+ */
 export class FakeAssets implements AssetSource {
   readonly loaded: string[] = []
   private readonly cache = new Map<string, { el: HTMLImageElement; asset: StoredAsset }>()
+  private readonly holds = new Map<string, Deferred<void>>()
   constructor(private readonly broken: ReadonlySet<string> = new Set()) {}
+  hold(name: string): Deferred<void> {
+    const d = deferred<void>()
+    this.holds.set(name, d)
+    return d
+  }
   get(id: string) {
     return this.cache.get(id)?.el
   }
@@ -85,9 +95,15 @@ export class FakeAssets implements AssetSource {
     return this.cache.get(id)?.asset
   }
   async load(asset: StoredAsset) {
-    if (this.broken.has(asset.id)) throw new Error(`${asset.name} could not be decoded as an image.`)
+    const held = this.holds.get(asset.name)
+    if (held) {
+      this.holds.delete(asset.name)
+      await held.promise
+    }
+    if (this.broken.has(asset.id) || this.broken.has(asset.name)) throw new Error(`${asset.name} could not be decoded as an image.`)
     this.loaded.push(asset.id)
-    const el = { naturalWidth: 200, naturalHeight: 100 } as HTMLImageElement
+    const m = /(\d+)x(\d+)\.\w+$/.exec(asset.name)
+    const el = { naturalWidth: m ? Number(m[1]) : 200, naturalHeight: m ? Number(m[2]) : 100 } as HTMLImageElement
     this.cache.set(asset.id, { el, asset })
     return el
   }

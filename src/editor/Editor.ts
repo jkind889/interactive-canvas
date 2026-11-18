@@ -28,6 +28,7 @@ import {
   dragCropRect,
   fillRecord,
   fitRecord,
+  replaceRecord,
   hitCropHandle,
   isWholeImage,
   minCropSide,
@@ -72,6 +73,7 @@ import {
   ownerOf,
   setFrameName,
   setImageCrop,
+  setImageElement,
   setLocked,
   setOwner,
   toFrameRecord,
@@ -196,6 +198,13 @@ interface CropSession {
   drag: { startRect: CropRect; end: () => void } | null
 }
 
+/** A decoded replacement picture for one image, chosen (by id) when Replace image was pressed. */
+interface ReplaceJob {
+  targetId: string
+  assetId: string
+  size: Size
+}
+
 /** A Frame-tool press that moves less than this many screen pixels is a click (default-sized frame). */
 const DRAFT_CLICK_SLOP = 4
 const NO_FRAMES: ReadonlySet<string> = new Set()
@@ -241,6 +250,8 @@ export class Editor {
   private gestureSeq = 0
   /** Image batches that finished decoding while a gesture was in progress. */
   private stagedImports: ImageRecord[][] = []
+  /** Replacement pictures that finished decoding while a gesture was in progress, in that order. */
+  private stagedReplacements: ReplaceJob[] = []
   /** A primary-button press has been passed through to Fabric and not yet released. */
   private primaryDown = false
   private pan: { button: number; end: () => void } | null = null
@@ -393,6 +404,7 @@ export class Editor {
     this.finishEditing()
     this.canvas.discardActiveObject()
     this.applyToolState()
+    this.canvas.upperCanvasEl.style.cursor = this.canvas.defaultCursor // the hand at once, not only after the next mouse move
     this.syncState()
   }
 
@@ -408,6 +420,7 @@ export class Editor {
     if (this.noticeTimer) clearTimeout(this.noticeTimer)
     this.gesture = null // invalidates any queued settlement
     this.stagedImports = []
+    this.stagedReplacements = []
     this.pan?.end()
     this.crop?.drag?.end()
     this.crop = null
@@ -1032,14 +1045,18 @@ export class Editor {
 
   /** The board is at rest: apply what had to wait for a gesture to end. */
   private idle() {
-    if (this.gesture || !this.editable || this.stagedImports.length === 0) return
+    if (this.gesture || !this.editable) return
     for (const batch of this.stagedImports.splice(0)) this.applyImport(batch)
+    for (const job of this.stagedReplacements.splice(0)) this.applyReplace(job) // in the order they finished decoding
   }
 
   private dropStagedImports() {
     const dropped = this.stagedImports.reduce((n, batch) => n + batch.length, 0)
     this.stagedImports = []
     if (dropped > 0) this.notify('error', `${dropped} image${dropped === 1 ? ' was' : 's were'} not added because the board became read-only.`)
+    const replacements = this.stagedReplacements.length
+    this.stagedReplacements = []
+    if (replacements > 0) this.notify('error', `${replacements === 1 ? 'An image was' : `${replacements} images were`} not replaced because the board became read-only.`)
   }
 
   private bindDomEvents() {
@@ -1584,6 +1601,83 @@ export class Editor {
     img.set({ left: out.left, top: out.top, scaleX: out.scaleX, scaleY: out.scaleY })
     img.setCoords()
     if (decidesOwner) setOwner(img, ownerAfterManipulation(ownerOf(img), centerOf(img), this.frameRecords(), NO_FRAMES))
+    this.canvas.requestRenderAll()
+    this.commit()
+  }
+
+  /**
+   * Replace image, step 1 (the button): leaves the current edit (an open crop is applied as
+   * its own step) and returns the id of the image to replace: the selected image, if it is one
+   * unlocked image on an editable board that is not busy; otherwise null. The target is fixed
+   * here, not when a file is chosen: the file dialog may stay open while other things happen.
+   */
+  replaceTarget(): string | null {
+    if (!this.editable || this.busy) return null
+    this.finishEditing()
+    const img = this.canvas.getActiveObject()
+    if (!isImage(img) || isLocked(img) || img.group) return null
+    return idOf(img) ?? null
+  }
+
+  /**
+   * Replace image, step 2 (a file was chosen): decodes it, then shows it in the target's box.
+   * Applied at once when the board is at rest, otherwise as soon as the gesture in progress has
+   * settled; never from a Fabric callback. Nothing changes when the file is not a usable image,
+   * the board went read-only, or the target is gone or locked by then.
+   */
+  async replaceImageFile(targetId: string, file: File): Promise<void> {
+    if (this.disposed) return
+    if (!this.editable) {
+      if (this.live) this.notify('error', `This board is read-only. ${this.state.readOnly ?? ''}`.trim())
+      return
+    }
+    const name = file.name || 'The file'
+    let job: ReplaceJob
+    try {
+      if (!isImageFile(file)) throw new Error('not an image')
+      const asset = await readImageFile(file)
+      const el = await this.assets.load(asset) // kept for the session; stored by the first save that references it
+      job = { targetId, assetId: asset.id, size: { width: el.naturalWidth, height: el.naturalHeight } }
+    } catch {
+      if (!this.disposed) this.notify('error', `${name} could not be used to replace the image: it is not an image, or it could not be read.`)
+      return
+    }
+    if (this.disposed) return
+    if (!this.editable) {
+      this.notify('error', 'The image was not replaced because the board became read-only.')
+      return
+    }
+    if (this.busy) this.stagedReplacements.push(job) // applied by idle() once the gesture has settled
+    else this.applyReplace(job)
+  }
+
+  /**
+   * Shows the decoded picture in the target's box, as it is now: same id, owner, stacking,
+   * angle and lock, and the same box (centre and displayed size, to stored precision), covered
+   * like Fill. Ownership is not re-decided, because the box does not move. One history step.
+   */
+  private applyReplace(job: ReplaceJob) {
+    if (!this.editable || this.busy) return
+    this.finishEditing() // an open crop is applied first, as its own step
+    const img = this.canvas.getObjects().find((o) => idOf(o) === job.targetId)
+    const el = this.assets.get(job.assetId)
+    if (!isImage(img) || isLocked(img) || !el) {
+      this.notify('error', 'The image could not be replaced: it is no longer on the board, or it is locked.')
+      return
+    }
+    // A member of a multi-selection has coordinates relative to it: take it out while it changes.
+    const active = this.canvas.getActiveObject()
+    const members = img.group && active instanceof ActiveSelection ? active.getObjects().slice() : null
+    if (members) this.canvas.discardActiveObject()
+    const rec = toRecord(img)
+    if (rec?.type === 'image') {
+      const next = replaceRecord(rec, imageSizeOf(img), job.assetId, job.size)
+      setImageElement(img, job.assetId, el)
+      setImageCrop(img, next.crop)
+      img.set({ left: next.left, top: next.top, scaleX: next.scaleX, scaleY: next.scaleY })
+      img.setCoords()
+    }
+    if (members) this.selectByIds(members)
     this.canvas.requestRenderAll()
     this.commit()
   }

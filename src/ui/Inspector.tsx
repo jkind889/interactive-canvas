@@ -135,6 +135,21 @@ function ImageTools({ editor, selection }: { editor: Editor; selection: Selectio
   )
 }
 
+/** Swaps the picture inside the selected image, keeping its place, size, frame and stacking. */
+function ReplaceButton({ selection, onReplace }: { selection: SelectionInfo; onReplace: () => void }) {
+  return (
+    <button
+      type="button"
+      className="secondary-btn inspector-btn"
+      title="Replace the picture, keeping its place and size on the board"
+      disabled={selection.locked}
+      onClick={onReplace}
+    >
+      Replace image
+    </button>
+  )
+}
+
 /** While cropping, the inspector shows only how to finish the crop. */
 function CropPanel({ editor }: { editor: Editor }) {
   return (
@@ -155,7 +170,18 @@ function CropPanel({ editor }: { editor: Editor }) {
   )
 }
 
-export function Inspector({ editor, selection, cropping = false }: { editor: Editor; selection: SelectionInfo; cropping?: boolean }) {
+export function Inspector({
+  editor,
+  selection,
+  cropping = false,
+  onReplace = () => {},
+}: {
+  editor: Editor
+  selection: SelectionInfo
+  cropping?: boolean
+  /** Replace image: the parent owns the file input, which must outlive this panel while the file dialog is open. */
+  onReplace?: () => void
+}) {
   const sizeId = useId()
   const isFrame = selection.kind === 'frame'
   if (cropping) return <CropPanel editor={editor} />
@@ -166,6 +192,7 @@ export function Inspector({ editor, selection, cropping = false }: { editor: Edi
       {isFrame && <FramePanel editor={editor} selection={selection} />}
 
       {selection.kind === 'image' && <ImageTools editor={editor} selection={selection} />}
+      {selection.kind === 'image' && <ReplaceButton selection={selection} onReplace={onReplace} />}
 
       {selection.kind === 'text' && selection.fontSize !== null && (
         <div className="inspector-row">

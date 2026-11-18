@@ -3,6 +3,7 @@ import {
   MIN_CROP_SCENE,
   clampCrop,
   coverBox,
+  replaceRecord,
   croppedPlacement,
   displayBox,
   dragCropRect,
@@ -251,58 +252,59 @@ describe('Fit and Fill maths', () => {
   })
 })
 
-describe('Fit and Fill are idempotent and Fill keeps the box (seeded sweep)', () => {
-  /** A small seeded generator (mulberry32), so a failure can be reproduced. */
-  function rng(seed: number) {
-    let a = seed >>> 0
-    return () => {
-      a = (a + 0x6d2b79f5) >>> 0
-      let t = a
-      t = Math.imul(t ^ (t >>> 15), t | 1)
-      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
-      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
-    }
+// ---- seeded sweeps --------------------------------------------------------------------------
+/** A small seeded generator (mulberry32), so a failure can be reproduced. */
+function rng(seed: number) {
+  let a = seed >>> 0
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0
+    let t = a
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
-  /** Records as they can be stored: positions to 2 decimals, scales to 5, a valid rounded crop or none. */
-  function sample(seed: number, n: number): Array<{ rec: ImageRecord; size: { width: number; height: number } }> {
-    const r = rng(seed)
-    const between = (lo: number, hi: number) => lo + (hi - lo) * r()
-    const logBetween = (lo: number, hi: number) => Math.exp(between(Math.log(lo), Math.log(hi)))
-    const out = []
-    for (let i = 0; i < n; i++) {
-      const kind = i % 4
-      // Ordinary, tiny, huge, and extreme aspect ratios.
-      const size =
-        kind === 0
-          ? { width: Math.round(between(50, 1200)), height: Math.round(between(50, 1200)) }
-          : kind === 1
-            ? { width: Math.round(between(1, 12)), height: Math.round(between(1, 12)) }
-            : kind === 2
-              ? { width: Math.round(between(2000, 9000)), height: Math.round(between(2000, 9000)) }
-              : r() < 0.5
-                ? { width: Math.round(between(1, 40)), height: Math.round(between(2000, 6000)) }
-                : { width: Math.round(between(2000, 6000)), height: Math.round(between(1, 40)) }
-      const s = roundPositiveLike(logBetween(0.002, 25))
-      const uniform = r() < 0.6
-      const rec = img({
-        left: Math.round(between(-5000, 5000) * 100) / 100,
-        top: Math.round(between(-5000, 5000) * 100) / 100,
-        angle: r() < 0.5 ? 0 : Math.round(between(-180, 180) * 100) / 100,
-        scaleX: s,
-        scaleY: uniform ? s : roundPositiveLike(s * logBetween(0.2, 5)),
-      })
-      if (r() < 0.6) {
-        const w = Math.max(0.01, Math.round(between(0.01, size.width) * 100) / 100)
-        const h = Math.max(0.01, Math.round(between(0.01, size.height) * 100) / 100)
-        const crop = { x: Math.round(between(0, size.width - w) * 100) / 100, y: Math.round(between(0, size.height - h) * 100) / 100, width: w, height: h }
-        if (!isWholeImage(crop, size)) rec.crop = crop
-      }
-      out.push({ rec, size })
+}
+/** Records as they can be stored: positions to 2 decimals, scales to 5, a valid rounded crop or none. */
+function sample(seed: number, n: number): Array<{ rec: ImageRecord; size: { width: number; height: number } }> {
+  const r = rng(seed)
+  const between = (lo: number, hi: number) => lo + (hi - lo) * r()
+  const logBetween = (lo: number, hi: number) => Math.exp(between(Math.log(lo), Math.log(hi)))
+  const out = []
+  for (let i = 0; i < n; i++) {
+    const kind = i % 4
+    // Ordinary, tiny, huge, and extreme aspect ratios.
+    const size =
+      kind === 0
+        ? { width: Math.round(between(50, 1200)), height: Math.round(between(50, 1200)) }
+        : kind === 1
+          ? { width: Math.round(between(1, 12)), height: Math.round(between(1, 12)) }
+          : kind === 2
+            ? { width: Math.round(between(2000, 9000)), height: Math.round(between(2000, 9000)) }
+            : r() < 0.5
+              ? { width: Math.round(between(1, 40)), height: Math.round(between(2000, 6000)) }
+              : { width: Math.round(between(2000, 6000)), height: Math.round(between(1, 40)) }
+    const s = roundPositiveLike(logBetween(0.002, 25))
+    const uniform = r() < 0.6
+    const rec = img({
+      left: Math.round(between(-5000, 5000) * 100) / 100,
+      top: Math.round(between(-5000, 5000) * 100) / 100,
+      angle: r() < 0.5 ? 0 : Math.round(between(-180, 180) * 100) / 100,
+      scaleX: s,
+      scaleY: uniform ? s : roundPositiveLike(s * logBetween(0.2, 5)),
+    })
+    if (r() < 0.6) {
+      const w = Math.max(0.01, Math.round(between(0.01, size.width) * 100) / 100)
+      const h = Math.max(0.01, Math.round(between(0.01, size.height) * 100) / 100)
+      const crop = { x: Math.round(between(0, size.width - w) * 100) / 100, y: Math.round(between(0, size.height - h) * 100) / 100, width: w, height: h }
+      if (!isWholeImage(crop, size)) rec.crop = crop
     }
-    return out
+    out.push({ rec, size })
   }
-  const roundPositiveLike = (n: number) => Math.max(0.00001, Math.round(n * 1e5) / 1e5)
+  return out
+}
+const roundPositiveLike = (n: number) => Math.max(0.00001, Math.round(n * 1e5) / 1e5)
 
+describe('Fit and Fill are idempotent and Fill keeps the box (seeded sweep)', () => {
   it('Fill applied twice equals Fill applied once (4000 records)', () => {
     const failures = sample(1, 4000).filter(({ rec, size }) => JSON.stringify(fillRecord(fillRecord(rec, size), size)) !== JSON.stringify(fillRecord(rec, size)))
     expect(failures.slice(0, 3)).toEqual([])
@@ -351,5 +353,78 @@ describe('Fit and Fill are idempotent and Fill keeps the box (seeded sweep)', ()
     // 51.61 x 160 at 0.3875 (from the height) is 19.999 x 62; at 0.38752 (from the width) 20 x 62.003.
     expect(scale).toBe(0.3875)
     expect(coverBox({ width: 400, height: 200 }, { width: 800, height: 400 })).toEqual({ crop: undefined, scale: 2 })
+  })
+})
+
+describe('replaceRecord: a different picture in the same box', () => {
+  const OLD = { width: 400, height: 300 }
+  const expectSameBox = (before: ImageRecord, oldSize: { width: number; height: number }, after: ImageRecord, newSize: { width: number; height: number }) => {
+    const a = displayBox(before, oldSize)
+    const z = displayBox(after, newSize)
+    const shown = after.crop ?? newSize
+    const tolerance = (side: number) => 0.015 * after.scaleX + 0.000005 * side + 1e-6
+    expect(Math.hypot(z.centre.x - a.centre.x, z.centre.y - a.centre.y)).toBeLessThanOrEqual(0.01)
+    expect(Math.abs(z.width - a.width)).toBeLessThanOrEqual(tolerance(shown.width))
+    expect(Math.abs(z.height - a.height)).toBeLessThanOrEqual(tolerance(shown.height))
+    expect(z.angle).toBe(a.angle)
+  }
+
+  it('same aspect, different resolution: no crop key, only the scale changes', () => {
+    const rec = img({ assetId: 'old', scaleX: 0.5, scaleY: 0.5 }) // 200 x 150 on the board
+    const out = replaceRecord(rec, OLD, 'new', { width: 800, height: 600 })
+    expect(out).toEqual(img({ assetId: 'new', scaleX: 0.25, scaleY: 0.25 }))
+    expect(out).not.toHaveProperty('crop')
+  })
+
+  it('a wider picture is cropped at the sides, a taller one at top and bottom, centred, in the same box', () => {
+    const rec = img({ assetId: 'old' }) // 400 x 300 box at (100, 50)
+    const wide = replaceRecord(rec, OLD, 'w', { width: 800, height: 300 })
+    expect(wide).toEqual(img({ assetId: 'w', crop: { x: 200, y: 0, width: 400, height: 300 } }))
+    const tall = replaceRecord(rec, OLD, 't', { width: 200, height: 600 })
+    expect(tall).toEqual(img({ assetId: 't', crop: { x: 0, y: 225, width: 200, height: 150 }, scaleX: 2, scaleY: 2 }))
+    expectSameBox(rec, OLD, wide, { width: 800, height: 300 })
+    expectSameBox(rec, OLD, tall, { width: 200, height: 600 })
+  })
+
+  it('discards the old crop (it referred to the old pixels), keeps id, owner, lock and angle', () => {
+    const rec = img({ assetId: 'old', crop: { x: 10, y: 20, width: 100, height: 100 }, frameId: 'F', locked: true, angle: 30 })
+    const out = replaceRecord(rec, OLD, 'new', { width: 640, height: 640 }) // square box, square picture
+    expect(out).not.toHaveProperty('crop')
+    expect(out).toMatchObject({ id: 'i', assetId: 'new', frameId: 'F', locked: true, angle: 30, scaleX: 0.15625, scaleY: 0.15625 })
+    expectSameBox(rec, OLD, out, { width: 640, height: 640 })
+  })
+
+  it('a non-uniform legacy scale becomes uniform; tiny and huge pictures keep the box', () => {
+    const rec = img({ assetId: 'old', scaleX: 1, scaleY: 0.5, angle: -45 })
+    for (const size of [
+      { width: 1, height: 1 },
+      { width: 3, height: 2000 },
+      { width: 9000, height: 7000 },
+      { width: 401, height: 299 },
+    ]) {
+      const out = replaceRecord(rec, OLD, 'new', size)
+      expect(out.scaleX).toBe(out.scaleY)
+      expectSameBox(rec, OLD, out, size)
+    }
+  })
+
+  it('keeps the box to stored precision over a seeded sweep, rotated and cropped targets included', () => {
+    const r = rng(11)
+    for (const { rec, size } of sample(4, 4000)) {
+      const newSize = { width: Math.max(1, Math.round(Math.exp(r() * Math.log(9000)))), height: Math.max(1, Math.round(Math.exp(r() * Math.log(9000)))) }
+      const out = replaceRecord(rec, size, 'new', newSize)
+      expectSameBox(rec, size, out, newSize)
+      expect(out.assetId).toBe('new')
+      expect(out.scaleX).toBe(out.scaleY)
+      if (out.crop) expect(isWholeImage(out.crop, newSize)).toBe(false)
+      // What it shows is a Fill of the new picture: Fill straight afterwards changes nothing.
+      expect(fillRecord(out, newSize)).toEqual(out)
+    }
+  })
+
+  it('Fit straight after a replace shows the whole new picture inside the box, centred, with no crop', () => {
+    const rec = img({ assetId: 'old' }) // 400 x 300 box, centre (300, 200)
+    const out = fitRecord(replaceRecord(rec, OLD, 'w', { width: 800, height: 300 }), { width: 800, height: 300 })
+    expect(out).toEqual(img({ assetId: 'w', left: 100, top: 125, scaleX: 0.5, scaleY: 0.5 })) // 400 x 150, centred
   })
 })
