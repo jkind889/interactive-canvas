@@ -39,6 +39,8 @@ import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
 import { FrameCanvas } from './FrameCanvas.ts'
 import type { AssetSource } from './assets.ts'
+import { EMPTY_LAYERS, computeLayers } from './layerList.ts'
+import type { LayerItem } from './layerList.ts'
 import {
   ACCENT,
   centerOf,
@@ -58,6 +60,7 @@ import {
 } from './objects.ts'
 
 export type Tool = 'select' | 'hand' | 'text' | 'frame'
+export type { LayerItem } from './layerList.ts'
 
 export interface SelectionInfo {
   kind: 'image' | 'text' | 'frame' | 'multiple'
@@ -96,6 +99,11 @@ export interface EditorState {
   selection: SelectionInfo | null
   viewport: Viewport
   objectCount: number
+  /**
+   * Everything on the board in stacking order, front-most first: content front to back,
+   * then frames front to back. Derived from the canvas; selecting from it changes nothing on the board.
+   */
+  layers: readonly LayerItem[]
   canUndo: boolean
   canRedo: boolean
   save: SaveState
@@ -215,6 +223,7 @@ export class Editor {
       selection: null,
       viewport: { ...DEFAULT_VIEWPORT },
       objectCount: 0,
+      layers: EMPTY_LAYERS,
       canUndo: false,
       canRedo: false,
       save: { kind: 'loading' },
@@ -470,6 +479,7 @@ export class Editor {
     this.setState({
       selection: this.computeSelection(),
       objectCount: this.canvas.getObjects().length,
+      layers: computeLayers(this.canvas.getObjects(), this.canvas.getActiveObjects(), (id) => this.assets.bytes(id)?.name, this.state.layers),
       canUndo: this.history.canUndo,
       canRedo: this.history.canRedo,
       editingText: active instanceof Textbox && active.isEditing === true,
@@ -1380,6 +1390,34 @@ export class Editor {
     this.canvas.discardActiveObject()
     this.selectByIds(objs)
     this.canvas.requestRenderAll()
+  }
+
+  /**
+   * Selects an object or frame from the layer list: exactly that one, or (`toggle`) adds it
+   * to or removes it from the selection. Changes nothing on the board and records no
+   * history, except that leaving a text edit commits what was typed, as everywhere. Inert
+   * before the board has loaded, on a read-only board and while a gesture is unsettled.
+   * Called from UI handlers, never from a Fabric callback.
+   */
+  selectLayer(id: string, opts: { toggle?: boolean } = {}) {
+    if (!this.editable || this.busy) return
+    // A blank text is not part of the scene and is not listed, so it cannot be selected from the list.
+    const listed = (o: FabricObject) => !(o instanceof Textbox && o.text.trim() === '')
+    const target = this.canvas.getObjects().find((o) => idOf(o) === id && listed(o))
+    if (!target) return
+    this.finishEditing() // commits typed text as its own step; a blank text is discarded
+    if (this.state.tool === 'text' || this.state.tool === 'frame') this.switchTool('select')
+    const current = this.canvas.getActiveObjects().filter(listed)
+    const wanted = new Set(opts.toggle ? (current.includes(target) ? current.filter((o) => o !== target) : [...current, target]) : [target])
+    const next = this.canvas.getObjects().filter((o) => wanted.has(o)) // members in canvas z-order
+    const active = this.canvas.getActiveObject()
+    if (!(next.length === 1 && active === next[0])) {
+      // A multi-selection is formed afresh (upright), as everywhere else.
+      this.canvas.discardActiveObject()
+      this.selectByIds(next)
+      this.canvas.requestRenderAll()
+    }
+    this.syncState()
   }
 
   deleteSelection() {

@@ -378,6 +378,134 @@ button:disabled {
   border-color: #eab8b4;
 }
 
+/* ---- right column: inspector on top, layer list anchored at the bottom ---- */
+.overlays > .side-stack {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  bottom: 68px; /* clear of the zoom controls */
+  width: 232px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  pointer-events: none;
+}
+.side-stack > .floating {
+  position: relative;
+  top: auto;
+  right: auto;
+  flex: none;
+  pointer-events: auto;
+}
+
+/* ---- layers ---- */
+.side-stack > .layers {
+  flex: 0 1 auto;
+  margin-top: auto;
+  min-height: 0;
+  max-height: 320px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.layers-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: 34px;
+  padding: 0 8px 0 12px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  text-align: left;
+  flex: none;
+}
+.layers-header:hover {
+  background: var(--bg);
+}
+.layers-title {
+  font-size: 12px;
+  font-weight: 650;
+}
+.layers-count {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+.layers-chevron {
+  display: inline-grid;
+  margin-left: auto;
+  color: var(--muted);
+  transform: rotate(-90deg);
+}
+.layers-chevron.is-open {
+  transform: none;
+}
+.layers-list {
+  margin: 0;
+  padding: 2px 4px 4px;
+  list-style: none;
+  overflow-y: auto;
+  min-height: 0;
+  border-top: 1px solid var(--border);
+}
+.layer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.layer-row:hover {
+  background: var(--bg);
+}
+.layer-row.is-selected {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+.layer-row[aria-disabled='true'] {
+  cursor: default;
+}
+.layer-row[aria-disabled='true']:hover {
+  background: transparent;
+}
+.layer-icon {
+  display: inline-grid;
+  flex: none;
+  color: var(--muted);
+}
+.layer-row.is-selected .layer-icon {
+  color: inherit;
+}
+.layer-icon svg {
+  width: 15px;
+  height: 15px;
+}
+.layer-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.layer-frame {
+  flex: 0 1 auto;
+  max-width: 45%;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 /* ---- empty state ---- */
 .empty-state {
   position: absolute;

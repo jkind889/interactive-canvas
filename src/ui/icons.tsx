@@ -108,6 +108,11 @@ export const ToBackIcon = () => (
     <path d="M13 20h7" />
   </Svg>
 )
+export const ChevronIcon = () => (
+  <Svg>
+    <path d="M7 10l5 5 5-5" />
+  </Svg>
+)
 export const CloseIcon = () => (
   <Svg>
     <path d="M6 6l12 12M18 6L6 18" />

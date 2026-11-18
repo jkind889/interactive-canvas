@@ -62,8 +62,8 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 - One npm package (ES modules, strict TypeScript): React 19 for the chrome, Fabric.js 7 for the canvas, Vite for dev and build, Vitest (jsdom) for unit tests, Playwright for real-browser tests. There is no backend and no `.env`.
 - Fabric is pinned at 7.4.0 by the lockfile, and `FrameCanvas` overrides Fabric internals. Do not change dependencies unless a task genuinely requires it; say why if you do.
 - `src/model/` is pure, with no Fabric or DOM dependency: document types and validation (`types.ts`, `doc.ts`), frame ownership rules, scale limits and hit geometry (`frames.ts`), `history.ts`, `layers.ts`, `viewport.ts`, `id.ts`.
-- Only `src/editor/` imports Fabric, and `src/editor/Editor.ts` is the only part the UI talks to: it owns the canvas, history, assets and autosave and exposes an immutable state snapshot. `FrameCanvas.ts` holds the frame hit-testing, Shift-click and marquee rules; `frameLayer.ts` the one geometry used both to draw and to hit a frame's outline and label; `objects.ts` converts between records and Fabric objects; `assets.ts` decodes images and keeps their original bytes for the session.
-- `src/persistence/` is the IndexedDB store (`boardStore.ts`), the save status machine (`autosave.ts`) and fail-closed loading (`hydrate.ts`). `src/input/shortcuts.ts` maps keys to actions. `src/ui/` is React chrome only.
+- Only `src/editor/` imports Fabric, and `src/editor/Editor.ts` is the only part the UI talks to: it owns the canvas, history, assets and autosave and exposes an immutable state snapshot. `FrameCanvas.ts` holds the frame hit-testing, Shift-click and marquee rules; `frameLayer.ts` the one geometry used both to draw and to hit a frame's outline and label; `objects.ts` converts between records and Fabric objects; `assets.ts` decodes images and keeps their original bytes for the session; `layerList.ts` derives the layer list from the canvas.
+- `src/persistence/` is the IndexedDB store (`boardStore.ts`), the save status machine (`autosave.ts`) and fail-closed loading (`hydrate.ts`). `src/input/shortcuts.ts` maps keys to actions. `src/ui/` is React chrome only (`LayerPanel.tsx` is the layer list).
 - Test support: `src/editor/testing/` (a fake Fabric; a driver that replays by hand the event sequence of Fabric's mouse handlers, which is an imitation and not evidence of Fabric's behaviour; a fake store and assets), `src/persistence/testing/legacyStoreV1.ts` (a frozen copy of milestone 1's storage code; never modernize it), and `e2e/helpers.ts` (seeding and reading IndexedDB).
 - Working files use LF. If Git on the machine has `core.autocrlf=true`, `git stash` and checkouts rewrite files with CRLF; tools that match text literally must tolerate that.
 
@@ -105,6 +105,14 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 - A multi-selection can be moved, scaled proportionally from a corner, and (if it contains no frame) rotated. There is no free-aspect stretch or skew of a group, and Shift does not unlock one. Every reachable canvas state must be representable in the stored records.
 - One scale factor per proportional gesture: limits (text 6 to 400 px, a frame's smaller side at least 24 units) are computed from pre-gesture values and applied once to the whole selection, never per member, and an out-of-range member is never snapped into range. No transform is applied twice.
 
+## Layers (settled)
+
+- The layer list (`EditorState.layers`) is derived from the canvas and never stored. It is flat and front-most first: all content front to back, then all frames front to back. Content is never grouped under its frame, because stacking order is global and independent of ownership; an owned item only names its owner, taken from stored ownership.
+- A blank text is not listed. A text's label is current at the latest when its edit ends.
+- Selecting from the list (`selectLayer`) changes nothing on the board: no history entry, no save, no ownership change. It ends a text edit first, like every other command, so typed text is committed as its own step. It is inert before the board has loaded, on a read-only board and while a gesture is unsettled.
+- Reordering stays what `[`/`]` and `Ctrl/Cmd+[`/`]` already do: each kind moves within its own band, so frames stay behind content, and ownership never changes.
+- Rows must not take focus on a mouse press, or Space-to-pan and the letter shortcuts would act on the list.
+
 ## Storage and migration
 
 - Everything is stored locally in IndexedDB database `yuriful`: one board row, and image bytes in a separate store. Document and bytes are written in one transaction.
@@ -134,7 +142,7 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 
 ## Code review rules
 
-- Flag: settling a gesture, or removing an object, inside a Fabric callback; a frame gaining a member by being moved, resized or drawn; an owner lost to a frame that merely overlaps it; a member moved twice; contents stretched or moved by a lone frame resize; a per-member limit inside a proportional scale or in serialization; a canvas state the records cannot store; a save that can see a half-finished gesture; a click or a read-only board that writes; a load that rewrites the board row; a save without the revision check; a test that reaches the owner's board or a live dev server; a test that cannot fail.
+- Flag: settling a gesture, or removing an object, inside a Fabric callback; a frame gaining a member by being moved, resized or drawn; an owner lost to a frame that merely overlaps it; a member moved twice; contents stretched or moved by a lone frame resize; a per-member limit inside a proportional scale or in serialization; a canvas state the records cannot store; a save that can see a half-finished gesture; a click or a read-only board that writes; selecting from the layer list that records history or saves; a load that rewrites the board row; a save without the revision check; a test that reaches the owner's board or a live dev server; a test that cannot fail.
 - Safe paths: deferred settlement; ownership decided by the pure rules in `src/model/frames.ts`; one scale factor per gesture; records as the source of truth; token-checked transactional writes; isolated browser contexts with seeded storage.
 - Traps that have already cost time here:
   - The fake's multi-selection holds its members' absolute results, so it cannot detect a double move or wrong group geometry. Cover those in `e2e/`.

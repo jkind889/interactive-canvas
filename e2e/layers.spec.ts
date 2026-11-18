@@ -1,0 +1,270 @@
+/**
+ * Real-browser tests (real Fabric, real IndexedDB) for the layer list.
+ */
+import { expect, test } from '@playwright/test'
+import type { Locator, Page } from '@playwright/test'
+import { drag, openApp, openBlank, sceneToPage, seedRaw, storedDoc, undoButton, waitSaved } from './helpers.ts'
+import type { SeedAsset, StoredBoard, View } from './helpers.ts'
+
+const UNIT: View = { zoom: 1, panX: 0, panY: 0 }
+const PIC: SeedAsset = { id: 'a1', name: 'pic.png', width: 200, height: 120 }
+const BIG: SeedAsset = { id: 'a2', name: 'big.png', width: 400, height: 300, seed: 2 }
+
+const image = (id: string, left: number, top: number, extra: Record<string, unknown> = {}) => ({
+  type: 'image',
+  id,
+  left,
+  top,
+  angle: 0,
+  assetId: 'a1',
+  scaleX: 1,
+  scaleY: 1,
+  ...extra,
+})
+const frameRec = (id: string, left: number, top: number, width: number, height: number, name = id) => ({ id, name, left, top, width, height })
+
+interface Opened {
+  errors: string[]
+  at: (x: number, y: number) => { x: number; y: number }
+}
+
+async function openSeeded(page: Page, frames: unknown[], objects: unknown[], assets: SeedAsset[] = [PIC]): Promise<Opened> {
+  const errors: string[] = []
+  page.on('pageerror', (e) => errors.push(e.message))
+  await openBlank(page)
+  await seedRaw(page, 2, { version: 2, title: 'Layers', frames, objects, viewport: UNIT }, assets)
+  await openApp(page)
+  return { errors, at: await sceneToPage(page, UNIT) }
+}
+
+const list = (page: Page) => page.getByRole('listbox', { name: 'Layers', exact: true })
+const row = (page: Page, id: string) => list(page).locator(`[data-layer-id="${id}"]`)
+const rowIds = (page: Page) => list(page).getByRole('option').evaluateAll((els) => els.map((el) => (el as HTMLElement).dataset.layerId))
+const selectedRows = (page: Page) =>
+  list(page)
+    .locator('[role=option][aria-selected=true]')
+    .evaluateAll((els) => els.map((el) => (el as HTMLElement).dataset.layerId))
+const title = (page: Page) => page.locator('.inspector-title')
+const obj = (doc: StoredBoard, id: string) => {
+  const found = doc.objects.find((o) => o.id === id)
+  if (!found) throw new Error(`no stored object ${id}`)
+  return found
+}
+async function storedWhen(page: Page, check: (doc: StoredBoard) => boolean): Promise<StoredBoard> {
+  await expect.poll(async () => check(await storedDoc(page)), { timeout: 5000 }).toBe(true)
+  return storedDoc(page)
+}
+
+test.describe('the layer list', () => {
+  test('selects an image that another one covers completely; ] then brings it forward, and the order survives a reload', async ({ page }) => {
+    // "small" lies entirely under "big".
+    const o = await openSeeded(page, [], [image('small', 300, 200), image('big', 250, 150, { assetId: 'a2' })], [PIC, BIG])
+    await expect(rowIds(page)).resolves.toEqual(['big', 'small']) // front-most first
+    await expect(row(page, 'big')).toHaveText('big.png')
+    await expect(row(page, 'small')).toHaveText('pic.png')
+
+    // On the canvas, the covered image cannot be reached: a click there selects the big one.
+    await page.mouse.click(o.at(400, 260).x, o.at(400, 260).y)
+    await expect(title(page)).toHaveText('Image')
+    await expect.poll(() => selectedRows(page)).toEqual(['big'])
+
+    // From the list it can.
+    await row(page, 'small').click()
+    await expect.poll(() => selectedRows(page)).toEqual(['small'])
+    await expect(row(page, 'small')).toHaveAttribute('aria-selected', 'true')
+    await expect(row(page, 'big')).toHaveAttribute('aria-selected', 'false')
+    // The row did not take focus, so the board's shortcuts still work.
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+
+    await page.keyboard.press(']')
+    await expect.poll(() => rowIds(page)).toEqual(['small', 'big'])
+    const stored = await storedWhen(page, (d) => d.objects.map((x) => x.id).join() === 'big,small') // back to front
+    expect(obj(stored, 'small')).toMatchObject({ left: 300, top: 200 }) // reordering moved nothing
+    // Now the canvas reaches it too.
+    await page.keyboard.press('Escape')
+    await page.mouse.click(o.at(400, 260).x, o.at(400, 260).y)
+    await expect.poll(() => selectedRows(page)).toEqual(['small'])
+    await waitSaved(page)
+
+    await page.reload()
+    await expect(page.locator('.toolbar')).toBeVisible()
+    await expect.poll(() => rowIds(page)).toEqual(['small', 'big'])
+    await expect.poll(() => selectedRows(page)).toEqual([])
+    expect(o.errors).toEqual([])
+  })
+
+  test('an owned image keeps its owner through reordering; the frame row stays below all content and content shows its frame', async ({ page }) => {
+    const o = await openSeeded(page, [frameRec('f1', 100, 100, 400, 300, 'Cover')], [image('o1', 150, 150, { frameId: 'f1' }), image('loose', 650, 150)])
+    await expect.poll(() => rowIds(page)).toEqual(['loose', 'o1', 'f1'])
+    await expect(row(page, 'o1').locator('.layer-frame')).toHaveText('Cover')
+    await expect(row(page, 'loose').locator('.layer-frame')).toHaveCount(0)
+    await expect(row(page, 'f1')).toHaveAttribute('data-layer-kind', 'frame')
+
+    await row(page, 'o1').click()
+    await page.keyboard.press('Control+]')
+    await expect.poll(() => rowIds(page)).toEqual(['o1', 'loose', 'f1'])
+    let stored = await storedWhen(page, (d) => d.objects.map((x) => x.id).join() === 'loose,o1')
+    expect(obj(stored, 'o1').frameId).toBe('f1')
+    expect(obj(stored, 'loose').frameId).toBeUndefined()
+
+    // Sending everything selected to the back never puts content behind the frame.
+    await row(page, 'loose').click({ modifiers: ['Control'] })
+    await row(page, 'f1').click({ modifiers: ['Control'] })
+    await expect(title(page)).toHaveText('3 objects')
+    await page.keyboard.press('Control+[')
+    await expect.poll(() => rowIds(page)).toEqual(['o1', 'loose', 'f1'])
+    await page.keyboard.press('[')
+    await expect.poll(() => rowIds(page)).toEqual(['o1', 'loose', 'f1'])
+
+    await row(page, 'f1').click()
+    await expect(title(page)).toHaveText('Frame')
+    await expect(page.getByTestId('frame-item-count')).toHaveText('1 item')
+    await waitSaved(page)
+    stored = await storedDoc(page)
+    expect(stored.frames).toHaveLength(1)
+    expect(stored.objects.map((x) => [x.id, x.frameId])).toEqual([
+      ['loose', undefined],
+      ['o1', 'f1'],
+    ])
+    expect(o.errors).toEqual([])
+  })
+
+  test('Ctrl-clicked rows form one selection that a drag moves exactly once, together with the frame’s unselected members', async ({ page }) => {
+    const o = await openSeeded(
+      page,
+      [frameRec('f1', 100, 100, 400, 300, 'Cover')],
+      [image('o1', 150, 150, { frameId: 'f1' }), image('o2', 280, 250, { frameId: 'f1' }), image('loose', 650, 150)],
+    )
+    await row(page, 'f1').click()
+    await row(page, 'o1').click({ modifiers: ['Control'] })
+    await row(page, 'loose').click({ modifiers: ['Shift'] })
+    await expect(title(page)).toHaveText('3 objects')
+    await expect.poll(() => selectedRows(page)).toEqual(['loose', 'o1', 'f1'])
+
+    // Grab the selection on o1 (a member) and move it by (40, 30).
+    await drag(page, o.at(250, 210), o.at(290, 240))
+    const stored = await storedWhen(page, (d) => (d.frames ?? [])[0]?.left === 140)
+    expect(stored.frames![0]).toMatchObject({ left: 140, top: 130, width: 400, height: 300 })
+    expect(obj(stored, 'o1')).toMatchObject({ left: 190, top: 180, frameId: 'f1' }) // selected member: through the selection only
+    expect(obj(stored, 'o2')).toMatchObject({ left: 320, top: 280, frameId: 'f1' }) // unselected member: carried once
+    expect(obj(stored, 'loose')).toMatchObject({ left: 690, top: 180 })
+    expect(obj(stored, 'loose').frameId).toBeUndefined()
+    await expect.poll(() => selectedRows(page)).toEqual(['loose', 'o1', 'f1'])
+    expect(o.errors).toEqual([])
+  })
+
+  test('clicking a row while typing a new text commits the text as one undo step and selects the row', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('i1', 500, 100)])
+    await page.keyboard.press('t')
+    await page.mouse.click(o.at(150, 400).x, o.at(150, 400).y)
+    await page.keyboard.type('a quick note')
+    await row(page, 'i1').click()
+    await expect(title(page)).toHaveText('Image')
+    await expect.poll(() => selectedRows(page)).toEqual(['i1'])
+    const ids = await rowIds(page)
+    expect(ids).toHaveLength(2)
+    await expect(list(page).locator('[data-layer-kind=text]')).toHaveText('a quick note')
+    const stored = await storedWhen(page, (d) => d.objects.some((x) => x.type === 'text'))
+    expect(stored.objects.find((x) => x.type === 'text')).toMatchObject({ text: 'a quick note' })
+
+    await undoButton(page).click()
+    await expect.poll(() => rowIds(page)).toEqual(['i1'])
+    await expect(undoButton(page)).toBeDisabled() // the text was exactly one step
+    expect(o.errors).toEqual([])
+  })
+
+  test('clicking a row while a blank new text is open discards it', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('i1', 500, 100)])
+    await page.keyboard.press('t')
+    await page.mouse.click(o.at(150, 400).x, o.at(150, 400).y)
+    await row(page, 'i1').click()
+    await expect.poll(() => selectedRows(page)).toEqual(['i1'])
+    await expect.poll(() => rowIds(page)).toEqual(['i1'])
+    await expect(undoButton(page)).toBeDisabled()
+    expect(o.errors).toEqual([])
+  })
+
+  test('a frame name being typed is committed before a row click changes the selection', async ({ page }) => {
+    const o = await openSeeded(page, [frameRec('f1', 100, 100, 400, 300, 'Cover')], [image('i1', 650, 150)])
+    await row(page, 'f1').click()
+    const name = page.getByLabel('Name', { exact: true })
+    await name.fill('Spread')
+    await row(page, 'i1').click()
+    await expect(title(page)).toHaveText('Image')
+    await expect.poll(() => selectedRows(page)).toEqual(['i1'])
+    await expect(row(page, 'f1')).toHaveText('Spread')
+    const stored = await storedWhen(page, (d) => (d.frames ?? [])[0]?.name === 'Spread')
+    expect(stored.frames).toHaveLength(1)
+    await undoButton(page).click() // the rename was its own step
+    await expect(row(page, 'f1')).toHaveText('Cover')
+    expect(o.errors).toEqual([])
+  })
+
+  test('on a read-only board the list shows what is there, but its rows do nothing', async ({ page }) => {
+    await openBlank(page)
+    // "bad" refers to image bytes that are not stored: the board opens read-only.
+    await seedRaw(
+      page,
+      2,
+      { version: 2, title: 'Broken', frames: [frameRec('f1', 100, 100, 400, 300, 'Cover')], objects: [image('ok', 150, 150, { frameId: 'f1' }), image('bad', 600, 150, { assetId: 'gone' })], viewport: UNIT },
+      [PIC],
+    )
+    await page.goto('/')
+    await expect(page.getByTestId('readonly-banner')).toBeVisible()
+    await expect.poll(() => rowIds(page)).toEqual(['ok', 'f1'])
+    await expect(row(page, 'ok')).toHaveAttribute('aria-disabled', 'true')
+    // Playwright would wait for a disabled row to become enabled: force the clicks through to prove they do nothing.
+    await row(page, 'ok').click({ force: true })
+    await row(page, 'f1').click({ force: true, modifiers: ['Control'] })
+    await expect.poll(() => selectedRows(page)).toEqual([])
+    await expect(page.locator('.inspector')).toHaveCount(0)
+  })
+})
+
+test.describe('the layer panel on screen', () => {
+  const overlaps = (a: { x: number; y: number; width: number; height: number }, b: { x: number; y: number; width: number; height: number }) =>
+    a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height
+  async function box(l: Locator) {
+    const b = await l.boundingBox()
+    if (!b) throw new Error('not visible')
+    return b
+  }
+
+  for (const height of [800, 720]) {
+    test(`overlaps none of the other chrome at 1280×${height}, scrolls a long list, and collapses`, async ({ page }) => {
+      await page.setViewportSize({ width: 1280, height })
+      const objects = Array.from({ length: 30 }, (_, i) => image(`i${i}`, 120 + (i % 6) * 40, 120 + Math.floor(i / 6) * 40, { frameId: 'f1' }))
+      const o = await openSeeded(page, [frameRec('f1', 100, 100, 500, 400, 'A frame with a rather long name')], objects)
+      // The tallest inspector: a single frame.
+      await row(page, 'f1').click()
+      await expect(title(page)).toHaveText('Frame')
+      // A notice, so that the notice area is on screen too.
+      await page.setInputFiles('input[type=file]', { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('not an image') })
+      await expect(page.locator('.toast')).toBeVisible()
+
+      const panel = await box(page.locator('.layers'))
+      for (const other of [
+        page.locator('.toolbar'),
+        page.locator('.inspector'),
+        page.getByRole('group', { name: 'Zoom', exact: true }),
+        page.getByRole('group', { name: 'History', exact: true }),
+        page.locator('.toast'),
+      ]) {
+        expect(overlaps(panel, await box(other))).toBe(false)
+      }
+      const viewport = page.viewportSize()!
+      expect(panel.y + panel.height).toBeLessThanOrEqual(viewport.height)
+      const scrolls = await list(page).evaluate((el) => el.scrollHeight > el.clientHeight + 1)
+      expect(scrolls).toBe(true)
+
+      const toggle = page.locator('.layers-header')
+      await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+      await toggle.click()
+      await expect(list(page)).toHaveCount(0)
+      await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+      await toggle.click()
+      await expect(list(page)).toBeVisible()
+      expect(o.errors).toEqual([])
+    })
+  }
+})

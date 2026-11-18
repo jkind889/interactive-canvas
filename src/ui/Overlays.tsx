@@ -3,6 +3,7 @@ import { Editor } from '../editor/Editor.ts'
 import { HistoryControls, ZoomControls } from './Controls.tsx'
 import { CloseIcon } from './icons.tsx'
 import { Inspector } from './Inspector.tsx'
+import { LayerPanel } from './LayerPanel.tsx'
 import { Toolbar } from './Toolbar.tsx'
 import { useEditorState } from './useEditorState.ts'
 
@@ -106,7 +107,13 @@ export function Overlays({ editor }: { editor: Editor }) {
       {state?.ready && <Toolbar editor={editor} state={state} onAddImage={openPicker} />}
       {state?.ready && <HistoryControls editor={editor} state={state} />}
       {state?.ready && <ZoomControls editor={editor} state={state} />}
-      {state?.ready && state.selection && <Inspector editor={editor} selection={state.selection} />}
+      {state?.ready && (
+        // The inspector on top and the layer list anchored at the bottom share one column, so they never overlap.
+        <div className="side-stack">
+          {state.selection && <Inspector editor={editor} selection={state.selection} />}
+          {state.layers.length > 0 && <LayerPanel editor={editor} layers={state.layers} readOnly={readOnly !== null} />}
+        </div>
+      )}
 
       {showEmpty && (
         <div className="empty-state">
