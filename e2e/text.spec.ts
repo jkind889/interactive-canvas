@@ -386,6 +386,18 @@ test.describe('editing around headings', () => {
     expect(errors).toEqual([])
   })
 
+  test('Enter at the end of a normal line above a heading starts a normal line; the heading stays on its line', async ({ page }) => {
+    // The text after Enter is the same as after Enter at the start of "Title"; the caret tells them apart.
+    const rec = textRec('t', 100, 100, 'body\nTitle', { headings: [0, 1] })
+    const { errors, at } = await open(page, [rec])
+    await caretAt(page, at(120, 112), 4) // the end of "body"
+    await page.keyboard.press('Enter')
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'body\n\nTitle')
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'body\n\nTitle', headings: [0, 0, 1] })
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+
   test('a heading line emptied by Backspace stays a heading, and what is typed there is a heading; one undo restores it', async ({ page }) => {
     const rec = textRec('t', 100, 100, 'Title\nbody', { headings: [1] })
     const { errors, at } = await open(page, [rec])
@@ -516,6 +528,59 @@ test.describe('pasting into a formatted text', () => {
     await redoButton(page).click()
     await storedWhen(page, (d) => byId(d, 'b').text === 'bodyTitle\nbody')
     expect(byId(await storedDoc(page), 'b')).toEqual(byId(pasted, 'b'))
+    expect(errors).toEqual([])
+  })
+
+  // Fabric's paste replaces the styles of what it is pasted over even when the text it leaves
+  // is the same. Something is typed first, so that the edit has an undo step of its own.
+  test('a word copied from a 48 px text and pasted over the same word adds no heading; undo, redo', async ({ page }) => {
+    const big = textRec('big', 100, 400, 'BIG', { fontSize: 48 })
+    const rec = textRec('b', 100, 100, 'BIG\nbody')
+    const { errors, at } = await openWithClipboard(page, [big, rec])
+    await copyAllOf(page, at(130, 425))
+    await caretAt(page, at(130, 112), 8) // the end of "body"
+    await page.keyboard.type('!')
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('ArrowLeft')
+    for (let i = 0; i < 3; i++) await page.keyboard.press('Shift+ArrowRight') // "BIG"
+    await page.keyboard.press('Control+v')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    const done = await storedDoc(page)
+    expect(byId(done, 'b')).toEqual({ ...rec, text: 'BIG\nbody!' })
+    await undoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text === 'BIG\nbody')
+    expect(byId(await storedDoc(page), 'b')).toEqual(rec)
+    await expect(undoButton(page)).toBeDisabled()
+    await redoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text === 'BIG\nbody!')
+    expect(byId(await storedDoc(page), 'b')).toEqual(byId(done, 'b'))
+    expect(errors).toEqual([])
+  })
+
+  test('a plain word pasted over the same word in a heading keeps the heading (left by clicking elsewhere); undo, redo', async ({ page }) => {
+    const plain = textRec('plain', 100, 400, 'Title')
+    const rec = textRec('b', 100, 100, 'Title\nbody', { headings: [1] })
+    const { errors, at } = await openWithClipboard(page, [plain, rec])
+    await copyAllOf(page, at(130, 412))
+    await caretAt(page, at(130, 112), 10) // the end of "body"
+    await page.keyboard.type('!')
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('ArrowLeft')
+    for (let i = 0; i < 5; i++) await page.keyboard.press('Shift+ArrowRight') // "Title"
+    await page.keyboard.press('Control+v')
+    await page.mouse.click(at(900, 650).x, at(900, 650).y) // empty canvas
+    await waitSaved(page)
+    const done = await storedDoc(page)
+    expect(byId(done, 'b')).toEqual({ ...rec, text: 'Title\nbody!' })
+    await undoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text === 'Title\nbody')
+    expect(byId(await storedDoc(page), 'b')).toEqual(rec)
+    await expect(undoButton(page)).toBeDisabled()
+    await redoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text === 'Title\nbody!')
+    expect(byId(await storedDoc(page), 'b')).toEqual(byId(done, 'b'))
     expect(errors).toEqual([])
   })
 

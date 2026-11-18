@@ -225,23 +225,27 @@ function caretOffset(tb: Textbox): number | undefined {
 /**
  * The text's formatting, already in canonical form, read from the canvas object.
  *
- * While its text is the one last made canonical, everything comes from the Fabric object
- * alone (Fabric is the live source of truth while a text is edited): marks from the
- * characters' styles, a line's level from the size of its first character or placeholder.
+ * Outside a text change, while its text is the one last made canonical, everything comes
+ * from the Fabric object alone (Fabric is the live source of truth while a text is edited):
+ * marks from the characters' styles, a line's level from the size of its first character
+ * or placeholder.
  *
- * When the text has changed since and its styles have not been rewritten yet (inside
- * `text:changed`, or a scene read that Fabric triggers in the middle of a drop), the
- * character styles may be whatever the change brought: a paste or a drop carries the
- * source's complete styles, sizes included. Then only the marks are read from the styles,
- * and each line's level is carried over from the last canonical state (`textAfterEdit`).
+ * After a text change whose styles have not been rewritten yet (`change`, from
+ * `text:changed`; or a text that differs from the last canonical one, as in a scene read
+ * that Fabric triggers in the middle of a drop), the character styles may be whatever the
+ * change brought: a paste or a drop carries the source's complete styles, sizes included,
+ * even when the text it leaves is the same as before (a word pasted over the same word).
+ * Then only the marks are read from the styles, and each line's level is carried over from
+ * the last canonical state (`textAfterEdit`; an unchanged text keeps its levels by position).
+ * A text with no remembered state has nothing to carry over: its levels are read from the sizes.
  * The bold of a heading is never a mark of its own: it is dropped from a character that
  * was on a heading line and is now on a normal one, and from an inserted character on a
  * normal line whose style is a copy of a heading character's (Fabric copies the
  * neighbouring character's style onto what is typed or pasted without styles of its own;
  * styles brought by a paste or drop are complete declarations, with a font family).
- * `caret` (UTF-16, after the change) picks the alignment among repeated characters.
+ * `change.caret` (UTF-16, after the change) picks the alignment among repeated characters.
  */
-export function readTextFormatting(tb: Textbox, caret?: number): TextFormatting {
+export function readTextFormatting(tb: Textbox, change?: { caret: number | undefined }): TextFormatting {
   const raw: Record<string, unknown> = {
     font: fontIdOf(tb.fontFamily),
     align: tb.textAlign,
@@ -249,8 +253,8 @@ export function readTextFormatting(tb: Textbox, caret?: number): TextFormatting 
   }
   const text = tb.text
   const known = lastCanonical.get(tb)
-  if (known && known.text !== text) {
-    const edit = textAfterEdit(known.text, known.headings, text, caret)
+  if (known && (change !== undefined || known.text !== text)) {
+    const edit = textAfterEdit(known.text, known.headings, text, change?.caret)
     const headings = edit.headings
     const marks = new Map<number, number>() // UTF-16 start of a marked character -> its marks
     for (const [li, line] of linesOf(tb).entries()) {
@@ -339,7 +343,7 @@ function sameStyles(a: TextStyle | undefined, b: TextStyle): boolean {
  */
 export function reconcileTextFormatting(tb: Textbox): boolean {
   const known = lastCanonical.get(tb)
-  const fmt = readTextFormatting(tb, caretOffset(tb))
+  const fmt = readTextFormatting(tb, { caret: caretOffset(tb) })
   const want = stylesFor(tb, fmt, tb.fontSize)
   let changed = false
   if (!sameStyles(tb.styles, want)) {

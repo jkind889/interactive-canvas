@@ -150,9 +150,14 @@ Contracts the other branch can rely on, and that this branch needs kept:
   own job: two records that mean the same must be built the same.
 - No document or database version change comes from this branch. If the other branch changes
   a version, text formatting fields must be carried by every version that can hold a text.
-- `toRecord` reads a text's formatting from the Fabric object alone, and anything that
-  changes a text's base font size must go through `setTextFontSize` so headings keep their
-  ratio. A new code path that scales or resizes text has to do the same.
+- `objects.ts` remembers each text's last canonical state (text, heading levels, wrap width,
+  base size). `toRecord` reads a text's formatting from the Fabric object while its text is
+  unchanged since that state, and carries heading levels from it after a text change; a
+  heading level is never read from character sizes after a change. Anything that changes a
+  text's formatting, base font size or text must go through `writeTextFormatting`,
+  `setTextFontSize` or `reconcileTextFormatting`, so that the remembered state stays right
+  and headings keep their ratio. A new code path that scales, resizes or rewrites text has to
+  do the same.
 - This branch does not touch z-order, layer reordering or image records.
 
 Expected overlap from the remaining slices: `SelectionInfo` and the `Inspector` gain a text
@@ -213,4 +218,32 @@ None of them is built or tested here, and none changes this branch's scope:
 
 ## Review log
 
-Filled in as slices are reviewed: reviewer, findings, disposition.
+Every worker and reviewer below was a separate delegate run as `claude-opus-5-5`. Reviewers
+ran their checks in their own copy of the commit on their own port.
+
+### Slice 1 (`b307275`)
+
+First review, verdict "not clear yet":
+
+| # | Finding | Severity | Disposition |
+| - | ------- | -------- | ----------- |
+| 1 | A paste or a dropped selection adds or removes a heading (the level was read from the pasted characters' size) | should-fix | Fixed in `2210acc`: a line's level is carried across each edit |
+| 2 | A heading's implied bold becomes a stored mark when its characters land on a normal line | nit | Fixed in `2210acc` |
+| 3 | A stored text with a lone carriage return loses its marks on the first keystroke | nit | Not fixed: the app cannot write one. Known limit in code comments; `\r\n` pinned by tests |
+| 4 | A hostile sparse `spans` list can stall loading | nit | Fixed in `2210acc`: a list longer than its text is dropped |
+| 5 | A box keeps width it only needed while a half-tidied line was laid out | nit | Fixed in `2210acc` |
+| 6 | README wording about typing behaviour out of date | nit | Fixed in `2210acc` |
+
+Re-review of `2210acc`, verdict "clear after one should-fix":
+
+| # | Finding | Severity | Disposition |
+| - | ------- | -------- | ----------- |
+| 1 | A paste that leaves the text unchanged still read sizes, adding or removing a heading | should-fix | Fixed in the follow-up commit, with tests for both directions |
+| 2 | A drop into a centred or right-aligned text shifts the box (Fabric widens from the left on a drop; predates this work) | nit | Known limit in the README |
+| 3 | Ctrl/Cmd+Z while typing restores characters but not a heading level the undone edit changed (predates this work) | nit | Known limit in the README; taking over that key while typing is an owner decision |
+| 4 | Select-all then pasting the same number of lines keeps levels by position | not a bug | No change; follows the documented rules |
+| - | Test gap: the caret rule was pinned only on the fake canvas | gap | Real-browser test added in the follow-up commit |
+
+Known limit recorded here rather than in the README (the app cannot produce it): a stored
+text containing a lone carriage return is drawn with it as a character, and the first
+keystroke turns it into a line break, moving the marks after it down a line.

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { Textbox } from 'fabric'
 import { parseDoc, serializeDoc, createEmptyDoc } from '../model/doc.ts'
 import type { FrameRecord, ImageRecord, TextRecord } from '../model/types.ts'
 import { FONT_STACKS } from './fonts.ts'
@@ -12,6 +13,7 @@ import {
   isFrame,
   normalizeTextScale,
   ownerOf,
+  readTextFormatting,
   reconcileTextFormatting,
   setFrameName,
   setOwner,
@@ -364,6 +366,35 @@ describe('a text change: levels carried over, marks from the canvas', () => {
       reconcileTextFormatting(tb as never)
       expect(toRecord(tb as never)).toEqual(text({ text: 'body\n\nTitle', headings: [...headings] }))
     }
+  })
+
+  it('a paste that leaves the same text: a word from a larger text pasted over the same word brings no heading', () => {
+    const tb = mk({ text: 'BIG\nbody' })
+    change(tb, 'BIG\nbody', { 0: { 0: pasted(), 1: pasted(), 2: pasted() } }, 3) // 48 px: a level 1 size here
+    expect(reconcileTextFormatting(tb as never)).toBe(true)
+    expect(tb.styles).toEqual({})
+    expect(toRecord(tb as never)).toEqual(text({ text: 'BIG\nbody' }))
+  })
+
+  it('a paste that leaves the same text: normal text pasted over a heading line keeps the heading, with its bold implied', () => {
+    const tb = mk({ text: 'Title\nbody', headings: [1] })
+    const plain = pasted({ fontSize: 24 })
+    change(tb, 'Title\nbody', { 0: { 0: plain, 1: plain, 2: plain, 3: plain, 4: plain } }, 5)
+    expect(reconcileTextFormatting(tb as never)).toBe(true)
+    expect(Object.values(tb.styles[0]!)).toEqual(Array.from({ length: 5 }, () => h1))
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Title\nbody', headings: [1] }))
+    // Bold pasted over the heading is the heading's own; bold pasted over the normal line is a mark.
+    const bold = pasted({ fontSize: 24, fontWeight: 'bold' })
+    change(tb, 'Title\nbody', { 0: { 0: bold, 1: bold, 2: bold, 3: bold, 4: bold }, 1: { 0: bold, 1: bold, 2: bold, 3: bold } }, 10)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Title\nbody', headings: [1], spans: [{ start: 6, end: 10, bold: true }] }))
+  })
+
+  it('a text with no remembered state has nothing to carry over: a change reads its levels from the sizes', () => {
+    const tb = new Textbox('Title\nbody', { fontSize: 24, width: 200, selectionEnd: 5 }) as unknown as Tb
+    tb.styles = { 0: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1 } }
+    expect(reconcileTextFormatting(tb as never)).toBe(false)
+    expect(readTextFormatting(tb as never, { caret: 5 }).headings).toEqual([1])
   })
 
   it('the record read in the middle of a change (before its rewrite) already carries the levels, not the pasted sizes', () => {
