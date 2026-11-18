@@ -53,8 +53,13 @@ publishing.
   where lines wrap, can differ between machines (already true of today's system font).
 - **A dragged text box sets the wrapping width only.** A text box is still as tall as its
   text; the dragged height is a guide and is not stored. A drag shorter than the click
-  threshold is a click and gives the default box (ten times the font size wide), as today.
+  threshold, or narrower than two font sizes, is a click and gives the default box (ten
+  times the font size wide) at the press point. (The first version of slice 4 gave such a
+  narrow drag a box two font sizes wide, in which every word wrapped onto its own line; the
+  review showed a slightly wobbling click produced it, so the default was changed.)
   Esc, a window blur or the board going read-only cancels the drag like any other gesture.
+  Belonging is unchanged: the centre of the box decides, at creation and once more when the
+  first edit ends, so a tall text started near a frame's bottom edge can still end up loose.
 - **Keyboard.** Ctrl/Cmd+B, I, U while editing a text act on the range or caret; with a text
   box selected they act on the whole box. They are claimed only in those two situations.
   Every existing canvas shortcut still stays out of the way while a text is being edited, and
@@ -111,7 +116,7 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | done: `b307275`, review fixes `2210acc` and `42739a3`, cleared by recheck |
 | 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | done: `f43bb1b`, cleared by review; its nits are fixed in slice 3 |
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | done: `4dd927b`, cleared by review; its nits are handled in slice 4 |
-| 4 | Text tool: drag out a box. | committed, in review |
+| 4 | Text tool: drag out a box. | committed (`0bbbb5c`), cleared by review; review fixes in progress |
 
 After the last slice is reviewed, the branch goes to a further independent hands-on QA and
 final review (Astra, coordinated separately). The milestone is not finished before that.
@@ -358,6 +363,22 @@ the hidden textarea agree after a shortcut and after a revert through Enter, Del
 Shift+End, cut, arrow keys and paste; an input-method composition straight after a shortcut
 or a revert gives the right text; `*` typed with AltGr (reported as Ctrl+Alt), on the numpad
 and by key repeat converts, and a key reported as "Unidentified" stays literal.
+
+### Slice 4 (`0bbbb5c`)
+
+Review by the centralized reviewer, verdict "slice 4 is clear", no code bugs:
+
+| # | Finding | Severity | Disposition |
+| - | ------- | -------- | ----------- |
+| 1 | README and AGENTS.md said a box dragged out inside a frame belongs to it; a tall text started near the frame's bottom edge ends up loose, because the owner is decided again from the box's centre when the first edit ends | should-fix, docs | Wording corrected in the slice 4 fix commit and the behaviour pinned by a real-browser test; the rule itself is unchanged and stays an open question for the owner |
+| 2 | A click that wobbles 4 or 5 pixels, or a mostly vertical drag, gave a box two font sizes wide | nit | Default changed in the fix commit: a drag narrower than two font sizes is a click and gives the default box |
+| 3 | The old click fallback never runs in a real browser and no test could show its guards work | nit | Removed in the fix commit; the unit tests that fired only a release now fire the press first |
+| - | Test gap: an image import finishing during a Text-tool drag was covered only on the fake canvas | gap | Real-browser test added in the fix commit |
+| - | Test gap: the board going read-only during the drag is covered only on the fake canvas | gap | Not added: verified by hand by the reviewer in a real browser (draft cancelled, no box, nothing written) |
+
+The reviewer's closing pass over slices 1 to 4 used together (a box dragged out inside a
+frame, a heading and italic by typing shortcut, a paste from another text, "Select with
+contents" and a corner scale, undo, redo, reload) found nothing wrong.
 
 Known limit recorded here rather than in the README (the app cannot produce it): a stored
 text containing a lone carriage return is drawn with it as a character, and the first
