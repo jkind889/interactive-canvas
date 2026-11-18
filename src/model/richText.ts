@@ -330,6 +330,8 @@ export interface EditOutcome {
    * the edit, or undefined when the edit inserted (or replaced) that character.
    */
   levelBefore(start: number, end: number): number | undefined
+  /** Where the two versions differ (empty at the end of the text when they are the same). */
+  change: TextChange
 }
 
 /**
@@ -359,7 +361,8 @@ export function textAfterEdit(prevText: string, prevHeadings: readonly number[] 
   }
   const prevLines = lineBounds(prev)
   const nextLines = lineBounds(nextText)
-  const { start, prevEnd, nextEnd } = prev === nextText ? { start: nextText.length, prevEnd: nextText.length, nextEnd: nextText.length } : diffText(prev, nextText, caret)
+  const change = prev === nextText ? { start: nextText.length, prevEnd: nextText.length, nextEnd: nextText.length } : diffText(prev, nextText, caret)
+  const { start, prevEnd, nextEnd } = change
   const ls = lineAt(prevLines, start)
   const le = lineAt(prevLines, prevEnd)
   const ne = lineAt(nextLines, nextEnd)
@@ -385,6 +388,7 @@ export function textAfterEdit(prevText: string, prevHeadings: readonly number[] 
       if (a >= nextEnd) return level(lineAt(prevLines, a - nextEnd + prevEnd))
       return undefined
     },
+    change,
   }
 }
 
@@ -491,9 +495,26 @@ export function setHeading(text: string, fmt: TextFormatting, level: number, sta
   return setHeadingOfLines(text, fmt, level, first, last)
 }
 
-/** Sets the heading level (0: body text) of every line of the text, an empty last line included. */
+/**
+ * Sets the heading level (0: body text) of every line of the box (see `lastBoxLine`): an empty
+ * last line keeps its level.
+ */
 export function setHeadingEverywhere(text: string, fmt: TextFormatting, level: number): TextFormatting {
-  return setHeadingOfLines(text, fmt, level, 0, paragraphCount(text) - 1)
+  return setHeadingOfLines(text, fmt, level, 0, lastBoxLine(text))
+}
+
+/**
+ * The index of the last line that counts for a whole-box heading (what the controls show for
+ * the box, and what a heading set on the box changes): every line except an empty last one,
+ * which is only where the caret goes after a final line break. A text without a single
+ * character keeps all its lines.
+ */
+export function lastBoxLine(text: string): number {
+  const lines = lineBounds(text)
+  const last = lines.length - 1
+  const lastLine = lines[last] as LineBounds
+  if (last > 0 && lastLine.start === lastLine.end && lines.some((l) => l.end > l.start)) return last - 1
+  return last
 }
 
 function setHeadingOfLines(text: string, fmt: TextFormatting, level: number, first: number, last: number): TextFormatting {
@@ -518,9 +539,9 @@ export function formatOfRange(text: string, fmt: TextFormatting, start: number, 
   return formatOf(text, fmt, start, end, first, last)
 }
 
-/** The state of the whole text: all of its characters, and every line (an empty last line included). */
+/** The state of the whole text: all of its characters, and every line but an empty last one (see `lastBoxLine`). */
 export function formatOfText(text: string, fmt: TextFormatting): RangeFormat {
-  return formatOf(text, fmt, 0, text.length, 0, paragraphCount(text) - 1)
+  return formatOf(text, fmt, 0, text.length, 0, lastBoxLine(text))
 }
 
 function formatOf(text: string, fmt: TextFormatting, start: number, end: number, first: number, last: number): RangeFormat {
@@ -585,4 +606,144 @@ export function withPendingMarks(mask: number, pending: PendingMarks): number {
     else if (pending[m] === false) out &= ~BIT[m]
   }
   return out
+}
+
+// ---- typing shortcuts ---------------------------------------------------------------------
+//
+// While a text is typed into, `# `, `## `, `### ` at the very start of a line make it a
+// heading, and a closing `**` or `*` makes the text since the opening marker bold or italic.
+// The markers are removed: they are a faster way to press the same buttons, never stored.
+// Whether a character was typed (rather than pasted, dropped or composed) is the editor's to
+// decide; this only looks at the text, and only at the caret's line.
+
+/** Characters, besides whitespace, after which an opening `*` or `**` starts a word. */
+const OPENERS = '([{"\'“‘«'
+const isSpace = (c: string | undefined) => c !== undefined && /\s/.test(c)
+
+/** True when the character at `i` is a whole user-perceived character (a mark or emoji modifier after it would join it). */
+function ownCharacter(text: string, i: number): boolean {
+  const from = Math.max(0, i - 2)
+  let o = from
+  for (const g of splitGraphemes(text.slice(from, i + 3))) {
+    if (o === i) return g.length === 1
+    if (o > i) return false
+    o += g.length
+  }
+  return false
+}
+
+export interface TextRange {
+  start: number
+  end: number
+}
+
+/** A typing shortcut that fires. Offsets are UTF-16, into the text after the typed character. */
+export interface TypingShortcut {
+  kind: 'heading' | 'bold' | 'italic'
+  /** The caret's line (its break excluded). */
+  line: TextRange
+  /** Heading only: the level `#`, `##` or `###` gives. */
+  level?: HeadingLevel
+  /** The markers to remove, in order: the `#`s with the typed space, or the opening and the closing `*`/`**`. */
+  remove: TextRange[]
+  /** What gets the formatting: the text between the markers, or for a heading the rest of the line. */
+  content: TextRange
+}
+
+/**
+ * The typing shortcut that `inserted`, just typed so that the caret is now at `caret`,
+ * completes in `text`, or null. Only a space or a `*` can complete one:
+ * - a space right after `#`, `##` or `###` that start a line: that line becomes a heading
+ *   (`####`, a `#` after anything else, or a space that is not straight after the marker
+ *   do nothing);
+ * - a `*` completing a closing `**` (bold) or `*` (italic) when there is an opening marker of
+ *   the same kind earlier on the line, with marked text between them that is not empty, has
+ *   no whitespace just inside either marker and contains no `*`. The opening marker must start
+ *   a word (start of the line, or after whitespace or an opening bracket or quote) and neither
+ *   marker may touch another `*`: so `2 * 3 * 4`, `a ** b`, `snake*case*`, `***x***` stay as
+ *   they are, and nothing fires at the first `*` of a closing `**`.
+ * Every marker character must be a character of its own (not joined to a following mark).
+ * Looks at the caret's line only.
+ */
+export function matchTypingShortcut(text: string, caret: number, inserted: string): TypingShortcut | null {
+  if ((inserted !== ' ' && inserted !== '*') || caret < 1 || caret > text.length || text[caret - 1] !== inserted) return null
+  const lineEndFrom = (from: number) => {
+    let end = text.indexOf('\n', from)
+    if (end < 0) return text.length
+    if (end > from && text[end - 1] === '\r') end--
+    return end
+  }
+  if (inserted === ' ') {
+    const space = caret - 1
+    const start = space === 0 ? 0 : text.lastIndexOf('\n', space - 1) + 1
+    const hashes = space - start
+    if (hashes < 1 || hashes > 3) return null
+    for (let i = start; i < space; i++) if (text[i] !== '#') return null
+    if (!ownCharacter(text, space)) return null
+    const end = lineEndFrom(caret)
+    return { kind: 'heading', line: { start, end }, level: hashes as HeadingLevel, remove: [{ start, end: caret }], content: { start: caret, end } }
+  }
+  if (text[caret] === '*') return null // the closing marker would touch another `*`
+  const n = text[caret - 2] === '*' ? 2 : 1
+  const close = caret - n
+  // The opening marker is the nearest `*` before the marked text, on the same line.
+  let j = close - 1
+  while (j >= 0 && text[j] !== '*' && text[j] !== '\n') j--
+  if (j < 0 || text[j] !== '*') return null
+  const content = { start: j + 1, end: close }
+  if (content.start >= content.end || isSpace(text[content.start]) || isSpace(text[content.end - 1])) return null
+  const open = j - n + 1
+  if (open < 0 || (n === 2 && text[open] !== '*')) return null
+  const before = open > 0 ? text[open - 1] : undefined
+  if (before === '*') return null // touches another `*`
+  if (before !== undefined && !isSpace(before) && !OPENERS.includes(before)) return null // inside a word
+  for (const i of [open, j, close, caret - 1]) if (!ownCharacter(text, i)) return null
+  const start = open === 0 ? 0 : text.lastIndexOf('\n', open - 1) + 1
+  return {
+    kind: n === 2 ? 'bold' : 'italic',
+    line: { start, end: lineEndFrom(caret) },
+    remove: [
+      { start: open, end: j + 1 },
+      { start: close, end: caret },
+    ],
+    content,
+  }
+}
+
+/**
+ * What a typing shortcut leaves: the text without its markers, the formatting in canonical
+ * form (marks and levels of everything else carried over to the shorter text; the marked text
+ * bold or italic, which a heading line shows of itself for bold; or the line a heading of the
+ * given level, which drops bold marks in it like the Heading control), the caret (after the
+ * formatted text, or at the start of the heading's text) and where the formatted text now is.
+ */
+export function applyTypingShortcut(text: string, fmt: TextFormatting, sc: TypingShortcut): { text: string; fmt: TextFormatting; caret: number; content: TextRange } {
+  const removed = sc.remove
+  const shift = (o: number) => {
+    let out = o
+    for (const r of removed) if (r.end <= o) out -= r.end - r.start
+    return out
+  }
+  let next = ''
+  let from = 0
+  for (const r of removed) {
+    next += text.slice(from, r.start)
+    from = r.end
+  }
+  next += text.slice(from)
+  const lines = paragraphCount(text)
+  const headings = Array.from({ length: lines }, (_, i) => fmt.headings?.[i] ?? 0)
+  if (sc.kind === 'heading') headings[paragraphCount(text.slice(0, sc.line.start)) - 1] = sc.level ?? 0
+  const bit = sc.kind === 'bold' ? BIT.bold : sc.kind === 'italic' ? BIT.italic : 0
+  const marks = new Map<number, number>() // start of a kept character in the new text -> its marks
+  for (const c of charMarks(text, fmt.spans)) {
+    if (removed.some((r) => c.start < r.end && c.end > r.start)) continue
+    const inContent = c.start >= sc.content.start && c.end <= sc.content.end
+    marks.set(shift(c.start), inContent ? c.mask | bit : c.mask)
+  }
+  const canonical = canonicalHeadings(next, headings)
+  const spans = spansFromCharMasks(next, canonical, (a) => marks.get(a) ?? 0)
+  const out = canonicalTextFormatting(next, { ...fmt, spans, headings: canonical })
+  const content = { start: shift(sc.content.start), end: shift(sc.content.end) }
+  return { text: next, fmt: out, caret: sc.kind === 'heading' ? sc.line.start : content.end, content }
 }

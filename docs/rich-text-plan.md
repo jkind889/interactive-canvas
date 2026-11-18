@@ -110,7 +110,7 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | - | ----- | ----- |
 | 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | done: `b307275`, review fixes `2210acc` and `42739a3`, cleared by recheck |
 | 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | done: `f43bb1b`, cleared by review; its nits are fixed in slice 3 |
-| 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | not started |
+| 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | committed, in review |
 | 4 | Text tool: drag out a box. | not started |
 
 After the last slice is reviewed, the branch goes to a further independent hands-on QA and

@@ -2,7 +2,7 @@ import { FabricImage, Rect, Textbox, util } from 'fabric'
 import type { FabricObject, TextStyle, TextStyleDeclaration } from 'fabric'
 import { round, roundPositive } from '../model/doc.ts'
 import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharMasks, textAfterEdit, withPendingMarks } from '../model/richText.ts'
-import type { PendingMarks, TextFormatting } from '../model/richText.ts'
+import type { PendingMarks, TextChange, TextFormatting } from '../model/richText.ts'
 import type { FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 import type { Point } from '../model/viewport.ts'
 import { FONT_STACKS, fontIdOf } from './fonts.ts'
@@ -223,6 +223,21 @@ function graphemeToOffset(tb: Textbox, g: unknown): number | undefined {
   }
   return undefined
 }
+/** The inverse of `graphemeToOffset`: Fabric's grapheme index of a UTF-16 offset (an offset inside a character counts as before it). */
+function offsetToGrapheme(tb: Textbox, offset: number): number {
+  let g = 0
+  for (const line of linesOf(tb)) {
+    let o = line.start
+    for (const ch of line.graphemes) {
+      if (o + ch.length > offset) return g
+      o += ch.length
+      g++
+    }
+    if (o >= offset) return g
+    g++ // the line break
+  }
+  return Math.max(0, g - 1)
+}
 
 /**
  * The selected characters of a text as UTF-16 offsets [start, end) into its text (equal for
@@ -261,7 +276,7 @@ export function selectedRange(tb: Textbox): { start: number; end: number } | und
  * `change.pending` are marks chosen with only a caret for what is typed next: the characters
  * the change inserted get them (on or off), whatever style Fabric copied onto them.
  */
-export function readTextFormatting(tb: Textbox, change?: { caret: number | undefined; pending?: PendingMarks }): TextFormatting {
+export function readTextFormatting(tb: Textbox, change?: { caret: number | undefined; pending?: PendingMarks; seen?: (edit: TextEdit) => void }): TextFormatting {
   const raw: Record<string, unknown> = {
     font: fontIdOf(tb.fontFamily),
     align: tb.textAlign,
@@ -271,6 +286,7 @@ export function readTextFormatting(tb: Textbox, change?: { caret: number | undef
   const known = lastCanonical.get(tb)
   if (known && (change !== undefined || known.text !== text)) {
     const edit = textAfterEdit(known.text, known.headings, text, change?.caret)
+    change?.seen?.({ text, change: edit.change })
     const headings = edit.headings
     const marks = new Map<number, number>() // UTF-16 start of a marked character -> its marks
     const pending = change?.pending && Object.keys(change.pending).length > 0 ? change.pending : undefined
@@ -321,6 +337,12 @@ export function readTextFormatting(tb: Textbox, change?: { caret: number | undef
   return canonicalTextFormatting(text, raw)
 }
 
+/** A text change as `reconcileTextFormatting` worked it out: the text after it, and where it differs from the last canonical text. */
+export interface TextEdit {
+  text: string
+  change: TextChange
+}
+
 /** Writes a text's formatting (font, alignment, colour, marks, headings) onto its canvas object. */
 export function writeTextFormatting(tb: Textbox, fmt: TextFormatting) {
   tb.set({
@@ -358,6 +380,39 @@ export function applyTextFormatting(tb: Textbox, change: (fmt: TextFormatting, t
   return true
 }
 
+/**
+ * Replaces the text of a text being edited and its formatting in one step (a typing shortcut
+ * removing its markers, or putting them back), and puts the caret at `caret` (UTF-16). The
+ * formatting goes through `writeTextFormatting`, so the remembered canonical state is the new
+ * one, and the box keeps its alignment edge in place, as when typing.
+ *
+ * Fabric's own state is kept in agreement, because its next keystroke compares its hidden
+ * textarea with the object (fabric 7.4.0, ITextKeyBehavior.mjs `onInput` diffs the
+ * textarea's value and selection against `_text` and `selectionStart`/`selectionEnd`, and
+ * `updateFromTextArea` then takes the textarea's value as the text): the text is laid out
+ * again (`initDimensions`, through the styles that `writeTextFormatting` sets, splits it into
+ * `_text`), the grapheme selection is set directly (its setters would fire
+ * `text:selection:changed`), and the textarea gets the same value and, through Fabric's
+ * `_updateTextarea`, the same selection. Nothing is changed during an IME composition: the
+ * caller never calls this then.
+ */
+export function replaceEditedText(tb: Textbox, text: string, fmt: TextFormatting, caret: number) {
+  const anchorX = alignAnchor(tb)
+  const pos = tb.getPositionByOrigin(anchorX, 'top')
+  tb.text = text
+  writeTextFormatting(tb, fmt) // `styles` is a layout property: Fabric lays the new text out here
+  const g = offsetToGrapheme(tb, caret)
+  tb.selectionStart = g
+  tb.selectionEnd = g
+  const textarea = tb.hiddenTextarea
+  if (textarea) {
+    textarea.value = text
+    tb._updateTextarea()
+  }
+  tb.setPositionByOrigin(pos, anchorX, 'top')
+  tb.setCoords()
+}
+
 /** Changes a text's base size; its headings keep their ratio to it. No limit of its own. */
 export function setTextFontSize(tb: Textbox, fontSize: number, patch: { width?: number; scaleX?: number; scaleY?: number } = {}) {
   const fmt = readTextFormatting(tb)
@@ -390,11 +445,12 @@ function sameStyles(a: TextStyle | undefined, b: TextStyle): boolean {
  * its record says, and remembers the result as the text's canonical state. The text and
  * the caret are not touched; like Fabric's own typing, the box keeps its alignment edge in
  * place if its size changes. `pending`: marks chosen with only a caret, given to what the
- * change inserted (see `readTextFormatting`).
+ * change inserted (see `readTextFormatting`). `seen` is told how the text changed (the one
+ * diff this works out), when there is a remembered state to compare with.
  */
-export function reconcileTextFormatting(tb: Textbox, pending?: PendingMarks): boolean {
+export function reconcileTextFormatting(tb: Textbox, pending?: PendingMarks, seen?: (edit: TextEdit) => void): boolean {
   const known = lastCanonical.get(tb)
-  const fmt = readTextFormatting(tb, { caret: caretOffset(tb), pending })
+  const fmt = readTextFormatting(tb, { caret: caretOffset(tb), pending, seen })
   const want = stylesFor(tb, fmt, tb.fontSize)
   let changed = false
   if (!sameStyles(tb.styles, want)) {

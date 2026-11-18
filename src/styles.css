@@ -247,7 +247,7 @@ button:disabled {
   left: 50%;
   transform: translateX(-50%);
 }
-[data-tip]:disabled::after {
+[data-tip]:disabled:not(.tip-always)::after {
   display: none;
 }
 

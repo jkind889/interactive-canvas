@@ -122,11 +122,12 @@ const ALIGNS: ReadonlyArray<{ align: TextAlign; label: string; icon: () => React
   { align: 'center', label: 'Align centre', icon: AlignCenterIcon },
   { align: 'right', label: 'Align right', icon: AlignRightIcon },
 ]
-const HEADINGS: ReadonlyArray<{ level: 0 | 1 | 2 | 3; text: string; label: string }> = [
-  { level: 0, text: 'Body', label: 'Body' },
-  { level: 1, text: 'H1', label: 'Heading 1' },
-  { level: 2, text: 'H2', label: 'Heading 2' },
-  { level: 3, text: 'H3', label: 'Heading 3' },
+/** `name`: the accessible name, which starts with the visible text. */
+const HEADINGS: ReadonlyArray<{ level: 0 | 1 | 2 | 3; text: string; label: string; name: string }> = [
+  { level: 0, text: 'Body', label: 'Body', name: 'Body' },
+  { level: 1, text: 'H1', label: 'Heading 1', name: 'H1 (Heading 1)' },
+  { level: 2, text: 'H2', label: 'Heading 2', name: 'H2 (Heading 2)' },
+  { level: 3, text: 'H3', label: 'Heading 3', name: 'H3 (Heading 3)' },
 ]
 const pressedOf = (s: MarkState): boolean | 'mixed' => (s === 'mixed' ? 'mixed' : s === 'on')
 
@@ -192,7 +193,7 @@ function TextPanel({ editor, selection, text, locked }: { editor: Editor; select
               key={h.level}
               type="button"
               className="choice-btn heading-btn"
-              aria-label={h.label}
+              aria-label={h.name}
               aria-pressed={text.heading === h.level}
               data-tip={text.editing ? `${h.label}: the selected lines` : `${h.label}: every line`}
               data-tip-side="bottom"
@@ -219,7 +220,10 @@ function TextPanel({ editor, selection, text, locked }: { editor: Editor; select
                 keys={keys}
                 pressed={fixed ? true : pressedOf(text.marks[mark])}
                 disabled={locked || fixed}
-                title={fixed ? 'Headings are always bold' : undefined}
+                // One tip that explains why it is greyed out (shown although the button is disabled).
+                tip={fixed ? 'Bold: headings are always bold' : undefined}
+                className={fixed ? 'tip-always' : undefined}
+                aria-description={fixed ? 'Headings are always bold' : undefined}
                 onClick={() => editor.toggleMark(mark)}
               >
                 <Icon />

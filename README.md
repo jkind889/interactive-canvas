@@ -63,11 +63,22 @@ A multi-selection can be moved, scaled proportionally from a corner, and (if it 
 Select one text and the panel on the right shows its formatting: font, size, heading, bold / italic / underline / strikethrough, alignment and colour. The panel's buttons never take the keyboard away from a text you are typing in: click one and keep typing. (Several selected objects show no formatting controls.)
 
 - **While you are editing a text** (double-click it), bold, italic, underline and strikethrough act on the selected characters: a mark is removed if every selected character already has it, otherwise added to all of them. With only a caret, your choice applies to what you type next; the buttons show what the next character will look like. That choice is dropped when you move the caret (arrow keys, a click) or leave the text. Headings act on every line the selection touches, or the caret's line.
-- **With the text selected but not being edited**, everything acts on the whole box: a mark goes on unless every character already has it; a heading goes on every line.
+- **With the text selected but not being edited**, everything acts on the whole box: a mark goes on unless every character already has it; a heading goes on every line. An empty last line (where the caret goes after a final line break) is left out: it does not make the panel show the heading as mixed, and a heading set on the box does not reach it.
 - **Font, alignment and colour** always apply to the whole box, also while you are editing it. Alignment moves the words inside the box; the box keeps its position and width. Colours are a fixed set of eight, including white for text on images.
 - **A heading line is always bold.** Bold has no effect on a selection that lies entirely in heading lines (the Bold button shows pressed and greyed out there), and on a selection that mixes heading and normal lines it changes the normal lines only. Setting a line back to Body leaves it plain.
 - **Undo:** formatting changed while editing is saved straight away, like typing, and the whole edit becomes one undo step when you leave the text. Formatting a selected box is an undo step of its own (quick repeats of the same kind, such as trying several fonts, count as one).
-- Formatting never changes which frame a text belongs to, even when a heading makes the text taller.
+- Formatting never changes which frame an existing text belongs to, even when a heading makes it taller. A new text's frame is decided once more when you first stop typing in it, from where its box then is, so formatting done while first typing it can count.
+- Holding `Ctrl/Cmd+B`, `I` or `U` down toggles once, however long you hold it.
+
+### Typing shortcuts
+
+While you type in a text, three markers turn into formatting, as a quicker way to press the same buttons. The markers disappear; they are never stored.
+
+- `# `, `## ` or `### ` at the very start of a line (the space typed last) makes that line Heading 1, 2 or 3. It works on an empty line, at the start of a line that already has text, and on a line that is already a heading (it changes the level).
+- `**bold**`: typing the second `*` of the closing `**` makes the text since the opening `**` bold. `*italic*`: typing the closing `*` makes it italic. What you type straight afterwards is plain again. In a heading, `**...**` only removes the markers (a heading is bold already).
+- They do not fire when what is between the markers is empty, starts or ends with a space, contains a `*` or a line break; when the opening marker is in the middle of a word or touches another `*`; or for `####` or a `#` that is not at the start of the line. So `2 * 3 * 4`, `a ** b`, `* item`, `snake*case*`, `***x***` and `#tag` stay as typed. Text that already contains markers (pasted, dropped, typed with an input method such as a Japanese IME, or loaded) is never converted.
+- **Backspace straight after a shortcut fired puts the characters back exactly as you typed them**, with the markers, and deletes nothing. It does so only as the very next thing you do: once you type, move the caret, use the panel or leave the text, Backspace deletes as usual.
+- Like typing, a shortcut is saved straight away and is part of the one undo step recorded when you leave the text.
 
 ## Storage, tabs and older builds
 
@@ -92,7 +103,7 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - A font or heading whose longest word does not fit the box widens it, as typing does; changing back does not narrow it again (undo does). Drag a side handle to narrow it.
 - Several selected objects show no formatting controls, even if they are all texts.
 - Dropping dragged text into a centred or right-aligned text can shift its box: when the dropped words make the box wider, it widens from its left edge, which is how the canvas library inserts dropped text. Typing keeps the box's alignment edge in place.
-- `Ctrl/Cmd+Z` while you are typing in a text is the browser's own undo of the typing. It brings back the characters but not a heading level the undone edit changed: after Backspace joins a normal line into a heading, undoing it this way leaves both lines headings. Leave the text and use the board's undo instead to restore the text and its formatting exactly.
+- `Ctrl/Cmd+Z` while you are typing in a text is the browser's own undo of the typing. It brings back the characters but not a heading level the undone edit changed: after Backspace joins a normal line into a heading, undoing it this way leaves both lines headings. Leave the text and use the board's undo instead to restore the text and its formatting exactly. The browser's undo also cannot take back a typing shortcut or its Backspace revert: straight after one it does nothing, and later it undoes only what was typed since.
 - Touch input is not supported.
 
 ## Testing
@@ -105,13 +116,13 @@ npm run test:e2e           # starts its own dev server on :5199 and runs e2e/*.s
 ```
 
 - **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, and the `Editor` state machines (hydration, gestures, frames) on a small fake of Fabric, since jsdom has no canvas.
-- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs), `text.spec.ts` (formatted text drawn, saved, scaled, undone and typed into) and `formatting.spec.ts` (the panel's text controls and `Ctrl/Cmd+B`, `I`, `U` on a range, at a caret and on a whole box). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
+- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs), `text.spec.ts` (formatted text drawn, saved, scaled, undone and typed into), `formatting.spec.ts` (the panel's text controls and `Ctrl/Cmd+B`, `I`, `U` on a range, at a caret and on a whole box) and `typing.spec.ts` (the typing shortcuts typed for real, what stays literal, Backspace to undo one, and that typing goes on normally afterwards). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
 - Use a browser already on your machine instead of the bundled one with `PW_CHANNEL=msedge` or `PW_CHANNEL=chrome`; change the port with `E2E_PORT`.
 - Failure traces and screenshots go to `test-results/` (git-ignored).
 
 ## Keyboard shortcuts
 
-Shortcuts never fire while you are typing in a field or editing text, except `Ctrl/Cmd+B`, `I`, `U` in a text you are editing. While a drag, resize or frame is in progress only `Esc` and the zoom keys respond.
+Shortcuts never fire while you are typing in a field or editing text, except `Ctrl/Cmd+B`, `I`, `U` in a text you are editing, and `Backspace` straight after a typing shortcut (see above). While a drag, resize or frame is in progress only `Esc` and the zoom keys respond.
 
 | Key                         | Action                         |
 | --------------------------- | ------------------------------ |

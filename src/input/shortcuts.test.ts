@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { isEditableTarget, isPanHoldKey, resolveEditingShortcut, resolveShortcut } from './shortcuts.ts'
+import { isEditableTarget, isPanHoldKey, resolveEditingShortcut, resolveShortcut, typedCharacter } from './shortcuts.ts'
 import type { KeyEventLike } from './shortcuts.ts'
 
 const idle = { editingText: false }
@@ -152,6 +152,17 @@ describe('formatting keys', () => {
     expect(resolveShortcut(key('b'), text)).toBeNull() // a plain letter is not a shortcut
   })
 
+  it('a held key repeating is claimed but does nothing (so holding it does not toggle again, and the browser does not act on it)', () => {
+    for (const k of all) {
+      expect(resolveShortcut(key(k, { ctrlKey: true, repeat: true }), text)).toBe('ignore')
+      expect(resolveShortcut(key(k, { ctrlKey: true, repeat: false }), text)).toBe(`format-${k === 'b' ? 'bold' : k === 'i' ? 'italic' : 'underline'}`)
+      // claimed only where the first press is
+      expect(resolveShortcut(key(k, { ctrlKey: true, repeat: true }), idle)).toBeNull()
+      expect(resolveShortcut(key(k, { ctrlKey: true, shiftKey: true, repeat: true }), text)).toBeNull()
+    }
+    expect(resolveShortcut(key('z', { ctrlKey: true, repeat: true }), text)).toBe('undo') // other keys repeat as before
+  })
+
   it('leave every other shortcut as it was when a text is selected', () => {
     expect(resolveShortcut(key('i'), text)).toBe('add-image')
     expect(resolveShortcut(key('z', { ctrlKey: true }), text)).toBe('undo')
@@ -191,6 +202,7 @@ describe('resolveEditingShortcut: keys pressed while a text is being edited', ()
       expect(resolveEditingShortcut(key(k, { target: ta }), ctx)).toBeNull()
     }
     expect(resolveEditingShortcut(key('Escape', { altKey: true, target: ta }), ctx)).toBeNull()
+    expect(resolveEditingShortcut(key('Escape', { target: ta }), { editedTextarea: ta, canRevertShortcut: true })).toBeNull()
     // And no canvas shortcut fires while a text is edited.
     expect(resolveShortcut(key('b', { ctrlKey: true, target: ta }), { editingText: true, textSelected: false })).toBeNull()
   })
@@ -213,5 +225,54 @@ describe('isPanHoldKey', () => {
   it('ignores modified Space and other keys', () => {
     expect(isPanHoldKey(space({ ctrlKey: true }), idle)).toBe(false)
     expect(isPanHoldKey(key('a'), idle)).toBe(false)
+  })
+})
+
+describe('resolveEditingShortcut: a held key, and Backspace after a typing shortcut', () => {
+  const area = () => el('textarea')
+
+  it('a held Ctrl/Cmd+B, I, U repeating is claimed but toggles nothing', () => {
+    const ta = area()
+    const ctx = { editedTextarea: ta }
+    for (const k of ['b', 'i', 'u']) {
+      expect(resolveEditingShortcut(key(k, { ctrlKey: true, repeat: true, target: ta }), ctx)).toBe('ignore')
+      expect(resolveEditingShortcut(key(k, { ctrlKey: true, altKey: true, repeat: true, target: ta }), ctx)).toBeNull()
+      expect(resolveEditingShortcut(key(k, { ctrlKey: true, repeat: true, target: document.body }), ctx)).toBeNull()
+    }
+  })
+
+  it('Backspace is claimed only straight after a shortcut fired, only from the edited text, with no modifier and not during composition', () => {
+    const ta = area()
+    const can = { editedTextarea: ta, canRevertShortcut: true }
+    expect(resolveEditingShortcut(key('Backspace', { target: ta }), can)).toBe('revert-shortcut')
+    expect(resolveEditingShortcut(key('Backspace', { target: ta }), { editedTextarea: ta })).toBeNull()
+    expect(resolveEditingShortcut(key('Backspace', { target: ta }), { editedTextarea: ta, canRevertShortcut: false })).toBeNull()
+    expect(resolveEditingShortcut(key('Backspace', { target: area() }), can)).toBeNull()
+    expect(resolveEditingShortcut(key('Backspace', { target: document.body }), can)).toBeNull()
+    expect(resolveEditingShortcut(key('Backspace', { target: ta }), { editedTextarea: null, canRevertShortcut: true })).toBeNull()
+    for (const mod of ['ctrlKey', 'metaKey', 'altKey', 'shiftKey'] as const) expect(resolveEditingShortcut(key('Backspace', { [mod]: true, target: ta }), can)).toBeNull()
+    expect(resolveEditingShortcut(key('Backspace', { isComposing: true, target: ta }), can)).toBeNull()
+    for (const k of ['Delete', 'ArrowLeft', 'a', '*', ' ', 'Escape', 'Tab', 'Enter']) expect(resolveEditingShortcut(key(k, { target: ta }), can)).toBeNull()
+    // and the canvas never sees it as "delete" while a text is edited
+    expect(resolveShortcut(key('Backspace', { target: ta }), { editingText: true })).toBeNull()
+  })
+})
+
+describe('typedCharacter: what a key types that can complete a typing shortcut', () => {
+  it('a space or a star typed into the edited text, AltGr included; nothing else', () => {
+    const ta = el('textarea')
+    const ctx = { editedTextarea: ta }
+    expect(typedCharacter(key(' ', { code: 'Space', target: ta }), ctx)).toBe(' ')
+    expect(typedCharacter(key('*', { code: 'Digit8', shiftKey: true, target: ta }), ctx)).toBe('*')
+    expect(typedCharacter(key('*', { code: 'NumpadMultiply', target: ta }), ctx)).toBe('*')
+    expect(typedCharacter(key('*', { ctrlKey: true, altKey: true, target: ta }), ctx)).toBe('*') // AltGr
+    expect(typedCharacter(key('*', { ctrlKey: true, target: ta }), ctx)).toBeNull()
+    expect(typedCharacter(key(' ', { metaKey: true, target: ta }), ctx)).toBeNull()
+    expect(typedCharacter(key('*', { isComposing: true, target: ta }), ctx)).toBeNull()
+    expect(typedCharacter(key('Process', { target: ta }), ctx)).toBeNull() // a key the IME takes
+    expect(typedCharacter(key('#', { target: ta }), ctx)).toBeNull() // only the last character of a marker counts
+    expect(typedCharacter(key('a', { target: ta }), ctx)).toBeNull()
+    expect(typedCharacter(key('*', { target: el('textarea') }), ctx)).toBeNull()
+    expect(typedCharacter(key('*', { target: ta }), { editedTextarea: null })).toBeNull()
   })
 })

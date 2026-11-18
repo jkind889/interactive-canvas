@@ -26,9 +26,12 @@ import type { Box } from '../model/frames.ts'
 import { History } from '../model/history.ts'
 import {
   DEFAULT_TEXT_COLOR,
+  applyTypingShortcut,
   formatAtCaret,
   formatOfRange,
   formatOfText,
+  marksAtCaret,
+  matchTypingShortcut,
   setHeading as setHeadingOfRange,
   setHeadingEverywhere,
   toggleMark as toggleMarkOfRange,
@@ -45,7 +48,7 @@ import { Autosaver } from '../persistence/autosave.ts'
 import { ABSENT } from '../persistence/boardStore.ts'
 import type { BoardStore } from '../persistence/boardStore.ts'
 import { hydrateBoard } from '../persistence/hydrate.ts'
-import { isPanHoldKey, resolveEditingShortcut, resolveShortcut } from '../input/shortcuts.ts'
+import { isPanHoldKey, resolveEditingShortcut, resolveShortcut, typedCharacter } from '../input/shortcuts.ts'
 import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
 import { FrameCanvas } from './FrameCanvas.ts'
@@ -65,6 +68,7 @@ import {
   applyTextFormatting,
   readTextFormatting,
   reconcileTextFormatting,
+  replaceEditedText,
   selectedRange,
   setFrameName,
   setOwner,
@@ -72,6 +76,7 @@ import {
   toFrameRecord,
   toRecord,
 } from './objects.ts'
+import type { TextEdit } from './objects.ts'
 
 export type Tool = 'select' | 'hand' | 'text' | 'frame'
 
@@ -221,6 +226,19 @@ export class Editor {
    * when the caret moves for any other reason than typing, and when the edit ends.
    */
   private pending: { target: Textbox; marks: PendingMarks } | null = null
+  /**
+   * The character a key is typing into the text being edited (a space or a `*`, see
+   * `typedCharacter`), from its keydown until the text change it causes or its keyup. Only a
+   * typed character can fire a typing shortcut: pasted, dropped and composed text cannot.
+   */
+  private typed: string | null = null
+  /**
+   * The typing shortcut that has just fired, with what puts its literal characters back (the
+   * text, formatting, caret and pending marks from just before it fired). Only "straight
+   * after": dropped by the next text change, any caret or selection move, any formatting
+   * command, the end of the edit and any rebuild from records (undo, redo, a cancelled gesture).
+   */
+  private shortcutRevert: { target: Textbox; text: string; fmt: TextFormatting; caret: number; pending: PendingMarks | null } | null = null
   /** A selection-info refresh is queued (see `queueSelectionSync`). */
   private selectionSyncQueued = false
 
@@ -428,6 +446,7 @@ export class Editor {
   private applyRecords(scene: Scene) {
     this.applying = true
     this.pending = null
+    this.shortcutRevert = null
     try {
       const selected = new Set(this.selectedIds())
       this.canvas.discardActiveObject()
@@ -672,7 +691,16 @@ export class Editor {
       // that the canvas does not show.
       // Marks chosen with only a caret go to what was just typed (they last through every
       // step of an IME composition, which fires this without moving the caret otherwise).
-      if (target instanceof Textbox) reconcileTextFormatting(target, target.isEditing ? this.pendingFor(target) : undefined)
+      // Then a typed character that completes a typing shortcut converts the text, in the same
+      // callback, before the save below is scheduled (see `typingShortcut`).
+      const typed = this.typed
+      this.typed = null
+      this.shortcutRevert = null // any change of the text ends "straight after a shortcut"
+      if (target instanceof Textbox) {
+        let edit = undefined as TextEdit | undefined
+        reconcileTextFormatting(target, target.isEditing ? this.pendingFor(target) : undefined, (e) => (edit = e))
+        if (edit && typed !== null) this.typingShortcut(target, edit, typed)
+      }
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
       this.queueSelectionSync()
     })
@@ -681,10 +709,12 @@ export class Editor {
     // 7.4.0, ITextBehavior.mjs `updateFromTextArea`), and so does an IME composition.
     c.on('text:selection:changed', ({ target }) => {
       if (this.pending?.target === target) this.pending = null
+      if (this.shortcutRevert?.target === target) this.shortcutRevert = null
       this.queueSelectionSync()
     })
     c.on('text:editing:exited', ({ target }) => {
       if (this.pending?.target === target) this.pending = null
+      if (this.shortcutRevert?.target === target) this.shortcutRevert = null
       // A press inside the text may still be held (it started no gesture, and the text could
       // not move while it was being edited). End it, or the text would now be dragged with
       // no gesture: visible to saves half-way and impossible to cancel.
@@ -1118,6 +1148,7 @@ export class Editor {
 
     const onKeyDown = (e: KeyboardEvent) => this.handleKeyDown(e)
     const onKeyUp = (e: KeyboardEvent) => {
+      this.typed = null // what the key typed has arrived by now, if it typed anything
       if (e.code === 'Space' && this.spaceHeld) {
         this.spaceHeld = false
         this.applyToolState()
@@ -1198,6 +1229,8 @@ export class Editor {
     const active = this.canvas.getActiveObject()
     const edited = active instanceof Textbox && active.isEditing ? active : null
     const ctx = { editingText: this.state.editingText, textSelected: active instanceof Textbox && !active.isEditing }
+    const editing = { editedTextarea: edited?.hiddenTextarea ?? null, canRevertShortcut: edited !== null && this.shortcutRevert?.target === edited }
+    this.typed = this.busy ? null : typedCharacter(e, editing) // observed only, never claimed
     if (this.busy) {
       // Mid-gesture: Esc cancels it, zoom still works, everything else waits.
       const action = resolveShortcut(e, ctx)
@@ -1216,11 +1249,14 @@ export class Editor {
     // Keys typed into the text being edited reach this window listener from Fabric's hidden
     // textarea; Fabric does nothing with Ctrl/Cmd+B, I or U and lets them bubble (fabric
     // 7.4.0, ITextKeyBehavior.mjs `onKeyDown`, constants.mjs `ctrlKeysMapDown`), so no capture
-    // listener is needed. Everything else typed there is left alone.
-    const mark = resolveEditingShortcut(e, { editedTextarea: edited?.hiddenTextarea ?? null })
-    if (mark) {
+    // listener is needed. Backspace is not Fabric's either: the textarea deletes and Fabric
+    // follows from its input event (constants.mjs `keysMap` has no Backspace), so preventing it
+    // here keeps anything from being deleted. Everything else typed there is left alone.
+    const claimed = resolveEditingShortcut(e, editing)
+    if (claimed) {
       e.preventDefault()
-      this.toggleMark(mark)
+      if (claimed === 'revert-shortcut') this.revertShortcut()
+      else if (claimed !== 'ignore') this.toggleMark(claimed)
       return
     }
     if (isPanHoldKey(e, ctx)) {
@@ -1280,6 +1316,8 @@ export class Editor {
         return this.toggleMark('italic')
       case 'format-underline':
         return this.toggleMark('underline')
+      case 'ignore':
+        return
       case 'escape':
         if (this.busy) return
         if (this.state.tool !== 'select') this.setTool('select')
@@ -1536,6 +1574,7 @@ export class Editor {
   }
 
   setFontSize(size: number) {
+    this.shortcutRevert = null
     if (!this.editable || this.busy) return
     const active = this.canvas.getActiveObject()
     if (!(active instanceof Textbox) || !Number.isFinite(size)) return
@@ -1560,6 +1599,7 @@ export class Editor {
 
   /** The text a formatting command acts on, or null when there is none or the board may not change now. */
   private formatTarget(): Textbox | null {
+    this.shortcutRevert = null // a formatting command ends "straight after a shortcut"
     if (!this.editable || this.busy) return null
     const active = this.canvas.getActiveObject()
     return active instanceof Textbox ? active : null
@@ -1621,6 +1661,60 @@ export class Editor {
   setTextColor(color: string) {
     const tb = this.formatTarget()
     if (tb) this.formatText(tb, 'color', (fmt) => ({ ...fmt, color }))
+  }
+
+  // ---- typing shortcuts ----------------------------------------------------------------------
+  //
+  // While a text is typed into, `# `, `## `, `### ` at the start of a line make it a heading,
+  // and a closing `**` or `*` makes the text since the opening marker bold or italic; the
+  // markers go (see `matchTypingShortcut`). Backspace straight afterwards puts the literal
+  // characters back. Like typing, a conversion is saved as it happens and is part of the one
+  // undo step recorded when the edit ends; it never changes ownership.
+
+  /**
+   * After a text change, in the `text:changed` callback, once its styles are canonical: when
+   * the change is exactly one character typed at the caret (`typed`, seen on its keydown),
+   * with nothing replaced, and it completes a typing shortcut, the text and its formatting are
+   * changed together in one step. Fabric 7.4 does nothing to the text after this callback
+   * (ITextKeyBehavior.mjs `onInput`: `updateAndFire` only asks for a render afterwards), and
+   * the save that typing schedules is scheduled after this returns, so no save can see the
+   * marker typed but not yet converted.
+   */
+  private typingShortcut(tb: Textbox, edit: TextEdit, typed: string) {
+    if (this.applying || !this.editable || this.busy || !tb.isEditing || this.canvas.getActiveObject() !== tb) return
+    if ((tb as unknown as { inCompositionMode?: boolean }).inCompositionMode) return
+    const { start, prevEnd, nextEnd } = edit.change
+    if (prevEnd !== start || nextEnd !== start + 1 || edit.text[start] !== typed) return
+    const caret = selectedRange(tb)
+    if (!caret || caret.start !== nextEnd || caret.end !== nextEnd) return
+    const sc = matchTypingShortcut(edit.text, nextEnd, typed)
+    if (!sc) return
+    const fmt = readTextFormatting(tb) // canonical: the reconcile has just remembered it
+    const pendingBefore = this.pending?.target === tb ? this.pending.marks : null
+    const out = applyTypingShortcut(edit.text, fmt, sc)
+    replaceEditedText(tb, out.text, out.fmt, out.caret)
+    if (sc.kind !== 'heading') {
+      // What is typed next is plain again: a pending "off" (none where typing would not carry
+      // the mark anyway, nor for bold on a heading line, where it cannot change).
+      const mark = sc.kind
+      const marks: PendingMarks = { ...(pendingBefore ?? {}) }
+      if (marksAtCaret(out.text, out.fmt, out.caret)[mark] && !(mark === 'bold' && formatAtCaret(out.text, out.fmt, out.caret).boldFromHeading)) marks[mark] = false
+      else delete marks[mark]
+      this.pending = Object.keys(marks).length > 0 ? { target: tb, marks } : null
+    }
+    this.shortcutRevert = { target: tb, text: edit.text, fmt, caret: nextEnd, pending: pendingBefore }
+  }
+
+  /** Backspace straight after a typing shortcut fired: its literal characters come back, exactly as typed, and nothing is deleted. */
+  private revertShortcut() {
+    const r = this.shortcutRevert
+    this.shortcutRevert = null
+    if (!r || !this.editable || this.busy || !r.target.isEditing || this.canvas.getActiveObject() !== r.target) return
+    replaceEditedText(r.target, r.text, r.fmt, r.caret)
+    this.pending = r.pending ? { target: r.target, marks: r.pending } : null
+    this.canvas.requestRenderAll()
+    this.autosaver.markDirty() // like typing (a blank text is out of the scene, so a save stores none)
+    this.syncSelection()
   }
 
   arrange(op: LayerOp) {

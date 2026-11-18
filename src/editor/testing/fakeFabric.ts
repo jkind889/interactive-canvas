@@ -137,6 +137,19 @@ export class Textbox extends FakeObject {
   /** Fabric's caret, in graphemes with one per line break; absent unless a test sets it. */
   selectionStart?: number
   selectionEnd?: number
+  /** Fabric's hidden editing textarea; null unless a test installs one. */
+  hiddenTextarea: HTMLTextAreaElement | null = null
+  /** True between Fabric's compositionstart and compositionend (a test sets it). */
+  inCompositionMode = false
+  /** Like Fabric: copies the grapheme selection onto the hidden textarea as UTF-16 offsets (unless composing). */
+  _updateTextarea() {
+    const ta = this.hiddenTextarea
+    if (!ta || this.inCompositionMode) return
+    const graphemes = this.text.split('\n').flatMap((line, i) => (i === 0 ? this.graphemeSplit(line) : ['\n', ...this.graphemeSplit(line)]))
+    const at = (g: number | undefined) => graphemes.slice(0, g ?? 0).join('').length
+    ta.selectionStart = at(this.selectionStart)
+    ta.selectionEnd = at(this.selectionEnd)
+  }
   /** Test helper: what typing does (optionally leaving the caret at grapheme `caret`). */
   type(text: string, caret?: number) {
     this.text = text
