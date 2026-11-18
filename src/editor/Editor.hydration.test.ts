@@ -265,3 +265,25 @@ describe('Editor: a stored image that fails to decode fails closed', () => {
     expect(store.prunes).toEqual([['a1', 'a2']])
   })
 })
+
+describe('Editor: a stored board with frames (interim, until frames are editable)', () => {
+  it('is shown read-only and is never rewritten as a frameless board', async () => {
+    const doc: BoardDoc = {
+      ...storedDoc(),
+      frames: [{ id: 'f1', name: 'Cover', left: 0, top: 0, width: 400, height: 300 }],
+      objects: storedDoc().objects.map((o) => ({ ...o, frameId: 'f1' })),
+    }
+    const store = new SpyStore({ doc, assets: storedAssets() })
+    store.holdLoad = false
+    const editor = make(store, new FakeAssets())
+    await editor.init()
+    expect(editor.getState().readOnly).toMatch(/frames.*read-only/)
+    expect(editor.getState().save.kind).toBe('unavailable')
+    expect(editor.getState().objectCount).toBe(3)
+    editor.setTitle('would flatten the frames')
+    editor.addText()
+    await flush()
+    expect(store.saves).toHaveLength(0)
+    expect(store.prunes).toHaveLength(0)
+  })
+})

@@ -162,6 +162,16 @@ export class Editor {
         this.autosaver.markLoaded(false)
         break
       case 'restored':
+        if (outcome.doc.frames.length > 0) {
+          // Interim (until the editor understands frames): a board that has frames is shown
+          // read-only, exactly like any board this build cannot fully restore, so its
+          // frames and ownership can never be flattened away by a save.
+          const message = 'This board contains frames, which this build cannot edit yet. It is read-only so nothing is lost.'
+          this.showStoredBoard(outcome.doc)
+          this.autosaver.disable(message)
+          this.setState({ readOnly: message, tool: 'hand' })
+          break
+        }
         this.showStoredBoard(outcome.doc)
         this.autosaver.markLoaded(true)
         // Only after a complete, successful restore: drop bytes the stored board never referenced.

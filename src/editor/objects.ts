@@ -1,6 +1,6 @@
 import { FabricImage, Textbox, util } from 'fabric'
 import type { FabricObject } from 'fabric'
-import { MAX_FONT_SIZE, MIN_FONT_SIZE, clamp } from '../model/doc.ts'
+import { MAX_FONT_SIZE, MIN_FONT_SIZE, clamp, round } from '../model/doc.ts'
 import type { ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 
 export const ACCENT = '#6c7bf2'
@@ -99,12 +99,6 @@ export function toRecord(obj: FabricObject): ObjectRecord | null {
   if (m.assetId === undefined) return null
   const rec: ImageRecord = { ...base, type: 'image', assetId: m.assetId, scaleX: round(sx, 5), scaleY: round(sy, 5) }
   return rec
-}
-
-function round(n: number, digits = 2): number {
-  const f = 10 ** digits
-  const r = Math.round(n * f) / f
-  return Object.is(r, -0) ? 0 : r
 }
 
 /** Folds any residual scale on a text object into fontSize/width. */

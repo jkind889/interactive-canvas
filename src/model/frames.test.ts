@@ -100,10 +100,11 @@ describe('membersToRelease (O3)', () => {
     expect(membersToRelease({ left: 0, top: 0, width: 50, height: 50 }, [])).toEqual([])
   })
 
-  it('only names ids to release and never reassigns anything', () => {
+  it('only names ids to release: it never reassigns, reorders or mutates anything', () => {
+    const before = JSON.stringify(members)
     const out = membersToRelease({ left: 100, top: 100, width: 10, height: 10 }, members)
-    expect(out).toEqual(['in', 'edge', 'out', 'below'])
-    expect(out.every((id) => typeof id === 'string')).toBe(true)
+    expect(out).toEqual(['in', 'edge', 'out', 'below']) // even those another frame might contain
+    expect(JSON.stringify(members)).toBe(before)
   })
 })
 
@@ -238,5 +239,10 @@ describe('nextFrameName', () => {
     expect(nextFrameName(['Frame 1', 'Frame 2'])).toBe('Frame 3')
     expect(nextFrameName(['Frame 7', 'Cover', 'Frame 2'])).toBe('Frame 8')
     expect(nextFrameName(['Cover', 'Frame', 'Frame 2b', 'My Frame 9'])).toBe('Frame 1')
+  })
+
+  it('ignores absurdly large numbers instead of producing a repeated or exponent name', () => {
+    expect(nextFrameName(['Frame 99999999999999999999', 'Frame 4'])).toBe('Frame 5')
+    expect(nextFrameName(['Frame 999999999'])).toBe('Frame 1000000000')
   })
 })

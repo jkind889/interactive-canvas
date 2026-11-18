@@ -41,7 +41,8 @@ function parseFrame(raw: unknown): FrameRecord | null {
   const { id, name, left, top, width, height } = raw
   if (!isStr(id) || id === '' || !isStr(name)) return null
   if (!isNum(left) || !isNum(top) || !isNum(width) || !isNum(height) || width <= 0 || height <= 0) return null
-  return { id, name, left, top, width, height }
+  // Like a blank title: a blank name falls back instead of making the board unreadable.
+  return { id, name: name.trim() === '' ? DEFAULT_FRAME_NAME : name, left, top, width, height }
 }
 
 /**
@@ -109,7 +110,11 @@ export function serializeDoc(doc: BoardDoc): StoredDoc {
     version: 2,
     title: doc.title,
     frames: doc.frames.map((f) => ({ ...f })),
-    objects: doc.objects.map((o) => ({ ...o })),
+    objects: doc.objects.map((o) => {
+      const rec = { ...o }
+      if (rec.frameId === undefined) delete rec.frameId // never store an explicit undefined owner
+      return rec
+    }),
     viewport: { ...doc.viewport },
   }
 }
@@ -130,7 +135,10 @@ function recordsEqual(a: readonly object[], b: readonly object[]): boolean {
   for (let i = 0; i < a.length; i++) {
     const x = a[i] as Record<string, unknown>
     const y = b[i] as Record<string, unknown>
-    for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) if (x[k] !== y[k]) return false
+    for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) {
+      // NaN equals NaN here, so a broken number can never look like an endless stream of changes.
+      if (x[k] !== y[k] && !(Number.isNaN(x[k]) && Number.isNaN(y[k]))) return false
+    }
   }
   return true
 }

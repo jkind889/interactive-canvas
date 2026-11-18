@@ -112,7 +112,7 @@ export function rectFromDrag(a: Point, b: Point): Box {
 export function nextFrameName(existing: readonly string[]): string {
   let max = 0
   for (const name of existing) {
-    const m = /^Frame (\d+)$/.exec(name)
+    const m = /^Frame (\d{1,9})$/.exec(name) // bounded, so the number stays an exact integer
     if (m) max = Math.max(max, Number(m[1]))
   }
   return `Frame ${max + 1}`

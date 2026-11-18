@@ -106,6 +106,10 @@ describe('parseDoc: wire version 2 (frames)', () => {
     expect(parseDoc({ ...wire(framed()), objects: [{ ...text, id: 'f1' }] })).toBeNull()
   })
 
+  it('falls back to the default name for a blank frame name', () => {
+    expect(parseDoc({ ...wire(framed()), frames: [{ ...frame, name: '  ' }] })?.frames[0]?.name).toBe('Frame')
+  })
+
   it('strips unknown frame fields', () => {
     const parsed = parseDoc({ ...wire(framed()), frames: [{ ...frame, angle: 30, evil: 1 }] })
     expect(parsed?.frames[0]).toEqual(frame)
@@ -127,6 +131,12 @@ describe('serializeDoc', () => {
 
   it('round-trips both shapes back to the same in-memory document', () => {
     for (const doc of [good(), framed(), createEmptyDoc()]) expect(parseDoc(wire(doc))).toEqual(doc)
+  })
+
+  it('never stores an explicit undefined owner', () => {
+    const stored = serializeDoc({ ...framed(), objects: [{ ...image, frameId: undefined }] })
+    expect(stored.version).toBe(2)
+    expect('frameId' in (stored.objects[0] as object)).toBe(false)
   })
 
   it('does not alias the document it was given', () => {
@@ -210,6 +220,12 @@ describe('helpers', () => {
     const reordered = { angle: 15, scaleY: 0.5, scaleX: 0.5, assetId: 'asset-1', top: 6, left: 5, id: 'i1', type: 'image' } as ImageRecord
     expect(sceneEqual({ frames: [], objects: [image] }, { frames: [], objects: [reordered] })).toBe(true)
     expect(sceneEqual({ frames: [], objects: [image] }, { frames: [], objects: [{ ...image, frameId: undefined }] })).toBe(true)
+  })
+
+  it('scene equality treats NaN as equal to itself', () => {
+    const broken = { frames: [], objects: [{ ...image, left: Number.NaN }] }
+    expect(sceneEqual(broken, { frames: [], objects: [{ ...image, left: Number.NaN }] })).toBe(true)
+    expect(sceneEqual(broken, { frames: [], objects: [image] })).toBe(false)
   })
 
   it('normalizes titles', () => {

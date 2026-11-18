@@ -41,6 +41,24 @@ function putRaw(factory: IDBFactory, value: unknown): Promise<void> {
   })
 }
 
+/** Reads the stored row and database version without going through the store under test. */
+function readRaw(factory: IDBFactory): Promise<{ version: number; row: { doc: Record<string, unknown> } }> {
+  return new Promise((resolve, reject) => {
+    const open = factory.open('yuriful')
+    open.onerror = () => reject(open.error)
+    open.onsuccess = () => {
+      const db = open.result
+      const get = db.transaction('boards', 'readonly').objectStore('boards').get('current')
+      get.onsuccess = () => {
+        const version = db.version
+        db.close()
+        resolve({ version, row: get.result })
+      }
+      get.onerror = () => reject(get.error)
+    }
+  })
+}
+
 describe('IndexedDbBoardStore', () => {
   it('returns null when nothing has been saved', async () => {
     expect(await newStore().store.load()).toBeNull()
@@ -54,6 +72,16 @@ describe('IndexedDbBoardStore', () => {
     const stored = loaded?.assets.get('a1')
     expect(stored && [...new Uint8Array(stored.bytes)]).toEqual([1, 2, 3, 250])
     expect(stored?.type).toBe('image/png')
+  })
+
+  it('stores a frameless board as a raw milestone 1 row in a version 1 database', async () => {
+    const { factory, store } = newStore()
+    await store.save(docWith('a1'), [asset('a1', 1)])
+    const { version, row } = await readRaw(factory)
+    expect(version).toBe(1)
+    expect(Object.keys(row.doc)).toEqual(['version', 'title', 'objects', 'viewport'])
+    expect(row.doc.version).toBe(1)
+    expect(JSON.stringify(row.doc)).not.toContain('frame')
   })
 
   it('keeps previously stored assets when later saves add none', async () => {
