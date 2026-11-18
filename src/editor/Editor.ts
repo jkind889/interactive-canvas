@@ -172,8 +172,6 @@ export class Editor {
   private noticeTimer: ReturnType<typeof setTimeout> | null = null
   private noticeSeq = 0
   private gesture: Gesture | null = null
-  /** Something was typed since the current text edit began (typing is saved as it happens). */
-  private typedThisEdit = false
   private gestureSeq = 0
   /** Image batches that finished decoding while a gesture was in progress. */
   private stagedImports: ImageRecord[][] = []
@@ -350,6 +348,11 @@ export class Editor {
         frames.push(frame)
         continue
       }
+      // A blank text is not content: it exists on the canvas only while it is being typed
+      // into, and is discarded when that edit ends. Keeping it out of the scene means no
+      // save (whatever triggered it: typing, a pan, a title edit) and no history step can
+      // ever hold one.
+      if (obj instanceof Textbox && obj.text.trim() === '') continue
       const rec = toRecord(obj)
       if (rec) objects.push(rec)
     }
@@ -385,6 +388,7 @@ export class Editor {
       if (existing.length) this.canvas.remove(...existing)
       const built: FabricObject[] = scene.frames.map((rec) => createFrame(rec))
       for (const rec of scene.objects) {
+        if (rec.type === 'text' && rec.text.trim() === '') continue // an old board may still store a blank text: invisible, so not shown
         const obj = createObject(rec, (id) => this.assets.get(id))
         if (obj) built.push(obj)
       }
@@ -492,6 +496,18 @@ export class Editor {
           lockRotation: hasFrame,
         })
       }
+      // A selection that already was rotated when a frame joined it (Shift-click) would keep
+      // its turned box, with rotation now locked. Re-form it upright; nothing on the board
+      // moves, the members keep their own angles. After Fabric's own handling has returned.
+      if (active instanceof ActiveSelection && active.angle !== 0 && active.getObjects().some(isFrame)) {
+        queueMicrotask(() => {
+          if (this.disposed || this.gesture || c.getActiveObject() !== active || c._currentTransform) return
+          const members = active.getObjects().slice()
+          c.discardActiveObject()
+          this.selectByIds(members)
+          c.requestRenderAll()
+        })
+      }
       // A frame on its own is a container and resizes freely; everything else, including any
       // multi-selection, scales proportionally.
       c.uniformScaling = !(!!active && !(active instanceof ActiveSelection) && isFrame(active))
@@ -556,14 +572,9 @@ export class Editor {
       this.commit()
     })
 
-    c.on('text:editing:entered', () => {
-      this.typedThisEdit = false
-      this.syncState()
-    })
+    c.on('text:editing:entered', () => this.syncState())
     c.on('text:changed', () => {
-      if (this.applying || !this.editable) return
-      this.typedThisEdit = true
-      this.autosaver.markDirty() // keep typing durable; history commits on exit
+      if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
     })
     c.on('text:editing:exited', ({ target }) => {
       // A press inside the text may still be held (it started no gesture, and the text could
@@ -572,12 +583,10 @@ export class Editor {
       if (c._currentTransform?.target === target) c.endCurrentTransform()
       if (this.applying || !this.editable) return
       if (target instanceof Textbox && target.text.trim() === '') {
+        // A blank text was never part of the scene (see snapshot), so there is nothing to
+        // un-save: emptying it already saved the board without it.
         c.remove(target)
         c.requestRenderAll()
-        // Typing is saved as it happens, so a text that was typed and then emptied may
-        // already be stored. History never held it (nothing to commit), so say explicitly
-        // that the stored board is stale. A text nobody typed into was never saved: no write.
-        if (this.typedThisEdit) this.autosaver.markDirty()
       } else if (target instanceof Textbox && !this.history.current.objects.some((o) => o.id === idOf(target))) {
         // A NEW text (history has never held it): its box grew while it was typed, so its
         // owner is decided once more from where it ended up. Re-editing an existing text
@@ -647,8 +656,10 @@ export class Editor {
     const dragged = Math.hypot(end.x - start.x, end.y - start.y) * zoom >= DRAFT_CLICK_SLOP
     let box: Box
     if (dragged) {
-      const r = rectFromDrag(start, end)
-      box = { ...r, width: Math.max(r.width, MIN_FRAME_SIZE), height: Math.max(r.height, MIN_FRAME_SIZE) }
+      // At least the minimum size, growing away from the press point in the drag's direction.
+      const width = Math.max(Math.abs(end.x - start.x), MIN_FRAME_SIZE)
+      const height = Math.max(Math.abs(end.y - start.y), MIN_FRAME_SIZE)
+      box = { left: end.x < start.x ? start.x - width : start.x, top: end.y < start.y ? start.y - height : start.y, width, height }
     } else {
       // A plain click: a default frame of a fixed size on screen, its corner at the click.
       box = { left: start.x, top: start.y, width: DEFAULT_FRAME_SCREEN.width / zoom, height: DEFAULT_FRAME_SCREEN.height / zoom }

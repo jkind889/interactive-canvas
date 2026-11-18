@@ -221,6 +221,14 @@ describe('drawing a frame', () => {
     expect(b.doc().frames[0]).toMatchObject({ left: 100, top: 100, width: 24, height: 400 })
   })
 
+  it('the minimum size grows away from the press point, in the direction of the drag', async () => {
+    const b = await board([], [img('i', 0, 0)])
+    await draw(b, [600, 400], [590, 300]) // dragged up and slightly left
+    expect(b.doc().frames[0]).toMatchObject({ left: 576, top: 300, width: 24, height: 100 }) // right edge still at the press point
+    await draw(b, [900, 900], [905, 890]) // up and slightly right
+    expect(b.doc().frames[1]).toMatchObject({ left: 900, top: 876, width: 24, height: 24 })
+  })
+
   it('the Frame tool grabs and selects nothing, and draws no marquee', async () => {
     const b = await board([F('A', 0, 0)], [img('i', 50, 50)])
     b.editor.setTool('frame')
@@ -412,11 +420,13 @@ describe('mixed selections: a co-moved frame never adopts', () => {
   })
 
   it('once it leaves that owner it joins only an unselected frame, or becomes loose; never the co-moved frame', async () => {
-    const b = await board([F('A', 1000, 500), F('B', 1000, 0), F('C', 1000, 1000)], [txt('t1', 1050, 250, 'B')])
-    // Dragged together with A. The text ends over A (which moved with it) and outside B.
-    await b.move(['A', 't1'], 0, 250) // text centre (1150, 515): outside B; A is now at 750..1050
-    expect(b.owner('t1')).toBeUndefined() // loose, although A (co-moved) contains it
-    await b.move(['A', 't1'], 0, 550) // text centre (1150, 1065): inside the unselected C
+    // A overlaps the lower part of B; the text is B's and sits in that overlap. C is far below.
+    const b = await board([F('A', 1000, 200), F('B', 1000, 0), F('C', 1000, 1000)], [txt('t1', 1050, 250, 'B')])
+    // Dragged together with A: the text leaves B but is still inside A, which moved with it.
+    await b.move(['A', 't1'], 0, 100) // text centre (1150, 365): outside B (0..300), inside A (now 300..600)
+    expect(b.frame('A')).toMatchObject({ top: 300 })
+    expect(b.owner('t1')).toBeUndefined() // loose: the co-moved frame is never a candidate
+    await b.move(['A', 't1'], 0, 700) // text centre (1150, 1065): inside the unselected C (and still inside A)
     expect(b.owner('t1')).toBe('C')
   })
 
@@ -575,6 +585,39 @@ describe('creating content inside a frame (O4)', () => {
     b.editor.undo()
     expect(b.doc().objects).toHaveLength(1)
     expect(b.editor.getState().canUndo).toBe(false) // creating and typing was exactly one step
+  })
+
+  it('a new text belongs to the frame that was clicked in, even near its right edge, and stays its after typing', async () => {
+    const b = await board([F('A', 0, 0)], [img('i', 2000, 2000)])
+    b.editor.setTool('text')
+    // 80 units inside the right edge. The empty box is 240 wide, so its box centre is outside A.
+    b.canvas.fire('mouse:up', { e: { button: 0, clientX: 320, clientY: 100 }, isClick: true })
+    await tick()
+    const tb = b.canvas.objects.at(-1) as Textbox
+    expect(tb.left + tb.width / 2).toBeGreaterThan(400)
+    tb.type('edge')
+    tb.contentWidth = 50 // what was typed is short
+    await flush()
+    expect(b.store.saves.at(-1)!.doc.objects.at(-1)).toMatchObject({ text: 'edge', frameId: 'A' })
+    tb.exitEditing()
+    expect(b.doc().objects.at(-1)).toMatchObject({ frameId: 'A' })
+    const id = b.doc().objects.at(-1)!.id
+    await b.move([id], 3, 3) // nudging it does not shake it loose either
+    expect(b.owner(id)).toBe('A')
+    await b.move(['A'], 100, 0)
+    expect(b.rec(id).left).toBe(423)
+  })
+
+  it('a new text clicked just left of a frame is not that frame, although its wide box reaches into it', async () => {
+    const b = await board([F('A', 400, 0)], [img('i', 2000, 2000)])
+    b.editor.setTool('text')
+    b.canvas.fire('mouse:up', { e: { button: 0, clientX: 300, clientY: 100 }, isClick: true }) // box centre (420, 115) is inside A
+    await tick()
+    const tb = b.canvas.objects.at(-1) as Textbox
+    tb.type('beside')
+    tb.contentWidth = 60
+    tb.exitEditing()
+    expect(b.doc().objects.at(-1)).not.toHaveProperty('frameId')
   })
 
   it('a new text outside every frame is loose', async () => {
@@ -816,6 +859,22 @@ describe('frame commands', () => {
     expect(b.editor.getState()).toMatchObject({ tool: 'hand', selection: null })
     expect(b.canvas.objects).toHaveLength(2)
     expect(b.canvas.draft).toBeNull()
+
+    // Even if a frame were somehow selected on a read-only board, the commands do nothing.
+    b.canvas.setActiveObject(b.obj('A'))
+    expect(b.editor.renameFrame('Forced')).toBeNull()
+    b.editor.selectFrameContents()
+    expect(b.frame('A').name).toBe('A')
+    expect(b.canvas.getActiveObjects()).toEqual([b.obj('A')])
+  })
+
+  it('a name typed and then typed back within one step leaves no undo step', async () => {
+    const b = await board([F('A', 0, 0)], [])
+    b.select('A')
+    b.editor.renameFrame('B')
+    expect(b.editor.getState().canUndo).toBe(true)
+    b.editor.renameFrame('A')
+    expect(b.editor.getState().canUndo).toBe(false)
   })
 })
 

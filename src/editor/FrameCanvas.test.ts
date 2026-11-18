@@ -130,6 +130,26 @@ describe('target priority', () => {
     expect(canvas.searchPossibleTargets([selection] as Any, at(450, 380)).target).toBe(selection)
   })
 
+  it('the label of a frame that is part of the multi-selection acts on the whole selection', () => {
+    const f = createFrame(frame('f', 100, 100)) as unknown as FakeObject
+    const img = createObject(image('img', 150, 150), () => el) as unknown as FakeObject
+    add(f, img)
+    const selection = new ActiveSelection([f, img])
+    f.group = selection // as Fabric marks the members of the active selection
+    img.group = selection
+    ;(canvas as unknown as { setActiveObject: (o: unknown) => void }).setActiveObject(selection)
+    const objects = (canvas as unknown as { _objects: unknown[] })._objects as Any
+    // The label lies above the frame, outside the selection's box: Fabric would otherwise see the lone frame.
+    expect(canvas.searchPossibleTargets(objects, at(104, 100 - LABEL_GAP - 3)).target).toBe(selection)
+    expect(canvas.searchPossibleTargets(objects, at(100 - 3, 250)).target).toBe(selection) // outer half of the edge band
+    // When Fabric searches among the members themselves (Shift-click), it still gets the member.
+    expect(canvas.searchPossibleTargets([f, img] as Any, at(104, 100 - LABEL_GAP - 3)).target).toBe(f)
+    // A frame that is not part of the selection is still found as itself.
+    const other = createFrame(frame('other', 900, 100)) as unknown as FakeObject
+    add(other)
+    expect(targetAt(904, 100 - LABEL_GAP - 3)).toBe('other')
+  })
+
   it('ignores a hidden or non-evented frame', () => {
     const f = createFrame(frame('f', 100, 100))
     add(f)
@@ -224,5 +244,69 @@ describe('drawing', () => {
     c.fire('after:render', { ctx })
     expect(calls).toContain('setLineDash(6,4)')
     expect(calls).toContain('strokeRect(25.5,45.5,60,80)') // the draft is in scene units and follows the view
+    expect(calls.filter((s) => s === 'save()')).toHaveLength(1)
+    expect(calls.filter((s) => s === 'restore()')).toHaveLength(1)
+  })
+
+  it('draws the rectangle of the very first frame while it is being drawn, and skips hidden frames', () => {
+    const calls: string[] = []
+    const ctx = new Proxy({}, { get: (_t, prop) => (typeof prop === 'string' ? (...args: unknown[]) => void calls.push(`${prop}(${args.join(',')})`) : undefined), set: () => true })
+    const c = canvas as unknown as { fire: (n: string, p: unknown) => void; mainContext: unknown }
+    c.mainContext = ctx
+    canvas.draft = { left: 10, top: 20, width: 30, height: 40 } // no frame exists yet
+    c.fire('after:render', { ctx })
+    expect(calls).toContain('strokeRect(10.5,20.5,30,40)')
+
+    calls.length = 0
+    canvas.draft = null
+    const hidden = createFrame(frame('f', 100, 100, 400, 300, 'Hidden'))
+    Object.assign(hidden, { visible: false })
+    add(hidden)
+    c.fire('after:render', { ctx })
+    expect(calls).toEqual([])
+  })
+
+  it('snaps lines to device pixels at any pixel ratio, from both corners', () => {
+    const run = (ratio: number, f: FrameRecord) => {
+      const seen: { strokes: number[][]; lineWidth: number } = { strokes: [], lineWidth: 0 }
+      const ctx = new Proxy(
+        {},
+        {
+          get: (_t, prop) => (prop === 'strokeRect' ? (...a: number[]) => void seen.strokes.push(a) : () => {}),
+          set: (_t, prop, value) => {
+            if (prop === 'lineWidth') seen.lineWidth = value as number
+            return true
+          },
+        },
+      )
+      const fresh = new FrameCanvas(document.createElement('canvas'), { width: 800, height: 600 })
+      const c = fresh as unknown as { fire: (n: string, p: unknown) => void; mainContext: unknown; retinaScaling: number; add: (o: unknown) => void }
+      c.mainContext = ctx
+      c.retinaScaling = ratio
+      c.add(createFrame(f))
+      c.fire('after:render', { ctx })
+      return seen
+    }
+    for (const ratio of [1, 1.25, 1.5, 2, 3]) {
+      const { strokes, lineWidth } = run(ratio, frame('f', 100.3, 50.7, 333.3, 222.2))
+      const [x, y, w, h] = strokes[0]!
+      const device = Math.max(1, Math.round(ratio))
+      expect(lineWidth * ratio).toBeCloseTo(device, 9) // a whole number of device pixels wide
+      const offset = (device % 2) / 2 // an odd-width line is centred on a device pixel, an even one between two
+      for (const edge of [x!, y!, x! + w!, y! + h!]) {
+        const devicePos = edge * ratio - offset
+        expect(Math.abs(devicePos - Math.round(devicePos))).toBeLessThan(1e-9)
+      }
+    }
+    // Both corners are snapped: the far edge is where the frame's far edge rounds to, not left + rounded width.
+    const [x, , w] = run(1, frame('f', 0.4, 0, 100.4, 50)).strokes[0]!
+    expect(x! + w!).toBe(101.5) // round(100.8) + 0.5; "round(0.4) + round(100.4)" would give 100.5
+  })
+
+  it('a very long stored name is cut before it is measured', () => {
+    const name = 'x'.repeat(100_000)
+    const fitted = fitLabel(name)
+    expect(fitted.text.length).toBeLessThan(260)
+    expect(fitted.text.endsWith('…')).toBe(true)
   })
 })

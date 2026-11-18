@@ -764,6 +764,46 @@ describe('a new text that is abandoned untouched', () => {
     expect(fresh.editor.getState().save).toEqual({ kind: 'new' })
   })
 
+  it('is never stored, even when something else saves the board while it is open', async () => {
+    const { editor, store, canvas } = await setup()
+    editor.addText()
+    editor.zoomBy(1.2) // marks the board dirty for a reason that has nothing to do with the text
+    await flush()
+    expect(store.saves).toHaveLength(1)
+    expect(store.saves[0]!.doc.objects.map((o) => o.id)).toEqual(['img-1', 'txt-1']) // the blank text is not in it
+    ;(canvas.objects[2] as Textbox).exitEditing()
+    await flush()
+    expect(canvas.objects).toHaveLength(2)
+    expect(store.saves.at(-1)!.doc.objects.map((o) => o.id)).toEqual(['img-1', 'txt-1'])
+    expect(editor.getState().canUndo).toBe(false)
+  })
+
+  it('a text emptied in the middle of an edit drops out of the stored board at once', async () => {
+    const { editor, store, canvas } = await setup(null)
+    editor.addText()
+    const tb = canvas.objects[0] as Textbox
+    tb.type('a')
+    await flush()
+    expect(store.saves.at(-1)!.doc.objects).toHaveLength(1)
+    tb.type('   ') // whitespace only counts as blank, as it does when the edit ends
+    await flush()
+    expect(store.saves.at(-1)!.doc.objects).toHaveLength(0)
+    tb.type('back')
+    await flush()
+    expect(store.saves.at(-1)!.doc.objects).toHaveLength(1)
+  })
+
+  it('a blank text left in an old stored board is not shown and is gone after the next save', async () => {
+    const doc = { ...createEmptyDoc(), objects: [text({ id: 'ghost', text: '' }), text({ id: 'real', text: 'kept' })] }
+    const { editor, store, canvas } = await setup(doc)
+    expect(canvas.objects).toHaveLength(1)
+    await flush()
+    expect(store.attempts).toHaveLength(0) // loading still writes nothing
+    editor.setTitle('Edited')
+    await flush()
+    expect(store.saves[0]!.doc.objects.map((o) => o.id)).toEqual(['real'])
+  })
+
   it('the typed-something memory does not leak from one edit into the next', async () => {
     const { editor, store, canvas } = await setup(null)
     editor.addText()
@@ -880,11 +920,36 @@ describe('scene plumbing with frames', () => {
     expect(content.lockRotation).toBe(false)
     expect(content.controls).toMatchObject({ mtr: true, ml: false })
 
-    // Shift-click changes a selection in place: the rule follows its current members.
-    ;(content as unknown as { members: unknown[] }).members.push(canvas.objects[1]!)
+    // Shift-click changes a selection in place: the rule follows its current members, both ways.
+    const members = (content as unknown as { members: unknown[] }).members
+    members.push(canvas.objects[1]!)
     canvas.fire('selection:updated', {})
     expect(content.lockRotation).toBe(true)
     expect(content.controls.mtr).toBe(false)
+    members.pop() // the frame is Shift-clicked out again
+    canvas.fire('selection:updated', {})
+    expect(content.lockRotation).toBe(false)
+    expect(content.controls.mtr).toBe(true)
+  })
+
+  it('a rotated selection that a frame joins is re-formed upright, after the canvas callback', async () => {
+    const { canvas } = await framed()
+    const { ActiveSelection } = await import('./testing/fakeFabric.ts')
+    const turned = new ActiveSelection([canvas.objects[2]!, canvas.objects[3]!])
+    turned.angle = 30
+    canvas.setActiveObject(turned)
+    await tick()
+    expect(canvas.getActiveObject()).toBe(turned) // content only: a turned selection is fine
+
+    ;(turned as unknown as { members: unknown[] }).members.push(canvas.objects[0]!) // a frame is Shift-clicked in
+    canvas.fire('selection:updated', {})
+    expect(canvas.getActiveObject()).toBe(turned) // not inside the callback
+    await tick()
+    const reformed = canvas.getActiveObject()!
+    expect(reformed).not.toBe(turned)
+    expect(reformed.angle).toBe(0)
+    expect(canvas.getActiveObjects()).toEqual([canvas.objects[2], canvas.objects[3], canvas.objects[0]])
+    expect(reformed.lockRotation).toBe(true)
   })
 
   it('layer commands move frames among frames and content among content, never across', async () => {

@@ -36,7 +36,7 @@ export class FrameCanvas extends Canvas {
       const [zoom, , , , panX, panY] = this.viewportTransform
       const d = this.draft
       const draft = d ? { left: d.left * zoom + panX, top: d.top * zoom + panY, width: d.width * zoom, height: d.height * zoom } : null
-      drawFrameOverlays(ctx, frames, draft)
+      drawFrameOverlays(ctx, frames, draft, this.getRetinaScaling())
     })
   }
 
@@ -57,7 +57,19 @@ export class FrameCanvas extends Canvas {
    */
   override searchPossibleTargets(objects: FabricObject[], pointer: Point): TargetsInfo {
     const frame = this.frameOverlayAt(objects, pointer)
-    if (frame) return { target: frame, subTargets: [], container: frame }
+    if (frame) {
+      // The label (and the outer half of the outline band) of a frame that is part of the
+      // current multi-selection lies outside the selection's box, so Fabric would not see
+      // the press as "on the selection" and would collapse it to that one frame. Pressing
+      // any part of a selected member acts on the whole selection. Only for the full-stack
+      // search: when Fabric looks among the members themselves (Shift-click) it needs the
+      // member, and `handleMultiSelection` below asks for the frame directly.
+      const selection = this.getActiveObject()
+      if (objects === this._objects && selection instanceof ActiveSelection && frame.group === selection) {
+        return { target: selection, subTargets: [], container: selection }
+      }
+      return { target: frame, subTargets: [], container: frame }
+    }
     return super.searchPossibleTargets(objects, pointer)
   }
 

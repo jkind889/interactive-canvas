@@ -46,6 +46,14 @@ export class History<T> {
     const coalesce =
       coalesceKey !== undefined && coalesceKey === this.lastKey && t - this.lastAt <= this.coalesceMs && this.index > 0
     this.stack.length = this.index + 1 // drop redo branch
+    if (coalesce && this.equals(this.stack[this.index - 1] as T, state)) {
+      // The coalesced step went back to where it started (a name typed and then typed back):
+      // drop it, so that Undo is not left with a step that does nothing.
+      this.stack.length = this.index
+      this.index--
+      this.lastKey = null
+      return true
+    }
     if (coalesce) {
       this.stack[this.index] = state
     } else {

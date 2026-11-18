@@ -100,6 +100,13 @@ export class FakeObject {
 export class Textbox extends FakeObject {
   text: string
   fontSize = 24
+  /** Width of what is typed, if a test wants it narrower than the wrap box. */
+  contentWidth: number | null = null
+  /** Like Fabric: the width of the widest line. An empty text has no width at all. */
+  calcTextWidth() {
+    if (this.text === '') return 0
+    return this.contentWidth ?? this.width
+  }
   constructor(text: string, opts: Record<string, unknown> = {}) {
     super(opts)
     Object.assign(this, opts) // field initializers above ran after super(): apply the options again
@@ -278,6 +285,14 @@ export class Canvas {
   }
   getContext() {
     return this.mainContext
+  }
+  /** Device pixels per CSS pixel (tests may change it). */
+  retinaScaling = 1
+  getRetinaScaling() {
+    return this.retinaScaling
+  }
+  get _objects() {
+    return this.objects
   }
 
   // ---- plain base implementations of what FrameCanvas overrides ---------------------------

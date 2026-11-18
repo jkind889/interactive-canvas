@@ -91,8 +91,10 @@ test.describe('drawing a stored frame', () => {
         expect(a, `edge at ${px},${py}`).toBeGreaterThan(200)
         expect(r + g + b, `edge at ${px},${py}`).toBeLessThan(720) // not paper white
       }
-      expect(await pixel(page, midX, top + 4)).toEqual([255, 255, 255, 255]) // and only one pixel thick
-      expect(await pixel(page, left + 4, midY)).toEqual([255, 255, 255, 255])
+      expect(await pixel(page, midX, top + 2)).toEqual([255, 255, 255, 255]) // and only one pixel thick
+      expect(await pixel(page, left + 2, midY)).toEqual([255, 255, 255, 255])
+      expect((await pixel(page, midX, top - 2))[3]).toBe(0)
+      expect((await pixel(page, left - 2, midY))[3]).toBe(0)
 
       // The label sits just above the top-left corner, at a fixed screen size.
       expect(await inkIn(page, Math.round(left), Math.round(top) - 24, 60, 20)).toBeGreaterThan(20)
@@ -397,6 +399,43 @@ test.describe('moving and resizing frames', () => {
     expect(o.errors).toEqual([])
   })
 
+  test('a frame selected together with one member: the member moves once, an unselected member is carried once', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('picked', 350, 250, { frameId: 'A' }), image('carried', 460, 360, { frameId: 'A', scaleX: 0.5, scaleY: 0.5 })])
+    const label = labelOf(o, A)
+    await page.mouse.click(label.x, label.y)
+    await expect(title(page)).toHaveText('Frame')
+    await page.keyboard.down('Shift')
+    const picked = o.at(400, 290)
+    await page.mouse.click(picked.x, picked.y)
+    await page.keyboard.up('Shift')
+    await expect(title(page)).toHaveText('2 objects')
+
+    // Dragged by the selected member (inside the selection's box).
+    await drag(page, picked, { x: picked.x + 50, y: picked.y + 30 })
+    let doc = await storedWhen(page, (d) => frameOf(d, 'A').left === 350)
+    expect(frameOf(doc, 'A')).toMatchObject({ left: 350, top: 230 })
+    expect(obj(doc, 'picked')).toMatchObject({ left: 400, top: 280, frameId: 'A' }) // once, not twice
+    expect(obj(doc, 'carried')).toMatchObject({ left: 510, top: 390, frameId: 'A' }) // carried once
+    await expect(title(page)).toHaveText('2 objects')
+
+    // Dragged by the frame's label, which lies outside the selection's box: still the whole selection.
+    const moved = { x: label.x + 50, y: label.y + 30 }
+    await drag(page, moved, { x: moved.x + 40, y: moved.y + 20 })
+    doc = await storedWhen(page, (d) => frameOf(d, 'A').left === 390)
+    expect(frameOf(doc, 'A')).toMatchObject({ left: 390, top: 250 })
+    expect(obj(doc, 'picked')).toMatchObject({ left: 440, top: 300, frameId: 'A' })
+    expect(obj(doc, 'carried')).toMatchObject({ left: 550, top: 410, frameId: 'A' })
+    await expect(title(page)).toHaveText('2 objects') // the press on the label did not collapse the selection
+
+    await undoButton(page).click()
+    await undoButton(page).click()
+    await expect(undoButton(page)).toBeDisabled() // two drags, two steps
+    doc = await storedWhen(page, (d) => frameOf(d, 'A').left === 300)
+    expect(obj(doc, 'picked')).toMatchObject({ left: 350, top: 250 })
+    expect(obj(doc, 'carried')).toMatchObject({ left: 460, top: 360 })
+    expect(o.errors).toEqual([])
+  })
+
   test('a frame moved over a loose image does not adopt it; moving the image itself does; reload keeps both states', async ({ page }) => {
     const small = frameRec('A', 100, 200, 300, 250)
     const o = await openFramed(page, [small], [image('pic', 600, 250)]) // centre (700, 310)
@@ -535,6 +574,66 @@ test.describe('moving and resizing frames', () => {
 })
 
 test.describe('new text inside a frame', () => {
+  test('clicked near the right edge it still belongs to the frame, while typing, after the edit, and when nudged', async ({ page }) => {
+    const A = frameRec('A', 300, 200, 400, 300)
+    const o = await openFramed(page, [A], [])
+    await page.keyboard.press('t')
+    const p = o.at(620, 300) // 80 px inside the right edge: the empty text box is 240 px wide and sticks out of the frame
+    await page.mouse.click(p.x, p.y)
+    await page.keyboard.type('edge')
+    const typed = await storedWhen(page, (d) => d.objects.length === 1 && d.objects[0]!.text === 'edge')
+    expect(typed.objects[0]).toMatchObject({ frameId: 'A', left: 620, top: 300 })
+    expect(typed.objects[0]!.left + typed.objects[0]!.width! / 2).toBeGreaterThan(700) // its box centre really is outside A
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    const id = typed.objects[0]!.id
+    expect(obj(await storedDoc(page), id).frameId).toBe('A')
+
+    await drag(page, { x: p.x + 12, y: p.y + 12 }, { x: p.x + 16, y: p.y + 17 }) // nudged by (4, 5)
+    const nudged = await storedWhen(page, (d) => obj(d, id).left === 624)
+    expect(obj(nudged, id)).toMatchObject({ left: 624, top: 305, frameId: 'A' })
+
+    const label = labelOf(o, A)
+    await drag(page, label, { x: label.x + 100, y: label.y })
+    const moved = await storedWhen(page, (d) => frameOf(d, 'A').left === 400)
+    expect(obj(moved, id)).toMatchObject({ left: 724, top: 305, frameId: 'A' }) // and it travels with the frame
+    expect(o.errors).toEqual([])
+  })
+
+  test('clicked just left of a frame it is loose, although its wide empty box reaches into the frame', async ({ page }) => {
+    const A = frameRec('A', 500, 200, 400, 300)
+    const o = await openFramed(page, [A], [])
+    await page.keyboard.press('t')
+    const p = o.at(400, 300) // 100 px left of the frame; the 240 px box has its centre inside it
+    await page.mouse.click(p.x, p.y)
+    await page.keyboard.type('beside')
+    const typed = await storedWhen(page, (d) => d.objects.length === 1 && d.objects[0]!.text === 'beside')
+    expect(typed.objects[0]).not.toHaveProperty('frameId')
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    expect((await storedDoc(page)).objects[0]).not.toHaveProperty('frameId')
+    expect(o.errors).toEqual([])
+  })
+
+  test('a text that is opened and abandoned untouched is never stored, even if the view is panned meanwhile', async ({ page }) => {
+    const A = frameRec('A', 300, 200, 400, 300)
+    const o = await openFramed(page, [A], [])
+    await page.keyboard.press('t')
+    const p = o.at(360, 260)
+    await page.mouse.click(p.x, p.y)
+    await page.mouse.wheel(0, 120) // pans: the board is saved for a reason unrelated to the text
+    const panned = await storedWhen(page, (d) => d.viewport.panY !== 0)
+    expect(panned.objects).toEqual([])
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect((await storedDoc(page)).objects).toEqual([])
+    await page.reload()
+    await expect(page.locator('.toolbar')).toBeVisible()
+    await page.keyboard.press('Control+a')
+    await expect(title(page)).toHaveText('Frame') // only the frame: no invisible text came back
+    expect(o.errors).toEqual([])
+  })
+
   test('is owned before its first save: after a reload in the middle of typing it belongs to the frame and moves with it', async ({ page }) => {
     const A = frameRec('A', 300, 200, 400, 300)
     const o = await openFramed(page, [A], [])

@@ -26,6 +26,7 @@ const ELLIPSIS = '…'
 let measureCtx: CanvasRenderingContext2D | null | undefined
 const measured = new Map<string, { text: string; width: number }>()
 const CACHE_LIMIT = 500
+const MAX_MEASURED_CHARS = 200
 
 function textWidth(text: string): number {
   if (measureCtx === undefined) {
@@ -41,9 +42,11 @@ function textWidth(text: string): number {
 }
 
 /** The label text that fits the maximum label width, and its width in CSS pixels. */
-export function fitLabel(name: string): { text: string; width: number } {
-  const hit = measured.get(name)
+export function fitLabel(fullName: string): { text: string; width: number } {
+  const hit = measured.get(fullName)
   if (hit) return hit
+  // A stored name has no length limit; nothing beyond this could ever fit the label.
+  const name = fullName.length > MAX_MEASURED_CHARS ? `${Array.from(fullName.slice(0, MAX_MEASURED_CHARS * 2)).slice(0, MAX_MEASURED_CHARS).join('')}${ELLIPSIS}` : fullName
   let text = name
   let width = textWidth(text)
   if (width > LABEL_MAX_TEXT_WIDTH) {
@@ -56,7 +59,7 @@ export function fitLabel(name: string): { text: string; width: number } {
   }
   const fitted = { text, width: Math.ceil(width) }
   if (measured.size >= CACHE_LIMIT) measured.clear()
-  measured.set(name, fitted)
+  measured.set(fullName, fitted)
   return fitted
 }
 
@@ -100,19 +103,30 @@ export interface DrawnFrame {
 /**
  * Draws outlines and labels (and the dashed rectangle of a frame being drawn) in CSS
  * pixels. `ctx` must be at the canvas's base transform, i.e. not the viewport transform.
+ * `pixelRatio` is the number of device pixels per CSS pixel on that context.
  */
-export function drawFrameOverlays(ctx: CanvasRenderingContext2D, frames: readonly DrawnFrame[], draft: Box | null) {
+export function drawFrameOverlays(ctx: CanvasRenderingContext2D, frames: readonly DrawnFrame[], draft: Box | null, pixelRatio = 1) {
+  const ratio = pixelRatio > 0 ? pixelRatio : 1
+  // A line a whole number of device pixels wide, centred on device pixels, is crisp at any
+  // ratio (1, 1.25, 1.5, 2 ...). Both corners are snapped, never a corner plus a rounded
+  // size, so an edge cannot wobble against the paper by a pixel while zooming.
+  const devicePixels = Math.max(1, Math.round(ratio))
+  const snap = (v: number) => (Math.round(v * ratio) + (devicePixels % 2) / 2) / ratio
+  const strokeBox = (box: Box) => {
+    const x0 = snap(box.left)
+    const y0 = snap(box.top)
+    ctx.strokeRect(x0, y0, snap(box.left + box.width) - x0, snap(box.top + box.height) - y0)
+  }
   ctx.save()
   ctx.font = LABEL_FONT
   ctx.textBaseline = 'middle'
   ctx.textAlign = 'left'
-  ctx.lineWidth = 1
+  ctx.lineWidth = devicePixels / ratio
   ctx.setLineDash([])
   for (const { overlay, selected } of frames) {
     const { outline, label, text } = overlay
     ctx.strokeStyle = selected ? ACCENT : OUTLINE_COLOR
-    // Half-pixel offsets keep a 1px line crisp.
-    ctx.strokeRect(Math.round(outline.left) + 0.5, Math.round(outline.top) + 0.5, Math.round(outline.width), Math.round(outline.height))
+    strokeBox(outline)
     if (text !== '') {
       ctx.fillStyle = selected ? ACCENT : LABEL_COLOR
       ctx.fillText(text, label.left + LABEL_PAD_X, label.top + LABEL_HEIGHT / 2)
@@ -121,7 +135,7 @@ export function drawFrameOverlays(ctx: CanvasRenderingContext2D, frames: readonl
   if (draft) {
     ctx.strokeStyle = ACCENT
     ctx.setLineDash([6, 4])
-    ctx.strokeRect(Math.round(draft.left) + 0.5, Math.round(draft.top) + 0.5, Math.round(draft.width), Math.round(draft.height))
+    strokeBox(draft)
   }
   ctx.restore()
 }

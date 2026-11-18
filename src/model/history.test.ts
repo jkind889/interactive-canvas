@@ -89,6 +89,21 @@ describe('History', () => {
     expect(h.undo()).toBe(5)
   })
 
+  it('a coalesced step that returns to where it started disappears instead of leaving a no-op undo', () => {
+    const { h } = make()
+    h.push(1)
+    h.push(2, 'k')
+    h.push(3, 'k')
+    expect(h.push(1, 'k')).toBe(true) // typed back to the value from before the step
+    expect(h.current).toBe(1)
+    expect(h.undo()).toBe(0) // the next undo goes straight to the step before
+    expect(h.canUndo).toBe(false)
+    h.redo()
+    expect(h.canRedo).toBe(false)
+    h.push(5, 'k') // and the key does not linger: this is a fresh step
+    expect(h.undo()).toBe(1)
+  })
+
   it('never coalesces into the initial state', () => {
     const { h } = make()
     h.push(1, 'k')
