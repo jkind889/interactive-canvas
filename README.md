@@ -24,6 +24,7 @@ npm run dev        # http://localhost:5173
 - Pan and zoom (hand tool, Space+drag, middle mouse, wheel pans, Ctrl/Cmd+wheel zooms, +/- and Fit buttons).
 - Add images by file picker or by dropping files onto the board.
 - Add text; double-click to edit; corner handles scale the font, side handles change the wrap width.
+- Formatted text: a text can carry bold, italic, underline and strikethrough on ranges of characters, headings (2, 1.5 or 1.25 times the box's font size, always bold) on whole lines, and a font, alignment and colour for the whole box. Formatting is drawn on the board and kept through saving, reloading, undo and redo, moving, scaling, changing the font size and typing. There are no controls to apply it yet; it comes only from a stored board.
 - Move, resize, rotate, multi-select, layer (forward/back/front/back), delete.
 - **Frames**: named rectangles that structure a board without forcing everything into pages (see below).
 - Undo / redo for every canvas change. Esc, or switching away from the window, cancels a drag, resize or frame that is still in progress.
@@ -64,6 +65,7 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - **Boards saved by the previous build (milestone 1) open as they are.** Opening writes nothing. A board without frames keeps being saved in the old format.
 - **The first save of a board that contains a frame upgrades the database** in the same step that writes the board. From then on the previous build can no longer open it. This is deliberate: an old tab would otherwise silently drop the frames. There is no backup and no way back to the old build for that board.
 - **Two tabs on one board:** a tab never overwrites a board that another tab has changed since it loaded or last saved. It becomes read-only with a Reload button, and whatever it had not yet saved is not saved.
+- **Text formatting is stored inside each text**, in optional fields that are left out when they have their default, so a plain text is stored exactly as before and formatting needs no database change. A malformed formatting field is dropped when the board loads instead of making the board unreadable. The previous build shows formatted text plain and drops its formatting the next time it saves that board.
 - If another tab holds the database while a frame is first being saved, the save fails after a few seconds with a Retry; close the other tab and retry.
 
 ### Known limits
@@ -73,6 +75,8 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - Image bytes are stored as uploaded (no downscaling) and are also kept in memory for the session, so that undo can always bring an image back; very large images are limited by browser storage quota, and a failed write is reported in the header.
 - Something sitting inside a frame without belonging to it looks the same as something that does. The item count and "Select with contents" tell you which is which.
 - A new text box is wider than what you type into it (ten times its font size), and belonging goes by the centre of that box. A text started in the right part of a frame can therefore end up not belonging to it, and one started just left of a frame can end up belonging to it; drag the text, or narrow it with a side handle, to settle it. Whether a new text should instead belong to the frame that was clicked in is an open design question.
+- Fonts are named choices (Sans, Serif, Mono, Handwritten, Display) drawn with fonts already on the machine, so the exact typeface, and where lines wrap, can differ between machines.
+- While typing in a formatted text, the canvas follows Fabric's own habits and then tidies the result: typing next to a bold character is bold; Enter at the end of a heading continues the heading on the new line; deleting every character of a heading line turns it back into a normal line; Backspace that joins a line onto a heading makes the whole joined line the heading, and joining a heading onto the end of a normal line keeps its characters bold at the normal size. Which of these should change is open until the formatting controls arrive.
 - Touch input is not supported.
 
 ## Testing
@@ -85,7 +89,7 @@ npm run test:e2e           # starts its own dev server on :5199 and runs e2e/*.s
 ```
 
 - **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, and the `Editor` state machines (hydration, gestures, frames) on a small fake of Fabric, since jsdom has no canvas.
-- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing) and `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
+- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs) and `text.spec.ts` (formatted text drawn, saved, scaled, undone and typed into). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
 - Use a browser already on your machine instead of the bundled one with `PW_CHANNEL=msedge` or `PW_CHANNEL=chrome`; change the port with `E2E_PORT`.
 - Failure traces and screenshots go to `test-results/` (git-ignored).
 
@@ -113,8 +117,8 @@ Only the primary mouse button edits. The middle button pans.
 - **Fabric.js 7** (MIT) renders and edits the canvas. React renders only the chrome (header, toolbar, inspector) and never touches Fabric objects.
 - `src/editor/Editor.ts` is the single bridge: it owns the Fabric canvas, history, assets and autosave, and exposes an immutable `EditorState` snapshot through `subscribe`/`getState` (`useSyncExternalStore`). Fabric's event callbacks only record facts; a finished gesture is settled in a microtask after Fabric's own mouse-up handling, and a save during a gesture stores the board from before it.
 - `src/editor/FrameCanvas.ts` extends Fabric's canvas for frames (what counts as a hit, Shift-click and marquee rules) and `src/editor/frameLayer.ts` holds the one geometry used both to draw a frame's outline and label and to hit them.
-- `src/model/` is pure and unit-tested: document types and validation, the frame ownership rules and scale limits (`frames.ts`), snapshot `History` (with coalescing), layer reordering, viewport math.
+- `src/model/` is pure and unit-tested: document types and validation, the frame ownership rules and scale limits (`frames.ts`), the canonical form of text formatting (`richText.ts`), snapshot `History` (with coalescing), layer reordering, viewport math.
 - `src/persistence/` has the IndexedDB store (document and image bytes written in one transaction, guarded by a revision token) and the `Autosaver` status machine.
 - `src/input/shortcuts.ts` maps key events to actions and decides when to stay out of the way.
 
-The saved document references images by id; the bytes live in a separate IndexedDB store. Frames have stable ids, names and unrotated rectangles, and each object records the frame that owns it. Undo/redo restores objects from serialized snapshots, using already-decoded images, so it is synchronous.
+The saved document references images by id; the bytes live in a separate IndexedDB store. Frames have stable ids, names and unrotated rectangles, and each object records the frame that owns it. A text's formatting is stored as character ranges (UTF-16 offsets into its text) and per-line heading levels, and drawn as Fabric per-character styles (`src/editor/objects.ts`). Undo/redo restores objects from serialized snapshots, using already-decoded images, so it is synchronous.

@@ -25,12 +25,44 @@ export interface ImageRecord extends RecordBase {
   scaleY: number
 }
 
+/** A named font choice. The board stores the id, never a font name (see src/editor/fonts.ts). */
+export type FontId = 'sans' | 'serif' | 'mono' | 'hand' | 'display'
+
+/**
+ * Marks on a range of a text's characters. Offsets are UTF-16 code units into the text
+ * (`text.slice(start, end)` is the marked text); a span may cross a line break. Only
+ * marks that are on are present, always as `true`. See src/model/richText.ts for the
+ * canonical form every stored and in-memory span list is in.
+ */
+export interface TextSpan {
+  start: number
+  end: number
+  bold?: true
+  italic?: true
+  underline?: true
+  strike?: true
+}
+
+/**
+ * Formatting fields are absent when they have their default, so a plain text has exactly
+ * the milestone 1 keys.
+ */
 export interface TextRecord extends RecordBase {
   type: 'text'
   text: string
+  /** The box's own size; headings are drawn larger (see HEADING_SCALE). */
   fontSize: number
   /** Wrapping width in scene units. */
   width: number
+  /** Absent: 'sans'. */
+  font?: FontId
+  /** Absent: left. */
+  align?: 'center' | 'right'
+  /** `#rrggbb`, lower case. Absent: the default ink. */
+  color?: string
+  spans?: TextSpan[]
+  /** Heading level (0 to 3) per paragraph (`text.split('\n')`), trailing zeros trimmed. */
+  headings?: number[]
 }
 
 export type ObjectRecord = ImageRecord | TextRecord

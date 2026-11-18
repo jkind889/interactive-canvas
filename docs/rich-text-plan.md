@@ -108,7 +108,7 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 
 | # | Slice | State |
 | - | ----- | ----- |
-| 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | not started |
+| 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | committed, in review |
 | 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | not started |
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert, Enter after a heading. | not started |
 | 4 | Text tool: drag out a box. | not started |

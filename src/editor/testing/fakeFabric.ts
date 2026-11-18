@@ -100,11 +100,24 @@ export class FakeObject {
 export class Textbox extends FakeObject {
   text: string
   fontSize = 24
+  fontFamily = 'Times New Roman'
+  textAlign = 'left'
+  fill: unknown = 'rgb(0,0,0)'
+  /** Fabric's per-character styles: paragraph index -> grapheme index -> style. Never shifted by the fake. */
+  styles: Record<number, Record<number, Record<string, unknown>>> = {}
   constructor(text: string, opts: Record<string, unknown> = {}) {
     super(opts)
     Object.assign(this, opts) // field initializers above ran after super(): apply the options again
     this.text = text
     this.height = this.fontSize * 1.25
+  }
+  /** Same splitter as Fabric's (an Intl.Segmenter by grapheme). */
+  graphemeSplit(value: string): string[] {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value), (s) => s.segment)
+  }
+  /** The point named by an origin pair (the fake has no rotation). */
+  getPositionByOrigin(originX: Origin, originY: Origin) {
+    return this.translateToOriginPoint(this.getCenterPoint(), originX, originY)
   }
   private textBeforeEdit = ''
   enterEditing() {

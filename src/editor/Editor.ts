@@ -51,8 +51,10 @@ import {
   newId,
   normalizeTextScale,
   ownerOf,
+  reconcileTextFormatting,
   setFrameName,
   setOwner,
+  setTextFontSize,
   toFrameRecord,
   toRecord,
 } from './objects.ts'
@@ -576,7 +578,13 @@ export class Editor {
     })
 
     c.on('text:editing:entered', () => this.syncState())
-    c.on('text:changed', () => {
+    c.on('text:changed', ({ target }) => {
+      // Fabric fires this after it has changed the text, shifted its character styles and
+      // placed the caret, and does nothing to the text afterwards (fabric 7.4.0,
+      // ITextKeyBehavior.mjs onInput, DraggableTextDelegate.mjs drop/dragend). So the styles
+      // are made canonical right here, before the typing save is scheduled: a save can never
+      // store formatting that the canvas does not show.
+      if (target instanceof Textbox) reconcileTextFormatting(target)
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
     })
     c.on('text:editing:exited', ({ target }) => {
@@ -1416,7 +1424,7 @@ export class Editor {
     if (!this.editable || this.busy) return
     const active = this.canvas.getActiveObject()
     if (!(active instanceof Textbox) || !Number.isFinite(size)) return
-    active.set({ fontSize: clamp(size, MIN_FONT_SIZE, MAX_FONT_SIZE) })
+    setTextFontSize(active, clamp(size, MIN_FONT_SIZE, MAX_FONT_SIZE)) // headings keep their ratio
     active.setCoords()
     this.canvas.requestRenderAll()
     // A text that is blank right now (emptied in the middle of an edit) is not in the scene:

@@ -1,13 +1,16 @@
 import { FabricImage, Rect, Textbox, util } from 'fabric'
-import type { FabricObject } from 'fabric'
+import type { FabricObject, TextStyle, TextStyleDeclaration } from 'fabric'
 import { round, roundPositive } from '../model/doc.ts'
+import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharMasks } from '../model/richText.ts'
+import type { TextFormatting } from '../model/richText.ts'
 import type { FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 import type { Point } from '../model/viewport.ts'
+import { FONT_STACKS, fontIdOf } from './fonts.ts'
 
 export const ACCENT = '#6c7bf2'
-export const TEXT_COLOR = '#1d2230'
+export const TEXT_COLOR = DEFAULT_TEXT_COLOR
 export const FRAME_FILL = '#ffffff'
-export const FONT_FAMILY = 'system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif'
+export const FONT_FAMILY = FONT_STACKS.sans
 
 interface Meta {
   id: string
@@ -87,9 +90,169 @@ export function createObject(rec: ObjectRecord, getImage: (assetId: string) => H
     fill: TEXT_COLOR,
     lineHeight: 1.25,
   })
+  writeTextFormatting(tb, rec)
   tb.setControlsVisibility({ mt: false, mb: false })
   meta.set(tb, { id: rec.id, kind: 'text', ...(rec.frameId !== undefined && { frameId: rec.frameId }) })
   return tb
+}
+
+// ---- text formatting on the canvas ----------------------------------------------------------
+//
+// Fabric keeps per-character styles in `styles[line][char]`, where `line` is a paragraph of
+// the text (split on line breaks, NOT the wrapped line the box draws) and `char` is the index
+// of a grapheme within it (fabric 7.4.0: Text.mjs `_splitTextIntoLines`, Textbox.mjs
+// `_generateStyleMap` / `_getStyleDeclaration`). A record's spans use UTF-16 offsets into the
+// whole text; the two are converted here, using Fabric's own grapheme splitting.
+
+interface Line {
+  /** UTF-16 offset of the paragraph's first character. */
+  start: number
+  graphemes: string[]
+}
+
+/** The text's paragraphs exactly as Fabric splits them for styles (on /\r?\n/). */
+function linesOf(tb: Textbox): Line[] {
+  const text = tb.text
+  const lines: Line[] = []
+  let start = 0
+  for (const part of text.split('\n')) {
+    const body = part.endsWith('\r') && start + part.length < text.length ? part.slice(0, -1) : part
+    lines.push({ start, graphemes: tb.graphemeSplit(body) })
+    start += part.length + 1
+  }
+  return lines
+}
+
+/**
+ * The per-character styles that draw `fmt` on this text at base size `base`. A heading line
+ * gives every character its heading size and bold; an EMPTY heading line keeps one
+ * placeholder entry at character 0, because Fabric takes an empty line's height from it
+ * (Text.mjs `getHeightOfLineImpl`) and gives it to the first character typed there
+ * (ITextBehavior.mjs `insertCharStyleObject`).
+ */
+function stylesFor(tb: Textbox, fmt: TextFormatting, base: number): TextStyle {
+  const styles: TextStyle = {}
+  const spans = fmt.spans ?? []
+  let si = 0
+  linesOf(tb).forEach((line, li) => {
+    const level = fmt.headings?.[li]
+    const heading: TextStyleDeclaration = isHeadingLevel(level) ? { fontSize: headingFontSize(base, level), fontWeight: 'bold' } : {}
+    const row: Record<number, TextStyleDeclaration> = {}
+    let end = line.start
+    line.graphemes.forEach((g, k) => {
+      const start = end
+      end += g.length
+      while (si < spans.length && (spans[si]?.end ?? 0) <= start) si++
+      const span = spans[si]
+      const on = span && span.start < end ? span : undefined
+      const style: TextStyleDeclaration = { ...heading }
+      if (on?.bold) style.fontWeight = 'bold'
+      if (on?.italic) style.fontStyle = 'italic'
+      if (on?.underline) style.underline = true
+      if (on?.strike) style.linethrough = true
+      if (Object.keys(style).length > 0) row[k] = style
+    })
+    if (line.graphemes.length === 0 && heading.fontSize !== undefined) row[0] = heading
+    if (Object.keys(row).length > 0) styles[li] = row
+  })
+  return styles
+}
+
+const hasStyles = (tb: Textbox): boolean => Object.values(tb.styles ?? {}).some((row) => Object.keys(row).length > 0)
+
+/** A paragraph's heading level from the font size of its first character (or placeholder). */
+function levelOf(size: unknown, base: number): number {
+  if (typeof size !== 'number') return 0
+  for (const level of [1, 2, 3] as const) {
+    const want = headingFontSize(base, level)
+    if (Math.abs(size - want) <= Math.max(0.01, want * 1e-3)) return level
+  }
+  return 0 // a size that matches no heading is not a heading
+}
+
+/**
+ * The text's formatting read back from the canvas object alone (Fabric is the live source
+ * of truth while a text is being edited), already in canonical form.
+ */
+export function readTextFormatting(tb: Textbox): TextFormatting {
+  const raw: Record<string, unknown> = {
+    font: fontIdOf(tb.fontFamily),
+    align: tb.textAlign,
+    color: typeof tb.fill === 'string' ? tb.fill : undefined,
+  }
+  if (hasStyles(tb)) {
+    const text = tb.text
+    const headings: number[] = []
+    const marks = new Map<number, number>() // UTF-16 start of a marked character -> its marks
+    for (const [li, line] of linesOf(tb).entries()) {
+      const row = tb.styles[li]
+      headings.push(levelOf(row?.[0]?.fontSize, tb.fontSize))
+      if (!row) continue
+      let start = line.start
+      line.graphemes.forEach((g, k) => {
+        const st = row[k]
+        if (st) {
+          const mask = markMask({ bold: st.fontWeight === 'bold' || st.fontWeight === 700, italic: st.fontStyle === 'italic', underline: st.underline === true, strike: st.linethrough === true })
+          if (mask) marks.set(start, mask)
+        }
+        start += g.length
+      })
+    }
+    raw.headings = canonicalHeadings(text, headings)
+    raw.spans = spansFromCharMasks(text, raw.headings as number[] | undefined, (a) => marks.get(a) ?? 0)
+  }
+  return canonicalTextFormatting(tb.text, raw)
+}
+
+/** Writes a text's formatting (font, alignment, colour, marks, headings) onto its canvas object. */
+export function writeTextFormatting(tb: Textbox, fmt: TextFormatting) {
+  tb.set({
+    fontFamily: FONT_STACKS[fmt.font ?? 'sans'],
+    textAlign: fmt.align ?? 'left',
+    fill: fmt.color ?? TEXT_COLOR,
+    styles: stylesFor(tb, fmt, tb.fontSize),
+  })
+}
+
+/** Changes a text's base size; its headings keep their ratio to it. No limit of its own. */
+export function setTextFontSize(tb: Textbox, fontSize: number, patch: { width?: number; scaleX?: number; scaleY?: number } = {}) {
+  const fmt = hasStyles(tb) ? readTextFormatting(tb) : {}
+  tb.set({ ...patch, fontSize, styles: stylesFor(tb, fmt, fontSize) })
+}
+
+/** Plain value equality of two style tables, ignoring empty rows and entries. */
+function sameStyles(a: TextStyle | undefined, b: TextStyle): boolean {
+  const flat = (s: TextStyle | undefined) => {
+    const out: string[] = []
+    for (const [li, row] of Object.entries(s ?? {})) {
+      for (const [ci, st] of Object.entries(row)) {
+        const keys = Object.keys(st).sort()
+        if (keys.length > 0) out.push(`${li}:${ci}:${keys.map((k) => `${k}=${String((st as Record<string, unknown>)[k])}`).join(',')}`)
+      }
+    }
+    return out.sort().join('|')
+  }
+  return flat(a) === flat(b)
+}
+
+/**
+ * After the text changed while being edited, Fabric has shifted and copied character styles
+ * itself (typing after a bold character stays bold; Enter copies the style onto the new
+ * line; Backspace over a line break can leave one paragraph with two sizes). This redraws
+ * the text from its canonical formatting whenever the two differ, so what the canvas shows
+ * is always what its record says. The text and the caret are not touched; like Fabric's own
+ * typing, the box keeps its alignment edge in place if its size changes.
+ */
+export function reconcileTextFormatting(tb: Textbox): boolean {
+  if (!hasStyles(tb)) return false
+  const want = stylesFor(tb, readTextFormatting(tb), tb.fontSize)
+  if (sameStyles(tb.styles, want)) return false
+  const anchorX = tb.textAlign === 'center' ? 'center' : tb.textAlign === 'right' ? 'right' : 'left'
+  const pos = tb.getPositionByOrigin(anchorX, 'top')
+  tb.set({ styles: want })
+  tb.setPositionByOrigin(pos, anchorX, 'top')
+  tb.setCoords()
+  return true
 }
 
 /**
@@ -160,6 +323,7 @@ export function toRecord(obj: FabricObject): ObjectRecord | null {
       text: obj.text,
       fontSize: roundPositive(obj.fontSize * s, 2),
       width: roundPositive(obj.width * sx),
+      ...readTextFormatting(obj),
       ...owner,
     }
     return rec
@@ -194,19 +358,15 @@ export function hasResidualScale(obj: FabricObject): boolean {
 
 /**
  * Folds any residual scale on a text object into fontSize/width, with no limit of its
- * own: limits are decided once per gesture, before this runs.
+ * own: limits are decided once per gesture, before this runs. Headings are redrawn at
+ * their ratio to the new size.
  */
 export function normalizeTextScale(tb: Textbox): boolean {
   const sx = Math.abs(tb.scaleX)
   const sy = Math.abs(tb.scaleY)
   if (Math.abs(sx - 1) < 0.001 && Math.abs(sy - 1) < 0.001) return false
   const s = (sx + sy) / 2
-  tb.set({
-    fontSize: roundPositive(tb.fontSize * s, 2),
-    width: roundPositive(tb.width * sx, 2),
-    scaleX: 1,
-    scaleY: 1,
-  })
+  setTextFontSize(tb, roundPositive(tb.fontSize * s, 2), { width: roundPositive(tb.width * sx, 2), scaleX: 1, scaleY: 1 })
   tb.setCoords()
   return true
 }

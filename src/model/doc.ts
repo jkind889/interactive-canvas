@@ -1,3 +1,4 @@
+import { canonicalTextFormatting } from './richText.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from './types.ts'
 import type { BoardDoc, FrameRecord, ObjectRecord, Scene, StoredDoc, Viewport } from './types.ts'
 
@@ -31,7 +32,9 @@ function parseObject(raw: unknown): ObjectRecord | null {
   if (type === 'text') {
     const { text, fontSize, width } = raw
     if (!isStr(text) || !isNum(fontSize) || !isNum(width) || fontSize <= 0 || width <= 0) return null
-    return { type, id, left, top, angle, text, fontSize, width }
+    // Formatting is read leniently, like a dangling owner: whatever is malformed is dropped
+    // or trimmed, and the text itself still loads.
+    return { type, id, left, top, angle, text, fontSize, width, ...canonicalTextFormatting(text, raw) }
   }
   return null
 }
@@ -99,7 +102,7 @@ export function serializeDoc(doc: BoardDoc): StoredDoc {
       version: 1,
       title: doc.title,
       objects: doc.objects.map((o) => {
-        const rest = { ...o }
+        const rest = withoutUndefined(o)
         delete rest.frameId // no frame exists, so there is nothing to own it
         return rest
       }),
@@ -110,13 +113,16 @@ export function serializeDoc(doc: BoardDoc): StoredDoc {
     version: 2,
     title: doc.title,
     frames: doc.frames.map((f) => ({ ...f })),
-    objects: doc.objects.map((o) => {
-      const rec = { ...o }
-      if (rec.frameId === undefined) delete rec.frameId // never store an explicit undefined owner
-      return rec
-    }),
+    objects: doc.objects.map((o) => withoutUndefined(o)), // never store an explicit undefined owner or formatting field
     viewport: { ...doc.viewport },
   }
+}
+
+/** A copy without keys whose value is undefined: an absent field must stay absent in storage. */
+function withoutUndefined<T extends object>(o: T): T {
+  const copy = { ...o }
+  for (const k of Object.keys(copy) as Array<keyof T>) if (copy[k] === undefined) delete copy[k]
+  return copy
 }
 
 export function referencedAssetIds(objects: readonly ObjectRecord[]): Set<string> {
@@ -129,18 +135,28 @@ export function objectsEqual(a: readonly ObjectRecord[], b: readonly ObjectRecor
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
-/** Flat records compared field by field; key order and `undefined` vs absent do not matter. */
-function recordsEqual(a: readonly object[], b: readonly object[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i] as Record<string, unknown>
-    const y = b[i] as Record<string, unknown>
-    for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) {
-      // NaN equals NaN here, so a broken number can never look like an endless stream of changes.
-      if (x[k] !== y[k] && !(Number.isNaN(x[k]) && Number.isNaN(y[k]))) return false
-    }
+/**
+ * Structural equality of record values: plain objects field by field (key order and
+ * `undefined` vs absent do not matter), arrays element by element. A text's spans and
+ * headings are arrays, and two equal lists must not look like a change on every commit.
+ */
+function valuesEqual(x: unknown, y: unknown): boolean {
+  if (x === y) return true
+  // NaN equals NaN here, so a broken number can never look like an endless stream of changes.
+  if (Number.isNaN(x) && Number.isNaN(y)) return true
+  if (Array.isArray(x) || Array.isArray(y)) {
+    if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length) return false
+    return x.every((v, i) => valuesEqual(v, y[i]))
   }
+  if (typeof x !== 'object' || typeof y !== 'object' || x === null || y === null) return false
+  const a = x as Record<string, unknown>
+  const b = y as Record<string, unknown>
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (!valuesEqual(a[k], b[k])) return false
   return true
+}
+
+function recordsEqual(a: readonly object[], b: readonly object[]): boolean {
+  return a.length === b.length && a.every((x, i) => valuesEqual(x, b[i]))
 }
 
 /** Structural equality of everything on the canvas, including z-order and ownership. */

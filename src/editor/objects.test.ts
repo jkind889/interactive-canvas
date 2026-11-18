@@ -1,7 +1,24 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parseDoc, serializeDoc, createEmptyDoc } from '../model/doc.ts'
 import type { FrameRecord, ImageRecord, TextRecord } from '../model/types.ts'
-import { centerOf, createFrame, createObject, frameNameOf, idOf, isFrame, normalizeTextScale, ownerOf, setFrameName, setOwner, toFrameRecord, toRecord } from './objects.ts'
+import { FONT_STACKS } from './fonts.ts'
+import {
+  TEXT_COLOR,
+  centerOf,
+  createFrame,
+  createObject,
+  frameNameOf,
+  idOf,
+  isFrame,
+  normalizeTextScale,
+  ownerOf,
+  reconcileTextFormatting,
+  setFrameName,
+  setOwner,
+  setTextFontSize,
+  toFrameRecord,
+  toRecord,
+} from './objects.ts'
 
 vi.mock('fabric', () => import('./testing/fakeFabric.ts'))
 
@@ -129,5 +146,108 @@ describe('positive values survive serialization', () => {
   it('ordinary values serialize exactly as before', () => {
     const img = make(image({ scaleX: 0.123456789, scaleY: 0.123456789, left: 1.005, top: 2.004 }))
     expect(toRecord(img)).toMatchObject({ scaleX: 0.12346, scaleY: 0.12346 })
+  })
+})
+
+describe('formatted text on the canvas', () => {
+  type Styles = Record<number, Record<number, Record<string, unknown>>>
+  type Tb = Loose & { styles: Styles; fontFamily: string; textAlign: string; fill: unknown; text: string }
+  const tbOf = (o: unknown) => o as Tb
+  const PLAIN_KEYS = ['id', 'left', 'top', 'angle', 'type', 'text', 'fontSize', 'width']
+
+  it('a plain text is drawn as before and reads back with exactly the old keys', () => {
+    const tb = tbOf(make(text()))
+    expect(tb.fontFamily).toBe(FONT_STACKS.sans)
+    expect(tb.fill).toBe(TEXT_COLOR)
+    expect(tb.textAlign).toBe('left')
+    expect(tb.styles).toEqual({})
+    expect(Object.keys(toRecord(tb as never)!)).toEqual(PLAIN_KEYS)
+    expect(Object.keys(toRecord(make(text({ frameId: 'f1' })))!)).toEqual([...PLAIN_KEYS, 'frameId'])
+  })
+
+  it('font, alignment and colour round-trip; defaults read back as no key', () => {
+    for (const font of ['serif', 'mono', 'hand', 'display'] as const) expect(toRecord(make(text({ font })))).toEqual(text({ font }))
+    expect(tbOf(make(text({ font: 'mono' }))).fontFamily).toBe(FONT_STACKS.mono)
+    expect(toRecord(make(text({ align: 'center' })))).toEqual(text({ align: 'center' }))
+    expect(toRecord(make(text({ align: 'right' })))).toEqual(text({ align: 'right' }))
+    expect(tbOf(make(text({ color: '#c0392b' }))).fill).toBe('#c0392b')
+    expect(toRecord(make(text({ color: '#c0392b' })))).toEqual(text({ color: '#c0392b' }))
+    const odd = tbOf(make(text()))
+    Object.assign(odd, { fontFamily: 'Papyrus', textAlign: 'justify', fill: 'rgb(1,2,3)' }) // nothing the app writes
+    expect(Object.keys(toRecord(odd as never)!)).toEqual(PLAIN_KEYS)
+  })
+
+  it('marks become per-character styles and read back exactly, including after an emoji', () => {
+    // "😀 bold it": the emoji is code units 0..2 but ONE character on the canvas.
+    const rec = text({ text: '😀 bold it', spans: [{ start: 3, end: 7, bold: true, underline: true }, { start: 8, end: 10, italic: true, strike: true }] })
+    const tb = tbOf(make(rec))
+    const b = { fontWeight: 'bold', underline: true }
+    const i = { fontStyle: 'italic', linethrough: true }
+    expect(tb.styles).toEqual({ 0: { 2: b, 3: b, 4: b, 5: b, 7: i, 8: i } })
+    expect(toRecord(tb as never)).toEqual(rec)
+  })
+
+  it('a span across a line break is keyed by paragraph, not by offset', () => {
+    const rec = text({ text: 'ab\ncd', spans: [{ start: 1, end: 4, italic: true }] })
+    const tb = tbOf(make(rec))
+    expect(tb.styles).toEqual({ 0: { 1: { fontStyle: 'italic' } }, 1: { 0: { fontStyle: 'italic' } } })
+    expect(toRecord(tb as never)).toEqual(rec)
+  })
+
+  it('headings: every character of the line, and a placeholder on an empty heading line, at the heading size and bold', () => {
+    const rec = text({ text: 'Hi\n\nbody\nSub', headings: [1, 2, 0, 3], spans: [{ start: 4, end: 8, italic: true }] })
+    const tb = tbOf(make(rec))
+    const h = (size: number) => ({ fontSize: size, fontWeight: 'bold' })
+    const ital = { fontStyle: 'italic' }
+    expect(tb.styles).toEqual({
+      0: { 0: h(48), 1: h(48) },
+      1: { 0: h(36) }, // the empty line: Fabric takes its height, and the first typed character's style, from here
+      2: { 0: ital, 1: ital, 2: ital, 3: ital },
+      3: { 0: h(30), 1: h(30), 2: h(30) },
+    })
+    expect(toRecord(tb as never)).toEqual(rec)
+  })
+
+  it('an empty heading line at the end and a heading only on a later paragraph round-trip', () => {
+    for (const rec of [text({ text: 'a\n', headings: [0, 1] }), text({ text: 'a\nb\nc', headings: [0, 0, 2] })]) {
+      expect(toRecord(make(rec))).toEqual(rec)
+    }
+  })
+
+  it('a font-size style that matches no heading level is not a heading; bold in a heading line is implied', () => {
+    const tb = tbOf(make(text({ text: 'ab\ncd' })))
+    const h1 = { fontSize: 48, fontWeight: 'bold' }
+    tb.styles = { 0: { 0: { fontSize: 40 }, 1: { fontSize: 40 } }, 1: { 0: h1, 1: h1 } }
+    expect(toRecord(tb as never)).toEqual(text({ text: 'ab\ncd', headings: [0, 1] }))
+  })
+
+  it('folding a scale and setting the font size redraw headings at their ratio and keep the record', () => {
+    const rec = text({ text: 'Big\nsmall', headings: [2], spans: [{ start: 4, end: 9, bold: true }] })
+    const tb = tbOf(make(rec))
+    Object.assign(tb, { scaleX: 1.5, scaleY: 1.5 })
+    expect(toRecord(tb as never)).toEqual({ ...rec, fontSize: 36, width: 300 }) // mid-gesture: read at the scale shown
+    normalizeTextScale(tb as never)
+    expect(tb.fontSize).toBe(36)
+    const h2 = { fontSize: 54, fontWeight: 'bold' }
+    expect(tb.styles[0]).toEqual({ 0: h2, 1: h2, 2: h2 })
+    expect(toRecord(tb as never)).toEqual({ ...rec, fontSize: 36, width: 300 })
+
+    setTextFontSize(tb as never, 10)
+    expect(tb.styles[0]![0]).toEqual({ fontSize: 15, fontWeight: 'bold' })
+    expect(toRecord(tb as never)).toEqual({ ...rec, fontSize: 10, width: 300 })
+  })
+
+  it('reconciling rewrites non-canonical styles (two sizes in one paragraph, stray entries) and nothing else', () => {
+    const tb = tbOf(make(text({ text: 'Titlebody', headings: [1] })))
+    // What Fabric leaves after Backspace merged a body line into a heading line, plus a stale entry past the end.
+    const h1 = { fontSize: 48, fontWeight: 'bold' }
+    tb.styles = { 0: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1, 12: { fontStyle: 'italic' } } }
+    const before = { left: tb.left, top: tb.top, text: tb.text }
+    expect(reconcileTextFormatting(tb as never)).toBe(true)
+    expect(Object.keys(tb.styles[0]!)).toEqual(['0', '1', '2', '3', '4', '5', '6', '7', '8'])
+    for (const st of Object.values(tb.styles[0]!)) expect(st).toEqual(h1)
+    expect({ left: tb.left, top: tb.top, text: tb.text }).toEqual(before)
+    expect(reconcileTextFormatting(tb as never)).toBe(false) // canonical now: nothing to do
+    expect(reconcileTextFormatting(make(text()) as never)).toBe(false)
   })
 })

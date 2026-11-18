@@ -282,6 +282,11 @@ export interface StoredObject {
   fontSize?: number
   width?: number
   text?: string
+  font?: string
+  align?: string
+  color?: string
+  spans?: Array<{ start: number; end: number; bold?: true; italic?: true; underline?: true; strike?: true }>
+  headings?: number[]
 }
 export interface StoredFrame {
   id: string
