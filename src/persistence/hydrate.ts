@@ -1,5 +1,5 @@
 import type { BoardDoc, ObjectRecord, StoredAsset } from '../model/types.ts'
-import { NewerBoardError, UnreadableBoardError } from './boardStore.ts'
+import { NewerBoardError, StorageBusyError, UnreadableBoardError } from './boardStore.ts'
 import type { BoardStore, RevisionToken } from './boardStore.ts'
 
 export type HydrationOutcome =
@@ -23,6 +23,9 @@ const reason = (e: unknown) => (e instanceof Error && e.message ? e.message : 'u
 function describeLoadFailure(e: unknown): string {
   if (e instanceof UnreadableBoardError) return 'The saved board could not be read. It is shown read-only so it cannot be overwritten.'
   if (e instanceof NewerBoardError) return 'This board was saved by a newer yuriful. It is read-only here so that nothing in it is lost.'
+  if (e instanceof StorageBusyError) {
+    return 'Storage is held by another yuriful tab, so the board could not be loaded. Close other yuriful tabs, then reload this one.'
+  }
   return `Local storage is unavailable (${reason(e)}). The board is read-only because changes could not be saved.`
 }
 

@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import { createEmptyDoc } from '../model/doc.ts'
 import type { BoardDoc, StoredAsset } from '../model/types.ts'
 import { UnreadableBoardError } from './boardStore.ts'
-import { NewerBoardError } from './boardStore.ts'
+import { NewerBoardError, StorageBusyError } from './boardStore.ts'
 import type { BoardStore, LoadedBoard, RevisionToken } from './boardStore.ts'
 import { hydrateBoard } from './hydrate.ts'
 
@@ -95,6 +95,18 @@ describe('hydrateBoard', () => {
     )
     expect(out).toMatchObject({ kind: 'blocked', partial: null })
     expect(out.kind === 'blocked' && out.message).toMatch(/newer yuriful.*read-only/)
+  })
+
+  it('blocks when storage is held by another tab, telling the user to reload rather than retry', async () => {
+    const out = await hydrateBoard(
+      store(async () => {
+        throw new StorageBusyError()
+      }).s,
+      decodeAll,
+    )
+    expect(out).toMatchObject({ kind: 'blocked', partial: null })
+    expect(out.kind === 'blocked' && out.message).toMatch(/another yuriful tab.*reload/)
+    expect(out.kind === 'blocked' && out.message).not.toMatch(/Retry/)
   })
 
   it('fails closed when one image fails to decode, exposing only the loaded part', async () => {

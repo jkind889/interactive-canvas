@@ -400,9 +400,11 @@ describe('the fence: first save of a board with a frame', () => {
     const t1 = await first.save(textOnly(), ABSENT, none)
     await second.load()
     const blocker = await stubbornConnection(factory)
+    // Both promotion requests are issued in the same tick, so the second really queues behind
+    // the first as a promotion (not as a plain open) and then times out while blocked.
     const promoting = first.save(withFrame(textOnly('First')), t1, none)
-    await tick(5)
-    await expect(second.save(withFrame(textOnly('Second')), t1, none)).rejects.toBeInstanceOf(StorageBusyError)
+    const abandoned = second.save(withFrame(textOnly('Second')), t1, none)
+    await expect(abandoned).rejects.toBeInstanceOf(StorageBusyError)
     blocker.close()
     await promoting
     await tick(20) // the abandoned request now opens at version 2 without an upgrade
@@ -524,6 +526,16 @@ describe('revision tokens: a stale tab never overwrites', () => {
     expect(tokensMatch(untimed, { ...untimed })).toBe(true)
     expect(tokensMatch(untimed, { ...untimed, docJson: '{ }' })).toBe(false)
     expect(tokensMatch(untimed, { ...untimed, updatedAt: 5 })).toBe(false)
+  })
+
+  it('a legacy row with a NaN timestamp is treated as having none, so it can still be saved', async () => {
+    const factory = new IDBFactory()
+    await putRaw(factory, { doc: legacyDoc('NaN timestamp'), updatedAt: Number.NaN }, 1)
+    const { store } = newStore(factory)
+    const loaded = await store.load()
+    expect(loaded?.token).toMatchObject({ kind: 'legacy', updatedAt: null })
+    await store.save({ ...loaded!.doc, title: 'Saved' }, loaded!.token, none)
+    expect((await readRaw(factory)).row!.doc.title).toBe('Saved')
   })
 
   it('a legacy row without a numeric timestamp still loads editable and can be saved', async () => {

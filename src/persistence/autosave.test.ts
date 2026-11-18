@@ -308,6 +308,23 @@ describe('Autosaver: revision token and asset bytes', () => {
     expect(a.timers.filter((t) => t.live)).toHaveLength(0)
   })
 
+  it('a save that succeeds after saving was switched off, with nothing else pending, still does not claim "saved"', async () => {
+    const a = setup()
+    let release!: () => void
+    a.gate.hold = new Promise<void>((r) => (release = r))
+    a.saver.markDirty()
+    for (const t of a.timers.filter((t) => t.live)) {
+      t.live = false
+      t.fn()
+    }
+    a.saver.disable('read-only now') // no edit arrived mid-save
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(a.saves).toHaveLength(1)
+    expect(a.saver.state).toEqual({ kind: 'unavailable', message: 'read-only now' })
+    expect(a.kinds()).not.toContain('saved')
+  })
+
   it('missing bytes and a storage deadline are ordinary retryable errors', async () => {
     for (const failure of [new MissingAssetError(), new StorageBusyError()]) {
       const a = setup()

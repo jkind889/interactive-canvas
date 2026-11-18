@@ -149,7 +149,8 @@ function tokenOf(row: unknown): RevisionToken {
   } catch {
     docJson = null
   }
-  return { kind: 'legacy', updatedAt: typeof row.updatedAt === 'number' ? row.updatedAt : null, docJson }
+  const updatedAt = typeof row.updatedAt === 'number' && Number.isFinite(row.updatedAt) ? row.updatedAt : null
+  return { kind: 'legacy', updatedAt, docJson }
 }
 
 /** Different kinds never match, so a legacy write over a revisioned row (or the reverse) is always a mismatch. */
@@ -404,6 +405,9 @@ export class IndexedDbBoardStore implements BoardStore {
             ensureStores(req.result)
             tx.addEventListener('error', (event) => {
               failure ??= (event.target as IDBRequest | null)?.error ?? null // the request that failed says why
+            })
+            tx.addEventListener('abort', () => {
+              failure ??= tx.error // e.g. out of space at commit, with no failing request
             })
             writeBoard(tx, doc, wire, expected, bytes).then(
               (written) => {
