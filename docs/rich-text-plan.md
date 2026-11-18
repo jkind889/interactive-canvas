@@ -1,6 +1,8 @@
 # Text formatting milestone: plan, decisions, progress
 
-Status: in progress on `feat/milestone-2-frames`. The owner asked for this milestone ("flesh out
+Status: implemented and independently reviewed on `feat/milestone-2-frames` (local commits,
+not pushed); awaiting a further hands-on QA and final review before it counts as finished.
+The owner asked for this milestone ("flesh out
 the text before publishing frames") and for work to start without a second approval round, so
 the defaults below are the coordinator's and are **provisional until the owner has reviewed
 them**. Anything marked "open question" is deliberately left for the owner.
@@ -116,10 +118,12 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | done: `b307275`, review fixes `2210acc` and `42739a3`, cleared by recheck |
 | 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | done: `f43bb1b`, cleared by review; its nits are fixed in slice 3 |
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | done: `4dd927b`, cleared by review; its nits are handled in slice 4 |
-| 4 | Text tool: drag out a box. | committed (`0bbbb5c`), cleared by review; review fixes in progress |
+| 4 | Text tool: drag out a box. | done: `0bbbb5c`, review fixes `a4b921c`, cleared by recheck |
 
-After the last slice is reviewed, the branch goes to a further independent hands-on QA and
-final review (Astra, coordinated separately). The milestone is not finished before that.
+All four slices are implemented and independently reviewed; the last code commit is
+`a4b921c`. The branch now goes to a further independent hands-on QA and final review (Astra,
+coordinated separately): see [rich-text-qa-handoff.md](rich-text-qa-handoff.md) for what to
+exercise, the known limits and the test evidence. The milestone is not finished before that.
 
 ## Integration contract with `feat/layers-image-tools`
 
@@ -379,6 +383,18 @@ Review by the centralized reviewer, verdict "slice 4 is clear", no code bugs:
 The reviewer's closing pass over slices 1 to 4 used together (a box dragged out inside a
 frame, a heading and italic by typing shortcut, a paste from another text, "Select with
 contents" and a corner scale, undo, redo, reload) found nothing wrong.
+
+Recheck of `a4b921c` by the same reviewer, verdict "the milestone's code is clear at
+a4b921c", no findings. It confirmed in a real browser at zoom 0.25, 1 and 4 that a drag
+narrower than two font sizes gives the default box at the press point and a wide, flat drag
+gives the dragged width; that a plain click stores exactly what it did before; and that each
+named deliberate break fails both unit and real-browser tests. One observation, recorded as
+a known limit in the handoff: the font size never goes below 12, so at zoom 4 a drag must be
+about 96 screen pixels wide to count as a dragged width, against 48 at zoom 1.
+
+One usage limit was hit during the milestone: the slice 3 implementer's first run failed
+with the provider's rate-limit error after about twelve minutes and was resumed in the same
+thread later, with its uncommitted work intact.
 
 Known limit recorded here rather than in the README (the app cannot produce it): a stored
 text containing a lone carriage return is drawn with it as a character, and the first
