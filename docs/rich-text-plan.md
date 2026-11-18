@@ -113,6 +113,56 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert, Enter after a heading. | not started |
 | 4 | Text tool: drag out a box. | not started |
 
+After the last slice is reviewed, the branch goes to a further independent hands-on QA and
+final review (Astra, coordinated separately). The milestone is not finished before that.
+
+## Integration contract with `feat/layers-image-tools`
+
+A separate branch, based on `698b628`, adds a layer list, z-order, locks and image
+crop/fit/fill/replace. Neither branch merges the other while in progress. This section lists
+what this branch touches in shared files and what it relies on, so the eventual integration
+can be done deliberately. It is updated as slices land.
+
+Shared files this branch has changed so far (slice 1):
+
+- `src/model/types.ts`: `TextRecord` gains optional `font`, `align`, `color`, `spans`,
+  `headings`, plus the `FontId` and `TextSpan` types. `ImageRecord`, `RecordBase`,
+  `FrameRecord`, `BoardDoc` and the stored-document types are untouched.
+- `src/model/doc.ts`: the text branch of `parseObject` appends the canonical formatting
+  fields; `serializeDoc` now copies every object through `withoutUndefined` (any key whose
+  value is `undefined` is left out, for images too); `recordsEqual` is replaced by a
+  by-value comparison (`valuesEqual`) that descends into arrays and plain objects.
+- `src/editor/objects.ts`: the text branch of `createObject` and of `toRecord`,
+  `normalizeTextScale`, and new exports for writing and reading a text's formatting. The
+  image and frame paths, `Meta` and `SELECTION_STYLE` are untouched.
+- `src/editor/Editor.ts`: the `text:changed` handler and `setFontSize` only.
+- `src/editor/testing/fakeFabric.ts`: fields and two methods on the fake `Textbox`.
+- `e2e/helpers.ts`: optional formatting fields on `StoredObject`.
+- `README.md`, `AGENTS.md`: text formatting in the storage, invariant, project-shape and
+  known-limit sections.
+
+Contracts the other branch can rely on, and that this branch needs kept:
+
+- An optional record field is absent when it has its default; `serializeDoc` never writes an
+  `undefined` key. A plain text keeps exactly its previous keys.
+- Scene equality is by value at any depth, so a nested value in a record (a crop rectangle,
+  say) does not look like a change on every commit. Canonical form is still each feature's
+  own job: two records that mean the same must be built the same.
+- No document or database version change comes from this branch. If the other branch changes
+  a version, text formatting fields must be carried by every version that can hold a text.
+- `toRecord` reads a text's formatting from the Fabric object alone, and anything that
+  changes a text's base font size must go through `setTextFontSize` so headings keep their
+  ratio. A new code path that scales or resizes text has to do the same.
+- This branch does not touch z-order, layer reordering or image records.
+
+Expected overlap from the remaining slices: `SelectionInfo` and the `Inspector` gain a text
+section; `Editor` gains formatting commands, a capture-phase key handler for keys pressed
+while a text is edited, and a text variant of the draft gesture used by the Frame tool;
+`src/input/shortcuts.ts` gains Ctrl/Cmd+B/I/U. Formatting commands act on the active object
+behind the same `editable && !busy` guards as the existing commands, so a lock that keeps an
+object from being selected also keeps it from being formatted; a lock that still allows
+selection will need to gate these commands explicitly.
+
 ## Open questions for the owner
 
 - Whether to bundle font files so that a board looks the same on every machine (matters once
