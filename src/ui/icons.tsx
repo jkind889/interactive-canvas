@@ -108,6 +108,41 @@ export const ToBackIcon = () => (
     <path d="M13 20h7" />
   </Svg>
 )
+export const BoldIcon = () => (
+  <Svg>
+    <path d="M7.5 5h5.25a3.25 3.25 0 010 6.5H7.5zM7.5 11.5h6a3.5 3.5 0 010 7h-6z" strokeWidth="2.4" />
+  </Svg>
+)
+export const ItalicIcon = () => (
+  <Svg>
+    <path d="M10.5 5H17M7 19h6.5M14 5l-4 14" />
+  </Svg>
+)
+export const UnderlineIcon = () => (
+  <Svg>
+    <path d="M7.5 4.5v6.5a4.5 4.5 0 009 0V4.5M6 20h12" />
+  </Svg>
+)
+export const StrikeIcon = () => (
+  <Svg>
+    <path d="M16.5 7.2A4.2 3.2 0 0012 5c-2.5 0-4.3 1.3-4.3 3.1 0 1.2.8 2.1 2.4 2.7M8 16.7c.9 1.4 2.4 2.3 4.4 2.3 2.6 0 4.4-1.4 4.4-3.3 0-.9-.4-1.7-1.2-2.3M4.5 12h15" />
+  </Svg>
+)
+export const AlignLeftIcon = () => (
+  <Svg>
+    <path d="M4.5 6.5h15M4.5 10.5h9.5M4.5 14.5h15M4.5 18.5h9.5" />
+  </Svg>
+)
+export const AlignCenterIcon = () => (
+  <Svg>
+    <path d="M4.5 6.5h15M7.25 10.5h9.5M4.5 14.5h15M7.25 18.5h9.5" />
+  </Svg>
+)
+export const AlignRightIcon = () => (
+  <Svg>
+    <path d="M4.5 6.5h15M10 10.5h9.5M4.5 14.5h15M10 18.5h9.5" />
+  </Svg>
+)
 export const CloseIcon = () => (
   <Svg>
     <path d="M6 6l12 12M18 6L6 18" />

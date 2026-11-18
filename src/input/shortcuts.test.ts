@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { isEditableTarget, isPanHoldKey, resolveShortcut } from './shortcuts.ts'
+import { isEditableTarget, isPanHoldKey, resolveEditingShortcut, resolveShortcut } from './shortcuts.ts'
 import type { KeyEventLike } from './shortcuts.ts'
 
 const idle = { editingText: false }
@@ -125,6 +125,74 @@ describe('resolveShortcut: never interferes with typing', () => {
     expect(isEditableTarget(null)).toBe(false)
     expect(isEditableTarget(window as unknown as EventTarget)).toBe(false)
     expect(resolveShortcut(key('v', { target: null }), idle)).toBe('tool-select')
+  })
+})
+
+describe('formatting keys', () => {
+  const text = { editingText: false, textSelected: true }
+  const all = ['b', 'i', 'u'] as const
+
+  it('Ctrl/Cmd+B, I, U format a selected text (not being edited) as a whole', () => {
+    expect(resolveShortcut(key('b', { ctrlKey: true }), text)).toBe('format-bold')
+    expect(resolveShortcut(key('i', { metaKey: true }), text)).toBe('format-italic')
+    expect(resolveShortcut(key('U', { ctrlKey: true }), text)).toBe('format-underline') // Caps Lock
+    expect(resolveShortcut(key('b', { ctrlKey: true, target: el('button') }), text)).toBe('format-bold') // a panel button has keyboard focus
+  })
+
+  it('are left to the browser without exactly one selected text, with Alt or Shift, while typing in a field or editing, and during composition', () => {
+    for (const k of all) {
+      expect(resolveShortcut(key(k, { ctrlKey: true }), idle)).toBeNull() // nothing, an image, a frame or several objects
+      expect(resolveShortcut(key(k, { ctrlKey: true }), { editingText: false, textSelected: false })).toBeNull()
+      expect(resolveShortcut(key(k, { ctrlKey: true, altKey: true }), text)).toBeNull()
+      expect(resolveShortcut(key(k, { ctrlKey: true, shiftKey: true }), text)).toBeNull()
+      expect(resolveShortcut(key(k, { ctrlKey: true, target: el('input', { type: 'text' }) }), text)).toBeNull()
+      expect(resolveShortcut(key(k, { ctrlKey: true }), { editingText: true, textSelected: false })).toBeNull()
+      expect(resolveShortcut(key(k, { ctrlKey: true, isComposing: true }), text)).toBeNull()
+    }
+    expect(resolveShortcut(key('b'), text)).toBeNull() // a plain letter is not a shortcut
+  })
+
+  it('leave every other shortcut as it was when a text is selected', () => {
+    expect(resolveShortcut(key('i'), text)).toBe('add-image')
+    expect(resolveShortcut(key('z', { ctrlKey: true }), text)).toBe('undo')
+    expect(resolveShortcut(key('a', { ctrlKey: true }), text)).toBe('select-all')
+    expect(resolveShortcut(key(']', { ctrlKey: true }), text)).toBe('layer-front')
+    expect(resolveShortcut(key('Escape'), text)).toBe('escape')
+    expect(resolveShortcut(key('Escape', { altKey: true }), text)).toBeNull() // unchanged here; Alt+Esc is the other branch's
+    expect(resolveShortcut(key('Delete'), text)).toBe('delete')
+  })
+})
+
+describe('resolveEditingShortcut: keys pressed while a text is being edited', () => {
+  const area = () => el('textarea')
+
+  it('claims Ctrl/Cmd+B, I, U only when they come from the edited text', () => {
+    const ta = area()
+    const ctx = { editedTextarea: ta }
+    expect(resolveEditingShortcut(key('b', { ctrlKey: true, target: ta }), ctx)).toBe('bold')
+    expect(resolveEditingShortcut(key('I', { metaKey: true, target: ta }), ctx)).toBe('italic')
+    expect(resolveEditingShortcut(key('u', { ctrlKey: true, target: ta }), ctx)).toBe('underline')
+    expect(resolveEditingShortcut(key('b', { ctrlKey: true, target: area() }), ctx)).toBeNull() // another textarea
+    expect(resolveEditingShortcut(key('b', { ctrlKey: true, target: document.body }), ctx)).toBeNull()
+    expect(resolveEditingShortcut(key('b', { ctrlKey: true, target: ta }), { editedTextarea: null })).toBeNull() // no text is edited
+  })
+
+  it('never with Alt or Shift, never during composition, and never any other key', () => {
+    const ta = area()
+    const ctx = { editedTextarea: ta }
+    for (const k of ['b', 'i', 'u']) {
+      expect(resolveEditingShortcut(key(k, { ctrlKey: true, altKey: true, target: ta }), ctx)).toBeNull()
+      expect(resolveEditingShortcut(key(k, { ctrlKey: true, shiftKey: true, target: ta }), ctx)).toBeNull()
+      expect(resolveEditingShortcut(key(k, { ctrlKey: true, isComposing: true, target: ta }), ctx)).toBeNull()
+      expect(resolveEditingShortcut(key(k, { target: ta }), ctx)).toBeNull() // typing the letter
+    }
+    for (const k of ['a', 'c', 'v', 'x', 'z', 'y', 'Escape', 'Tab', 'ArrowLeft', 'Backspace', 'Enter']) {
+      expect(resolveEditingShortcut(key(k, { ctrlKey: true, target: ta }), ctx)).toBeNull()
+      expect(resolveEditingShortcut(key(k, { target: ta }), ctx)).toBeNull()
+    }
+    expect(resolveEditingShortcut(key('Escape', { altKey: true, target: ta }), ctx)).toBeNull()
+    // And no canvas shortcut fires while a text is edited.
+    expect(resolveShortcut(key('b', { ctrlKey: true, target: ta }), { editingText: true, textSelected: false })).toBeNull()
   })
 })
 

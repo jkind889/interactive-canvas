@@ -392,3 +392,197 @@ export function textAfterEdit(prevText: string, prevHeadings: readonly number[] 
 export function headingsAfterEdit(prevText: string, prevHeadings: readonly number[] | undefined, nextText: string, caret?: number): number[] | undefined {
   return textAfterEdit(prevText, prevHeadings, nextText, caret).headings
 }
+
+// ---- applying formatting ------------------------------------------------------------------
+//
+// What the formatting controls do to a text's canonical formatting. Ranges are UTF-16 offsets
+// into the text, [start, end). A "character" is a grapheme (the unit the canvas styles); a
+// line break is not a character, so a range that covers only line breaks has no characters.
+
+export type MarkState = 'on' | 'off' | 'mixed'
+/** Marks chosen with only a caret, for what is typed next: true is on, false is off, absent is "as typed". */
+export type PendingMarks = Partial<Record<Mark, boolean>>
+export type TextAlign = 'left' | 'center' | 'right'
+
+/** The fixed colour choices, legible on a white frame or on an image. The first is the default ink (stored as nothing). */
+export const TEXT_PALETTE: ReadonlyArray<{ color: string; name: string }> = [
+  { color: DEFAULT_TEXT_COLOR, name: 'Ink' },
+  { color: '#ffffff', name: 'White' },
+  { color: '#6b7280', name: 'Grey' },
+  { color: '#d92d20', name: 'Red' },
+  { color: '#e8590c', name: 'Orange' },
+  { color: '#2b8a3e', name: 'Green' },
+  { color: '#1c6fd1', name: 'Blue' },
+  { color: '#7048e8', name: 'Purple' },
+]
+
+interface CharMarks {
+  start: number
+  end: number
+  /** Paragraph index. */
+  line: number
+  mask: number
+}
+
+/** Every character of the text with its paragraph and the marks its (canonical) spans give it. */
+function charMarks(text: string, spans: readonly TextSpan[] | undefined): CharMarks[] {
+  const out: CharMarks[] = []
+  const list = spans ?? []
+  let si = 0
+  paragraphsOf(text).forEach((p, line) => {
+    p.chars.forEach((a, k) => {
+      const b = p.chars[k + 1] ?? p.end
+      while (si < list.length && (list[si] as TextSpan).end <= a) si++
+      let mask = 0
+      for (let j = si; j < list.length && (list[j] as TextSpan).start < b; j++) mask |= markMask(list[j] as TextSpan)
+      out.push({ start: a, end: b, line, mask })
+    })
+  })
+  return out
+}
+
+const overlaps = (c: CharMarks, start: number, end: number) => c.end > start && c.start < end
+const isHeadingLine = (headings: readonly number[] | undefined, line: number) => (headings?.[line] ?? 0) > 0
+
+/** A text's formatting with the given character marks and headings, in canonical form. */
+function withMarks(text: string, fmt: TextFormatting, headings: readonly number[] | undefined, chars: readonly CharMarks[]): TextFormatting {
+  const byStart = new Map(chars.map((c) => [c.start, c.mask] as const))
+  const spans = spansFromCharMasks(text, headings, (a) => byStart.get(a) ?? 0)
+  return canonicalTextFormatting(text, { ...fmt, spans, headings })
+}
+
+/**
+ * Toggles a mark on the characters of a range: removed if every one of them already has it,
+ * otherwise added to all of them. A character on a heading line counts as bold, and bold is
+ * never stored there; so bold over a range that lies entirely in heading lines changes
+ * nothing, and over a mixed range it changes the characters on normal lines. A range with no
+ * characters changes nothing.
+ */
+export function toggleMark(text: string, fmt: TextFormatting, mark: Mark, start: number, end: number): TextFormatting {
+  const chars = charMarks(text, fmt.spans)
+  const bit = BIT[mark]
+  const has = (c: CharMarks) => (c.mask & bit) !== 0 || (mark === 'bold' && isHeadingLine(fmt.headings, c.line))
+  const hit = chars.filter((c) => overlaps(c, start, end))
+  if (hit.length === 0) return fmt
+  const on = !hit.every(has)
+  for (const c of hit) c.mask = on ? c.mask | bit : c.mask & ~bit
+  return withMarks(text, fmt, fmt.headings, chars)
+}
+
+/**
+ * The paragraphs a range touches (for an empty range, the caret's). A range that ends exactly
+ * at the start of a line, just after a line break, does not touch that line.
+ */
+export function linesOfRange(text: string, start: number, end: number): { first: number; last: number } {
+  const lines = lineBounds(text)
+  const first = lineAt(lines, Math.min(start, end))
+  let last = lineAt(lines, Math.max(start, end))
+  if (end > start && last > first && end === (lines[last] as LineBounds).start) last--
+  return { first, last }
+}
+
+/**
+ * Sets the heading level (0: body text) of every line a range touches (see `linesOfRange`).
+ * A heading line is bold of itself, so bold marks inside it are dropped; a line set back to
+ * body text is therefore not bold.
+ */
+export function setHeading(text: string, fmt: TextFormatting, level: number, start: number, end: number): TextFormatting {
+  const { first, last } = linesOfRange(text, start, end)
+  return setHeadingOfLines(text, fmt, level, first, last)
+}
+
+/** Sets the heading level (0: body text) of every line of the text, an empty last line included. */
+export function setHeadingEverywhere(text: string, fmt: TextFormatting, level: number): TextFormatting {
+  return setHeadingOfLines(text, fmt, level, 0, paragraphCount(text) - 1)
+}
+
+function setHeadingOfLines(text: string, fmt: TextFormatting, level: number, first: number, last: number): TextFormatting {
+  const headings = Array.from({ length: paragraphCount(text) }, (_, i) => (i >= first && i <= last ? level : (fmt.headings?.[i] ?? 0)))
+  return withMarks(text, fmt, canonicalHeadings(text, headings), charMarks(text, fmt.spans))
+}
+
+/** What the formatting controls show for a range, a caret or a whole box. */
+export interface RangeFormat {
+  marks: Record<Mark, MarkState>
+  /** The heading level (0: body text) of every line concerned, or 'mixed'. */
+  heading: number | 'mixed'
+  /** Every character concerned is on a heading line (for a caret: its line is a heading), so bold is the heading's own and cannot be changed. */
+  boldFromHeading: boolean
+}
+
+const markStates = (state: (m: Mark) => MarkState): Record<Mark, MarkState> => ({ bold: state('bold'), italic: state('italic'), underline: state('underline'), strike: state('strike') })
+
+/** The state of a non-empty range: each mark on, off or mixed over its characters (off when it has none), and the level of the lines it touches. */
+export function formatOfRange(text: string, fmt: TextFormatting, start: number, end: number): RangeFormat {
+  const { first, last } = linesOfRange(text, start, end)
+  return formatOf(text, fmt, start, end, first, last)
+}
+
+/** The state of the whole text: all of its characters, and every line (an empty last line included). */
+export function formatOfText(text: string, fmt: TextFormatting): RangeFormat {
+  return formatOf(text, fmt, 0, text.length, 0, paragraphCount(text) - 1)
+}
+
+function formatOf(text: string, fmt: TextFormatting, start: number, end: number, first: number, last: number): RangeFormat {
+  const hit = charMarks(text, fmt.spans).filter((c) => overlaps(c, start, end))
+  const onHeading = (c: CharMarks) => isHeadingLine(fmt.headings, c.line)
+  const marks = markStates((m) => {
+    const n = hit.filter((c) => (c.mask & BIT[m]) !== 0 || (m === 'bold' && onHeading(c))).length
+    return n === 0 ? 'off' : n === hit.length ? 'on' : 'mixed'
+  })
+  const levels = new Set<number>()
+  for (let i = first; i <= last; i++) levels.add(fmt.headings?.[i] ?? 0)
+  return { marks, heading: levels.size === 1 ? ([...levels][0] as number) : 'mixed', boldFromHeading: hit.length > 0 && hit.every(onHeading) }
+}
+
+/**
+ * The marks a character typed at the caret gets when nothing is pending: those of the
+ * character before it on its line, at the start of a line those of the character after it,
+ * none on an empty line. The canvas copies the neighbouring character's style the same way
+ * (fabric 7.4.0, ITextBehavior.mjs `insertCharStyleObject`). On a heading line bold is the
+ * heading's.
+ */
+export function marksAtCaret(text: string, fmt: TextFormatting, caret: number): Record<Mark, boolean> {
+  const line = lineAt(lineBounds(text), caret)
+  const chars = charMarks(text, fmt.spans).filter((c) => c.line === line)
+  const mask = (chars.find((c) => c.end === caret) ?? chars.find((c) => c.start === caret))?.mask ?? 0
+  return {
+    bold: isHeadingLine(fmt.headings, line) || (mask & BIT.bold) !== 0,
+    italic: (mask & BIT.italic) !== 0,
+    underline: (mask & BIT.underline) !== 0,
+    strike: (mask & BIT.strike) !== 0,
+  }
+}
+
+/** What the controls show for a caret: the marks the next typed character will have, pending choices included. */
+export function formatAtCaret(text: string, fmt: TextFormatting, caret: number, pending: PendingMarks = {}): RangeFormat {
+  const natural = marksAtCaret(text, fmt, caret)
+  const heading = fmt.headings?.[lineAt(lineBounds(text), caret)] ?? 0
+  const marks = markStates((m) => ((m === 'bold' && heading > 0) || (pending[m] ?? natural[m]) ? 'on' : 'off'))
+  return { marks, heading, boldFromHeading: heading > 0 }
+}
+
+/**
+ * Toggles a pending mark at a caret: the next typed character gets the opposite of what the
+ * controls show now. A choice that matches what typing would give anyway is dropped, and bold
+ * on a heading line cannot be changed. Returns the new pending marks ({}: none).
+ */
+export function togglePendingMark(text: string, fmt: TextFormatting, caret: number, pending: PendingMarks, mark: Mark): PendingMarks {
+  if (mark === 'bold' && isHeadingLine(fmt.headings, lineAt(lineBounds(text), caret))) return pending
+  const natural = marksAtCaret(text, fmt, caret)
+  const want = !(pending[mark] ?? natural[mark])
+  const next: PendingMarks = { ...pending }
+  if (want === natural[mark]) delete next[mark]
+  else next[mark] = want
+  return next
+}
+
+/** A typed character's marks (a mask, see `markMask`) with the pending choices applied. */
+export function withPendingMarks(mask: number, pending: PendingMarks): number {
+  let out = mask
+  for (const m of MARKS) {
+    if (pending[m] === true) out |= BIT[m]
+    else if (pending[m] === false) out &= ~BIT[m]
+  }
+  return out
+}

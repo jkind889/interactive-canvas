@@ -24,7 +24,7 @@ npm run dev        # http://localhost:5173
 - Pan and zoom (hand tool, Space+drag, middle mouse, wheel pans, Ctrl/Cmd+wheel zooms, +/- and Fit buttons).
 - Add images by file picker or by dropping files onto the board.
 - Add text; double-click to edit; corner handles scale the font, side handles change the wrap width.
-- Formatted text: a text can carry bold, italic, underline and strikethrough on ranges of characters, headings (2, 1.5 or 1.25 times the box's font size, always bold) on whole lines, and a font, alignment and colour for the whole box. Formatting is drawn on the board and kept through saving, reloading, undo and redo, moving, scaling, changing the font size, typing, pasting and dropping text. There are no controls to apply it yet; it comes only from a stored board.
+- Formatted text: bold, italic, underline and strikethrough on ranges of characters, headings (2, 1.5 or 1.25 times the box's font size, always bold) on whole lines, and a font, alignment and colour for the whole box, applied from the panel or with `Ctrl/Cmd+B`, `I`, `U` (see below). Formatting is drawn on the board and kept through saving, reloading, undo and redo, moving, scaling, changing the font size, typing, pasting and dropping text.
 - Move, resize, rotate, multi-select, layer (forward/back/front/back), delete.
 - **Frames**: named rectangles that structure a board without forcing everything into pages (see below).
 - Undo / redo for every canvas change. Esc, or switching away from the window, cancels a drag, resize or frame that is still in progress.
@@ -58,6 +58,17 @@ The panel shows how many items a frame owns. **Select with contents** selects a 
 
 A multi-selection can be moved, scaled proportionally from a corner, and (if it contains no frame) rotated. Those are exactly the transforms the saved board can represent, so nothing drifts on save, undo or reload. There is no free-aspect stretch or skew of a group, and holding Shift no longer unlocks one. When scaling would push a text below 6 px or above 400 px, or a frame below 24 units, the whole selection stops together at that point instead of some members scaling further than others.
 
+## Formatting text
+
+Select one text and the panel on the right shows its formatting: font, size, heading, bold / italic / underline / strikethrough, alignment and colour. The panel's buttons never take the keyboard away from a text you are typing in: click one and keep typing. (Several selected objects show no formatting controls.)
+
+- **While you are editing a text** (double-click it), bold, italic, underline and strikethrough act on the selected characters: a mark is removed if every selected character already has it, otherwise added to all of them. With only a caret, your choice applies to what you type next; the buttons show what the next character will look like. That choice is dropped when you move the caret (arrow keys, a click) or leave the text. Headings act on every line the selection touches, or the caret's line.
+- **With the text selected but not being edited**, everything acts on the whole box: a mark goes on unless every character already has it; a heading goes on every line.
+- **Font, alignment and colour** always apply to the whole box, also while you are editing it. Alignment moves the words inside the box; the box keeps its position and width. Colours are a fixed set of eight, including white for text on images.
+- **A heading line is always bold.** Bold has no effect on a selection that lies entirely in heading lines (the Bold button shows pressed and greyed out there), and on a selection that mixes heading and normal lines it changes the normal lines only. Setting a line back to Body leaves it plain.
+- **Undo:** formatting changed while editing is saved straight away, like typing, and the whole edit becomes one undo step when you leave the text. Formatting a selected box is an undo step of its own (quick repeats of the same kind, such as trying several fonts, count as one).
+- Formatting never changes which frame a text belongs to, even when a heading makes the text taller.
+
 ## Storage, tabs and older builds
 
 Everything is stored in this browser's IndexedDB, for this origin (`http://localhost:5173` and `http://127.0.0.1:5173` are different origins and have separate boards).
@@ -76,7 +87,10 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - Something sitting inside a frame without belonging to it looks the same as something that does. The item count and "Select with contents" tell you which is which.
 - A new text box is wider than what you type into it (ten times its font size), and belonging goes by the centre of that box. A text started in the right part of a frame can therefore end up not belonging to it, and one started just left of a frame can end up belonging to it; drag the text, or narrow it with a side handle, to settle it. Whether a new text should instead belong to the frame that was clicked in is an open design question.
 - Fonts are named choices (Sans, Serif, Mono, Handwritten, Display) drawn with fonts already on the machine, so the exact typeface, and where lines wrap, can differ between machines.
-- A heading belongs to a line, and editing carries each line's level over rather than guessing it from the text. Enter at the end of a heading starts a normal line; Enter in the middle of a heading leaves two headings; Enter at the start of a heading leaves an empty heading line above it. A heading line whose characters are all deleted stays a heading, so what you type there next is a heading too. Joining two lines keeps the level of the line the join starts in: Backspace at the start of a normal line under a heading makes it part of the heading, and Backspace at the start of a heading under a line with text makes it normal text (not bold), except that a heading joined onto an empty line stays a heading. Typing next to a bold character is bold. Pasted or dropped text keeps its bold, italic, underline and strikethrough, so text copied from a heading arrives bold at the normal size, but it never brings its own size, colour or font. These choices are provisional until the formatting controls arrive.
+- A heading belongs to a line, and editing carries each line's level over rather than guessing it from the text. Enter at the end of a heading starts a normal line; Enter in the middle of a heading leaves two headings; Enter at the start of a heading leaves an empty heading line above it. A heading line whose characters are all deleted stays a heading, so what you type there next is a heading too. Joining two lines keeps the level of the line the join starts in: Backspace at the start of a normal line under a heading makes it part of the heading, and Backspace at the start of a heading under a line with text makes it normal text (not bold), except that a heading joined onto an empty line stays a heading. Typing next to a bold character is bold (unless you turned bold off at the caret first). Pasted or dropped text keeps its bold, italic, underline and strikethrough, so text copied from a heading arrives bold at the normal size, but it never brings its own size, colour or font. A mark chosen with only a caret also applies to text pasted or dropped at the caret before it moves. These choices are provisional.
+- A selection that ends just after a line break (at the very start of the next line) does not count that next line for a heading.
+- A font or heading whose longest word does not fit the box widens it, as typing does; changing back does not narrow it again (undo does). Drag a side handle to narrow it.
+- Several selected objects show no formatting controls, even if they are all texts.
 - Dropping dragged text into a centred or right-aligned text can shift its box: when the dropped words make the box wider, it widens from its left edge, which is how the canvas library inserts dropped text. Typing keeps the box's alignment edge in place.
 - `Ctrl/Cmd+Z` while you are typing in a text is the browser's own undo of the typing. It brings back the characters but not a heading level the undone edit changed: after Backspace joins a normal line into a heading, undoing it this way leaves both lines headings. Leave the text and use the board's undo instead to restore the text and its formatting exactly.
 - Touch input is not supported.
@@ -91,13 +105,13 @@ npm run test:e2e           # starts its own dev server on :5199 and runs e2e/*.s
 ```
 
 - **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, and the `Editor` state machines (hydration, gestures, frames) on a small fake of Fabric, since jsdom has no canvas.
-- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs) and `text.spec.ts` (formatted text drawn, saved, scaled, undone and typed into). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
+- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs), `text.spec.ts` (formatted text drawn, saved, scaled, undone and typed into) and `formatting.spec.ts` (the panel's text controls and `Ctrl/Cmd+B`, `I`, `U` on a range, at a caret and on a whole box). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
 - Use a browser already on your machine instead of the bundled one with `PW_CHANNEL=msedge` or `PW_CHANNEL=chrome`; change the port with `E2E_PORT`.
 - Failure traces and screenshots go to `test-results/` (git-ignored).
 
 ## Keyboard shortcuts
 
-Shortcuts never fire while you are typing in a field or editing text. While a drag, resize or frame is in progress only `Esc` and the zoom keys respond.
+Shortcuts never fire while you are typing in a field or editing text, except `Ctrl/Cmd+B`, `I`, `U` in a text you are editing. While a drag, resize or frame is in progress only `Esc` and the zoom keys respond.
 
 | Key                         | Action                         |
 | --------------------------- | ------------------------------ |
@@ -109,6 +123,7 @@ Shortcuts never fire while you are typing in a field or editing text. While a dr
 | `Ctrl/Cmd+A`                | Select all                     |
 | `[` / `]`                   | Send backward / bring forward (frames stay behind content) |
 | `Ctrl/Cmd+[` / `]`          | Send to back / bring to front  |
+| `Ctrl/Cmd+B` / `I` / `U`    | Bold / italic / underline: the selected characters (or what you type next) while editing a text; the whole box when one text is selected |
 | `+` / `-` / `0` / `Shift+1` | Zoom in / out / 100% / fit     |
 | `Esc`                       | Cancel what is in progress; otherwise leave the tool, or deselect |
 
@@ -119,7 +134,7 @@ Only the primary mouse button edits. The middle button pans.
 - **Fabric.js 7** (MIT) renders and edits the canvas. React renders only the chrome (header, toolbar, inspector) and never touches Fabric objects.
 - `src/editor/Editor.ts` is the single bridge: it owns the Fabric canvas, history, assets and autosave, and exposes an immutable `EditorState` snapshot through `subscribe`/`getState` (`useSyncExternalStore`). Fabric's event callbacks only record facts; a finished gesture is settled in a microtask after Fabric's own mouse-up handling, and a save during a gesture stores the board from before it.
 - `src/editor/FrameCanvas.ts` extends Fabric's canvas for frames (what counts as a hit, Shift-click and marquee rules) and `src/editor/frameLayer.ts` holds the one geometry used both to draw a frame's outline and label and to hit them.
-- `src/model/` is pure and unit-tested: document types and validation, the frame ownership rules and scale limits (`frames.ts`), the canonical form of text formatting (`richText.ts`), snapshot `History` (with coalescing), layer reordering, viewport math.
+- `src/model/` is pure and unit-tested: document types and validation, the frame ownership rules and scale limits (`frames.ts`), the canonical form of text formatting and what the formatting controls do to it (`richText.ts`), snapshot `History` (with coalescing), layer reordering, viewport math.
 - `src/persistence/` has the IndexedDB store (document and image bytes written in one transaction, guarded by a revision token) and the `Autosaver` status machine.
 - `src/input/shortcuts.ts` maps key events to actions and decides when to stay out of the way.
 

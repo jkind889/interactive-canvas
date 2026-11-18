@@ -106,7 +106,7 @@ export function Overlays({ editor }: { editor: Editor }) {
       {state?.ready && <Toolbar editor={editor} state={state} onAddImage={openPicker} />}
       {state?.ready && <HistoryControls editor={editor} state={state} />}
       {state?.ready && <ZoomControls editor={editor} state={state} />}
-      {state?.ready && state.selection && <Inspector editor={editor} selection={state.selection} />}
+      {state?.ready && state.selection && <Inspector editor={editor} selection={state.selection} locked={readOnly !== null} />}
 
       {showEmpty && (
         <div className="empty-state">

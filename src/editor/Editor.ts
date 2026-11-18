@@ -24,17 +24,28 @@ import {
 } from '../model/frames.ts'
 import type { Box } from '../model/frames.ts'
 import { History } from '../model/history.ts'
+import {
+  DEFAULT_TEXT_COLOR,
+  formatAtCaret,
+  formatOfRange,
+  formatOfText,
+  setHeading as setHeadingOfRange,
+  setHeadingEverywhere,
+  toggleMark as toggleMarkOfRange,
+  togglePendingMark,
+} from '../model/richText.ts'
+import type { Mark, MarkState, PendingMarks, RangeFormat, TextAlign, TextFormatting } from '../model/richText.ts'
 import { canReorderLayered, reorderLayered } from '../model/layers.ts'
 import type { LayerOp } from '../model/layers.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from '../model/types.ts'
-import type { BoardDoc, FrameRecord, ImageRecord, SaveState, Scene, TextRecord, Viewport } from '../model/types.ts'
+import type { BoardDoc, FontId, FrameRecord, ImageRecord, SaveState, Scene, TextRecord, Viewport } from '../model/types.ts'
 import { fitImageScale, fitViewport, screenToScene, zoomAround } from '../model/viewport.ts'
 import type { Point, Rect } from '../model/viewport.ts'
 import { Autosaver } from '../persistence/autosave.ts'
 import { ABSENT } from '../persistence/boardStore.ts'
 import type { BoardStore } from '../persistence/boardStore.ts'
 import { hydrateBoard } from '../persistence/hydrate.ts'
-import { isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
+import { isPanHoldKey, resolveEditingShortcut, resolveShortcut } from '../input/shortcuts.ts'
 import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
 import { FrameCanvas } from './FrameCanvas.ts'
@@ -51,7 +62,10 @@ import {
   newId,
   normalizeTextScale,
   ownerOf,
+  applyTextFormatting,
+  readTextFormatting,
   reconcileTextFormatting,
+  selectedRange,
   setFrameName,
   setOwner,
   setTextFontSize,
@@ -74,6 +88,26 @@ export interface SelectionInfo {
    */
   memberCount: number | null
   layer: Record<LayerOp, boolean>
+  /** Only for a single text: what the formatting controls show. */
+  text: TextFormatInfo | null
+}
+
+/**
+ * The formatting of the one selected text, as the controls show it. While the text is being
+ * edited, marks and heading describe the selected range (or, with only a caret, what the
+ * next typed character gets, pending choices included); otherwise the whole box.
+ */
+export interface TextFormatInfo {
+  editing: boolean
+  font: FontId
+  align: TextAlign
+  /** `#rrggbb`; the default ink when the text has no colour of its own. */
+  color: string
+  marks: Record<Mark, MarkState>
+  /** Heading level (0: body text) of every line concerned, or 'mixed'. */
+  heading: number | 'mixed'
+  /** Bold is the headings' own here and cannot be changed (every character concerned is on a heading line). */
+  boldFromHeading: boolean
 }
 
 export interface Notice {
@@ -182,6 +216,13 @@ export class Editor {
   /** A primary-button press has been passed through to Fabric and not yet released. */
   private primaryDown = false
   private pan: { button: number; end: () => void } | null = null
+  /**
+   * Marks chosen with only a caret in a text being edited, for what is typed next. Dropped
+   * when the caret moves for any other reason than typing, and when the edit ends.
+   */
+  private pending: { target: Textbox; marks: PendingMarks } | null = null
+  /** A selection-info refresh is queued (see `queueSelectionSync`). */
+  private selectionSyncQueued = false
 
   constructor(
     private readonly host: HTMLElement,
@@ -386,6 +427,7 @@ export class Editor {
   /** Rebuilds the canvas from records (frames behind content), preserving selection by id. */
   private applyRecords(scene: Scene) {
     this.applying = true
+    this.pending = null
     try {
       const selected = new Set(this.selectedIds())
       this.canvas.discardActiveObject()
@@ -464,7 +506,48 @@ export class Editor {
         backward: canReorderLayered(order, ids, 'backward'),
         back: canReorderLayered(order, ids, 'back'),
       },
+      text: single instanceof Textbox ? this.textFormatInfo(single) : null,
     }
+  }
+
+  private textFormatInfo(tb: Textbox): TextFormatInfo {
+    const fmt = readTextFormatting(tb)
+    const text = tb.text
+    const editing = tb.isEditing === true
+    const range = editing ? selectedRange(tb) : undefined
+    let state: RangeFormat
+    if (range && range.start === range.end) state = formatAtCaret(text, fmt, range.start, this.pendingFor(tb))
+    else if (range) state = formatOfRange(text, fmt, range.start, range.end)
+    else state = formatOfText(text, fmt)
+    return { editing, font: fmt.font ?? 'sans', align: fmt.align ?? 'left', color: fmt.color ?? DEFAULT_TEXT_COLOR, ...state }
+  }
+
+  private pendingFor(tb: Textbox): PendingMarks {
+    return this.pending?.target === tb ? this.pending.marks : {}
+  }
+
+  /**
+   * Refreshes only the selection info, and only tells React when it really changed: the caret
+   * moving inside a text being edited fires often, mostly without changing what the
+   * formatting controls show.
+   */
+  private syncSelection() {
+    const selection = this.computeSelection()
+    if (JSON.stringify(selection) === JSON.stringify(this.state.selection)) return
+    this.setState({ selection })
+  }
+
+  /**
+   * After Fabric's own handling has returned: Fabric fires its text selection event before
+   * it has stored the new selection in some cases (IText.mjs `_updateAndFire`).
+   */
+  private queueSelectionSync() {
+    if (this.selectionSyncQueued) return
+    this.selectionSyncQueued = true
+    queueMicrotask(() => {
+      this.selectionSyncQueued = false
+      if (!this.disposed) this.syncSelection()
+    })
   }
 
   private syncState() {
@@ -587,10 +670,21 @@ export class Editor {
       // line keeps the level it had before the change (never one guessed from the sizes a
       // paste brought), marks come from the styles, and a save can never store formatting
       // that the canvas does not show.
-      if (target instanceof Textbox) reconcileTextFormatting(target)
+      // Marks chosen with only a caret go to what was just typed (they last through every
+      // step of an IME composition, which fires this without moving the caret otherwise).
+      if (target instanceof Textbox) reconcileTextFormatting(target, target.isEditing ? this.pendingFor(target) : undefined)
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
+      this.queueSelectionSync()
+    })
+    // The caret or the selected range moved for any other reason than typing (arrow keys, a
+    // click or drag in the text, select all). Typing moves it without this event (fabric
+    // 7.4.0, ITextBehavior.mjs `updateFromTextArea`), and so does an IME composition.
+    c.on('text:selection:changed', ({ target }) => {
+      if (this.pending?.target === target) this.pending = null
+      this.queueSelectionSync()
     })
     c.on('text:editing:exited', ({ target }) => {
+      if (this.pending?.target === target) this.pending = null
       // A press inside the text may still be held (it started no gesture, and the text could
       // not move while it was being edited). End it, or the text would now be dragged with
       // no gesture: visible to saves half-way and impossible to cancel.
@@ -1101,7 +1195,9 @@ export class Editor {
 
   handleKeyDown(e: KeyboardEvent) {
     if (!this.live) return
-    const ctx = { editingText: this.state.editingText }
+    const active = this.canvas.getActiveObject()
+    const edited = active instanceof Textbox && active.isEditing ? active : null
+    const ctx = { editingText: this.state.editingText, textSelected: active instanceof Textbox && !active.isEditing }
     if (this.busy) {
       // Mid-gesture: Esc cancels it, zoom still works, everything else waits.
       const action = resolveShortcut(e, ctx)
@@ -1115,6 +1211,16 @@ export class Editor {
         e.preventDefault()
         this.run(action)
       }
+      return
+    }
+    // Keys typed into the text being edited reach this window listener from Fabric's hidden
+    // textarea; Fabric does nothing with Ctrl/Cmd+B, I or U and lets them bubble (fabric
+    // 7.4.0, ITextKeyBehavior.mjs `onKeyDown`, constants.mjs `ctrlKeysMapDown`), so no capture
+    // listener is needed. Everything else typed there is left alone.
+    const mark = resolveEditingShortcut(e, { editedTextarea: edited?.hiddenTextarea ?? null })
+    if (mark) {
+      e.preventDefault()
+      this.toggleMark(mark)
       return
     }
     if (isPanHoldKey(e, ctx)) {
@@ -1168,6 +1274,12 @@ export class Editor {
         return this.arrange('front')
       case 'layer-back':
         return this.arrange('back')
+      case 'format-bold':
+        return this.toggleMark('bold')
+      case 'format-italic':
+        return this.toggleMark('italic')
+      case 'format-underline':
+        return this.toggleMark('underline')
       case 'escape':
         if (this.busy) return
         if (this.state.tool !== 'select') this.setTool('select')
@@ -1434,6 +1546,81 @@ export class Editor {
     // committing would record "text removed" while it is still being typed into.
     if (active.text.trim() === '') return
     this.commit(`font-size:${idOf(active) ?? ''}`)
+  }
+
+  // ---- text formatting ----------------------------------------------------------------------
+  //
+  // Every command acts on the one selected text, and only while the board is editable and no
+  // gesture is unsettled. While the text is being edited, marks and headings act on the
+  // selected range (marks with only a caret: on what is typed next), and the change is saved
+  // as it happens and becomes part of the single undo step recorded when the edit ends; the
+  // edit, its caret and its selected range go on. On a selected box that is not being edited
+  // they act on the whole box, as an undo step of its own (quick repeats of the same kind
+  // coalesce, like the font size). None of them changes ownership.
+
+  /** The text a formatting command acts on, or null when there is none or the board may not change now. */
+  private formatTarget(): Textbox | null {
+    if (!this.editable || this.busy) return null
+    const active = this.canvas.getActiveObject()
+    return active instanceof Textbox ? active : null
+  }
+
+  /** Applies a formatting change through the one canvas path, then saves or records it. */
+  private formatText(tb: Textbox, kind: string, change: (fmt: TextFormatting, text: string) => TextFormatting) {
+    if (!applyTextFormatting(tb, change)) return // nothing changed: nothing recorded, nothing saved
+    this.canvas.requestRenderAll()
+    if (tb.isEditing) {
+      // Saved as it happens, like typing. A blank text being typed into is not in the scene,
+      // so there is nothing to save (and a commit would record its removal).
+      if (tb.text.trim() !== '') this.autosaver.markDirty()
+      this.syncSelection()
+      return
+    }
+    this.commit(`format-${kind}:${idOf(tb) ?? ''}`)
+  }
+
+  /**
+   * Bold, italic, underline or strikethrough. Editing: toggled on the selected range (off if
+   * every character has it, otherwise on), or with only a caret, chosen for what is typed
+   * next. Not editing: the whole box. Bold never changes in heading lines.
+   */
+  toggleMark(mark: Mark) {
+    const tb = this.formatTarget()
+    if (!tb) return
+    const range = tb.isEditing ? (selectedRange(tb) ?? { start: 0, end: tb.text.length }) : { start: 0, end: tb.text.length }
+    if (tb.isEditing && range.start === range.end) {
+      const marks = togglePendingMark(tb.text, readTextFormatting(tb), range.start, this.pendingFor(tb), mark)
+      this.pending = Object.keys(marks).length > 0 ? { target: tb, marks } : null
+      this.syncSelection()
+      return
+    }
+    this.formatText(tb, `mark-${mark}`, (fmt, text) => toggleMarkOfRange(text, fmt, mark, range.start, range.end))
+  }
+
+  /** Heading level 1 to 3, or 0 for body text. Editing: every line the selection touches (the caret's line). Not editing: every line. */
+  setHeading(level: 0 | 1 | 2 | 3) {
+    const tb = this.formatTarget()
+    if (!tb) return
+    const range = tb.isEditing ? selectedRange(tb) : undefined
+    this.formatText(tb, 'heading', (fmt, text) => (range ? setHeadingOfRange(text, fmt, level, range.start, range.end) : setHeadingEverywhere(text, fmt, level)))
+  }
+
+  /** The font of the whole box, also while it is being edited. */
+  setTextFont(font: FontId) {
+    const tb = this.formatTarget()
+    if (tb) this.formatText(tb, 'font', (fmt) => ({ ...fmt, font }))
+  }
+
+  /** The alignment of the whole box, also while it is being edited. The box keeps its position and width. */
+  setTextAlign(align: TextAlign) {
+    const tb = this.formatTarget()
+    if (tb) this.formatText(tb, 'align', (fmt) => ({ ...fmt, align: align === 'left' ? undefined : align }))
+  }
+
+  /** The colour (`#rrggbb`) of the whole box, also while it is being edited. The default ink is stored as no colour. */
+  setTextColor(color: string) {
+    const tb = this.formatTarget()
+    if (tb) this.formatText(tb, 'color', (fmt) => ({ ...fmt, color }))
   }
 
   arrange(op: LayerOp) {

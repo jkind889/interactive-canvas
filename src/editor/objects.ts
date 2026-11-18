@@ -1,8 +1,8 @@
 import { FabricImage, Rect, Textbox, util } from 'fabric'
 import type { FabricObject, TextStyle, TextStyleDeclaration } from 'fabric'
 import { round, roundPositive } from '../model/doc.ts'
-import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharMasks, textAfterEdit } from '../model/richText.ts'
-import type { TextFormatting } from '../model/richText.ts'
+import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharMasks, textAfterEdit, withPendingMarks } from '../model/richText.ts'
+import type { PendingMarks, TextFormatting } from '../model/richText.ts'
 import type { FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 import type { Point } from '../model/viewport.ts'
 import { FONT_STACKS, fontIdOf } from './fonts.ts'
@@ -212,7 +212,9 @@ function remember(tb: Textbox, headings: readonly number[] | undefined) {
  * with one "\n").
  */
 function caretOffset(tb: Textbox): number | undefined {
-  const g: unknown = tb.selectionEnd
+  return graphemeToOffset(tb, tb.selectionEnd)
+}
+function graphemeToOffset(tb: Textbox, g: unknown): number | undefined {
   if (typeof g !== 'number' || !Number.isInteger(g) || g < 0) return undefined
   let left = g
   for (const line of linesOf(tb)) {
@@ -220,6 +222,18 @@ function caretOffset(tb: Textbox): number | undefined {
     left -= line.graphemes.length + 1
   }
   return undefined
+}
+
+/**
+ * The selected characters of a text as UTF-16 offsets [start, end) into its text (equal for
+ * a caret), or undefined when the object has no selection. Converted from Fabric's grapheme
+ * indices like the caret (see `caretOffset`).
+ */
+export function selectedRange(tb: Textbox): { start: number; end: number } | undefined {
+  const a = graphemeToOffset(tb, tb.selectionStart)
+  const b = graphemeToOffset(tb, tb.selectionEnd)
+  if (a === undefined || b === undefined) return undefined
+  return { start: Math.min(a, b), end: Math.max(a, b) }
 }
 
 /**
@@ -244,8 +258,10 @@ function caretOffset(tb: Textbox): number | undefined {
  * neighbouring character's style onto what is typed or pasted without styles of its own;
  * styles brought by a paste or drop are complete declarations, with a font family).
  * `change.caret` (UTF-16, after the change) picks the alignment among repeated characters.
+ * `change.pending` are marks chosen with only a caret for what is typed next: the characters
+ * the change inserted get them (on or off), whatever style Fabric copied onto them.
  */
-export function readTextFormatting(tb: Textbox, change?: { caret: number | undefined }): TextFormatting {
+export function readTextFormatting(tb: Textbox, change?: { caret: number | undefined; pending?: PendingMarks }): TextFormatting {
   const raw: Record<string, unknown> = {
     font: fontIdOf(tb.fontFamily),
     align: tb.textAlign,
@@ -257,19 +273,27 @@ export function readTextFormatting(tb: Textbox, change?: { caret: number | undef
     const edit = textAfterEdit(known.text, known.headings, text, change?.caret)
     const headings = edit.headings
     const marks = new Map<number, number>() // UTF-16 start of a marked character -> its marks
+    const pending = change?.pending && Object.keys(change.pending).length > 0 ? change.pending : undefined
     for (const [li, line] of linesOf(tb).entries()) {
       const row = tb.styles[li]
-      if (!row) continue
+      if (!row && !pending) continue // a pending mark can fall on characters without any style
       let start = line.start
       line.graphemes.forEach((g, k) => {
         const end = start + g.length
-        const st = row[k]
+        const st = row?.[k]
         let mask = st ? marksOf(st) : 0
         if (st && mask & BOLD && (headings?.[li] ?? 0) === 0) {
+          // A character that was on a heading line, or one whose style is a copy of a heading
+          // character's (a size and no font family). The second also covers a character the
+          // diff counts as untouched although Fabric replaced its style: the line break after
+          // a heading replaced by Enter leaves the same text, with the heading style copied
+          // onto the first character of the next line. Safe, because the canonical styles never
+          // give a character on a normal line a size of its own.
           const before = edit.levelBefore(start, end)
-          const headingBold = before !== undefined ? before > 0 : st.fontSize !== undefined && st.fontFamily === undefined
+          const headingBold = (before !== undefined && before > 0) || (st.fontSize !== undefined && st.fontFamily === undefined)
           if (headingBold) mask &= ~BOLD
         }
+        if (pending && edit.levelBefore(start, end) === undefined) mask = withPendingMarks(mask, pending)
         if (mask) marks.set(start, mask)
         start = end
       })
@@ -308,6 +332,32 @@ export function writeTextFormatting(tb: Textbox, fmt: TextFormatting) {
   remember(tb, canonicalHeadings(tb.text, fmt.headings))
 }
 
+/** The point of a box that stays put when it changes size: its alignment edge (Fabric's typing keeps it the same way). */
+const alignAnchor = (tb: Textbox) => (tb.textAlign === 'center' ? 'center' : tb.textAlign === 'right' ? 'right' : 'left')
+
+/**
+ * The one path by which a formatting command changes a text: its canonical formatting is
+ * read, changed by `change` (a pure function of `src/model/richText.ts`), made canonical and
+ * written back with `writeTextFormatting`, which also refreshes the remembered canonical
+ * state. Returns false, touching nothing, when the formatting stays the same.
+ *
+ * The text, the caret and the selected range are not touched, so an edit goes on as before.
+ * If the box changes size (a wider font, a heading whose longest word does not fit), its
+ * alignment edge stays where it is, as when typing; a change of alignment keeps the box
+ * where it is and moves the text inside it.
+ */
+export function applyTextFormatting(tb: Textbox, change: (fmt: TextFormatting, text: string) => TextFormatting): boolean {
+  const before = readTextFormatting(tb)
+  const after = canonicalTextFormatting(tb.text, { ...change(before, tb.text) })
+  if (JSON.stringify(after) === JSON.stringify(before)) return false // both canonical: keys and spans in a fixed order
+  const anchorX = alignAnchor(tb)
+  const pos = tb.getPositionByOrigin(anchorX, 'top')
+  writeTextFormatting(tb, after)
+  tb.setPositionByOrigin(pos, anchorX, 'top')
+  tb.setCoords()
+  return true
+}
+
 /** Changes a text's base size; its headings keep their ratio to it. No limit of its own. */
 export function setTextFontSize(tb: Textbox, fontSize: number, patch: { width?: number; scaleX?: number; scaleY?: number } = {}) {
   const fmt = readTextFormatting(tb)
@@ -339,11 +389,12 @@ function sameStyles(a: TextStyle | undefined, b: TextStyle): boolean {
  * redraws the text from it whenever the two differ, so what the canvas shows is always what
  * its record says, and remembers the result as the text's canonical state. The text and
  * the caret are not touched; like Fabric's own typing, the box keeps its alignment edge in
- * place if its size changes.
+ * place if its size changes. `pending`: marks chosen with only a caret, given to what the
+ * change inserted (see `readTextFormatting`).
  */
-export function reconcileTextFormatting(tb: Textbox): boolean {
+export function reconcileTextFormatting(tb: Textbox, pending?: PendingMarks): boolean {
   const known = lastCanonical.get(tb)
-  const fmt = readTextFormatting(tb, { caret: caretOffset(tb) })
+  const fmt = readTextFormatting(tb, { caret: caretOffset(tb), pending })
   const want = stylesFor(tb, fmt, tb.fontSize)
   let changed = false
   if (!sameStyles(tb.styles, want)) {

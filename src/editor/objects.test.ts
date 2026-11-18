@@ -331,6 +331,17 @@ describe('a text change: levels carried over, marks from the canvas', () => {
     expect(tb.styles[1]).toBeUndefined()
   })
 
+  it('nor when the line break after a heading is replaced by Enter (the same text, the heading style copied onto the next line)', () => {
+    const tb = mk({ text: 'Title\nbody', headings: [1] })
+    // Shift+ArrowRight selected the line break, Enter replaced it: Fabric copied the style of
+    // the first selected character (the break, i.e. the heading's last character) onto "b"
+    // (ITextKeyBehavior.mjs onInput, getSelectionStyles then insertNewStyleBlock).
+    change(tb, 'Title\nbody', { 0: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1 }, 1: { 0: h1 } }, 6)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Title\nbody', headings: [1] }))
+    expect(tb.styles[1]).toBeUndefined()
+  })
+
   it('a real bold mark that moves onto a heading is implied there, and stays a mark on a normal line', () => {
     const tb = mk({ text: 'Title\nbold', headings: [1], spans: [{ start: 6, end: 10, bold: true }] })
     const b = { fontWeight: 'bold' }

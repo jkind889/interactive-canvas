@@ -6,7 +6,8 @@ interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-labe
   shortcut?: string
   /** aria-keyshortcuts value, e.g. "V" or "Control+Z Meta+Z". */
   keys?: string
-  pressed?: boolean
+  /** 'mixed': part of what it applies to has it (a formatting mark over a range). */
+  pressed?: boolean | 'mixed'
   tipSide?: 'right' | 'top' | 'bottom' | 'left'
   children: ReactNode
 }

@@ -17,10 +17,15 @@ export type ShortcutAction =
   | 'layer-front'
   | 'layer-back'
   | 'escape'
+  | 'format-bold'
+  | 'format-italic'
+  | 'format-underline'
 
 export interface ShortcutContext {
   /** A Fabric text object is in edit mode. */
   editingText: boolean
+  /** Exactly one text is selected (and not being edited): Ctrl/Cmd+B, I and U format it as a whole. */
+  textSelected?: boolean
 }
 
 export type KeyEventLike = Pick<
@@ -66,6 +71,12 @@ export function resolveShortcut(e: KeyEventLike, ctx: ShortcutContext): Shortcut
     if (key === 'a' && !e.shiftKey) return 'select-all'
     if (key === ']') return 'layer-front'
     if (key === '[') return 'layer-back'
+    // Only for a selected text; with anything else the key stays the browser's.
+    if (ctx.textSelected && !e.shiftKey) {
+      if (key === 'b') return 'format-bold'
+      if (key === 'i') return 'format-italic'
+      if (key === 'u') return 'format-underline'
+    }
     return null
   }
   if (e.altKey) return null
@@ -103,6 +114,31 @@ export function resolveShortcut(e: KeyEventLike, ctx: ShortcutContext): Shortcut
     case 'i':
       return 'add-image'
   }
+  return null
+}
+
+/** A mark that a key pressed while a text is being edited toggles. */
+export type EditingShortcut = 'bold' | 'italic' | 'underline'
+
+export interface EditingContext {
+  /** The hidden textarea of the text being edited (where its keys arrive), or null when no text is being edited. */
+  editedTextarea: EventTarget | null
+}
+
+/**
+ * Keys pressed while a text is being edited. Claims only Ctrl/Cmd+B, I and U, and only when
+ * they come from the text being edited: never with Alt or Shift held, never during IME
+ * composition. Everything else (typing, selection and clipboard keys, Ctrl/Cmd+A, Esc and Tab
+ * to leave the edit) stays Fabric's and the browser's. `resolveShortcut` keeps returning
+ * null while a text is edited, so no canvas shortcut fires.
+ */
+export function resolveEditingShortcut(e: KeyEventLike, ctx: EditingContext): EditingShortcut | null {
+  if (ctx.editedTextarea === null || e.target !== ctx.editedTextarea || e.isComposing) return null
+  if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return null
+  const key = e.key.length === 1 ? e.key.toLowerCase() : e.key
+  if (key === 'b') return 'bold'
+  if (key === 'i') return 'italic'
+  if (key === 'u') return 'underline'
   return null
 }
 
