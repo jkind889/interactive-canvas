@@ -449,7 +449,10 @@ describe('setting headings', () => {
 
   it('every line of the box (a selected box): an empty last line is left out of the state and of the change', () => {
     expect(setHeadingEverywhere('a\nb\n', {}, 2)).toStrictEqual({ headings: [2, 2] })
-    expect(setHeadingEverywhere('a\nb\n', { headings: [1, 0, 3] }, 0)).toStrictEqual({ headings: [0, 0, 3] }) // the empty last line keeps its level
+    expect(setHeadingEverywhere('a\nb\n', { headings: [1, 0, 3] }, 2)).toStrictEqual({ headings: [2, 2, 3] }) // a heading level leaves the empty last line alone
+    expect(setHeadingEverywhere('a\nb\n', { headings: [1, 0, 3] }, 0)).toStrictEqual({}) // body text clears it too
+    expect(setHeadingEverywhere('Title\n', { headings: [1, 1] }, 0)).toStrictEqual({})
+    expect(setHeadingEverywhere('Title\n', { headings: [1, 1] }, 2)).toStrictEqual({ headings: [2, 1] })
     expect(setHeadingEverywhere('Title\n', {}, 1)).toStrictEqual({ headings: [1] })
     expect(setHeadingEverywhere('a\n\n', {}, 1)).toStrictEqual({ headings: [1, 1] }) // only the LAST empty line is left out
     expect(formatOfText('Title\n', { headings: [1, 1] }).heading).toBe(1)

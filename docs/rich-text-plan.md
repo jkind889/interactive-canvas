@@ -111,7 +111,7 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | done: `b307275`, review fixes `2210acc` and `42739a3`, cleared by recheck |
 | 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | done: `f43bb1b`, cleared by review; its nits are fixed in slice 3 |
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | done: `4dd927b`, cleared by review; its nits are handled in slice 4 |
-| 4 | Text tool: drag out a box. | in progress |
+| 4 | Text tool: drag out a box. | committed, in review |
 
 After the last slice is reviewed, the branch goes to a further independent hands-on QA and
 final review (Astra, coordinated separately). The milestone is not finished before that.

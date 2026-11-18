@@ -433,3 +433,55 @@ test.describe('slice 2 follow-ups', () => {
     expect(errors).toEqual([])
   })
 })
+
+test.describe('slice 3 review follow-ups', () => {
+  test('Body on a box also clears an empty last line that is still a heading; a heading level leaves it alone', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'Title\n', { headings: [1, 1] }) // "Title\nSub", both headings, with "Sub" deleted
+    const { errors, at } = await open(page, [rec])
+    await page.mouse.click(at(120, 120).x, at(120, 120).y)
+    await expect(button(page, 'H1 (Heading 1)')).toHaveAttribute('aria-pressed', 'true')
+    await button(page, 'H2 (Heading 2)').click()
+    await storedWhen(page, (d) => byId(d, 't').headings?.[0] === 2)
+    expect(byId(await storedDoc(page), 't')).toEqual({ ...rec, headings: [2, 1] })
+    await button(page, 'Body').click()
+    const done = await storedWhen(page, (d) => byId(d, 't').headings === undefined)
+    const { headings: _gone, ...plain } = rec
+    void _gone
+    expect(byId(done, 't')).toEqual(plain)
+    await expect(button(page, 'Body')).toHaveAttribute('aria-pressed', 'true')
+    expect(errors).toEqual([])
+  })
+
+  test('with italic pending from the panel, typing `**b**x` gives "b" bold and italic and "x" italic only', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'go ')
+    const { errors, at } = await open(page, [rec])
+    await editAtEnd(page, at(105, 112))
+    await button(page, 'Italic').click()
+    await typeKeys(page, '**b**x')
+    await page.keyboard.press('Escape')
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'go bx')
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'go bx', spans: [{ start: 3, end: 4, bold: true, italic: true }, { start: 4, end: 5, italic: true }] })
+    expect(errors).toEqual([])
+  })
+
+  test('holding Backspace straight after `# ` reverts once, then its repeats delete normally', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'abc')
+    const { errors, at } = await open(page, [rec])
+    await editAtEnd(page, at(105, 112))
+    await page.keyboard.press('Home')
+    await typeKeys(page, '# ')
+    await storedWhen(page, (d) => byId(d, 't').headings !== undefined)
+    await page.keyboard.down('Backspace') // reverts: "# abc"
+    expect(await textarea(page)).toMatchObject({ value: '# abc', start: 2, end: 2 })
+    await page.keyboard.down('Backspace') // a repeat: deletes the space
+    expect(await textarea(page)).toMatchObject({ value: '#abc', start: 1, end: 1 })
+    await page.keyboard.down('Backspace') // and the "#"
+    await page.keyboard.up('Backspace')
+    expect(await textarea(page)).toMatchObject({ value: 'abc', start: 0, end: 0 })
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(byId(await storedDoc(page), 't')).toEqual(rec) // no heading stored
+    await expect(undoButton(page)).toBeDisabled() // the edit changed nothing in the end
+    expect(errors).toEqual([])
+  })
+})

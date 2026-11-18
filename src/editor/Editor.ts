@@ -158,8 +158,11 @@ interface Gesture {
   transform?: Transform
   /** A drag: the unselected members of the frames being moved, which follow them. */
   carry?: Carry
-  /** The Frame tool: the rectangle being drawn, in scene coordinates. */
-  draft?: { start: Point; end: Point }
+  /**
+   * The Frame tool, or the Text tool (`tool: 'text'`): the rectangle being drawn, in scene
+   * coordinates. For a text only its width (and left and top) is used; its height is a guide.
+   */
+  draft?: { start: Point; end: Point; tool?: 'text' }
 }
 
 /**
@@ -173,8 +176,10 @@ interface Carry {
   followers: Array<{ obj: FabricObject; left: number; top: number }>
 }
 
-/** A Frame-tool press that moves less than this many screen pixels is a click (default-sized frame). */
+/** A Frame- or Text-tool press that moves less than this many screen pixels is a click (default-sized frame or text). */
 const DRAFT_CLICK_SLOP = 4
+/** The narrowest text box a drag makes, in font sizes (a narrower drag is widened away from the press point). */
+const MIN_TEXT_DRAG_EMS = 2
 const NO_FRAMES: ReadonlySet<string> = new Set()
 
 const ZOOM_STEP = 1.25
@@ -648,6 +653,16 @@ export class Editor {
       const start = { x: p.x, y: p.y }
       this.gesture = { id: ++this.gestureSeq, kind: 'draft', base: this.snapshot(), draft: { start, end: start } }
     })
+    // The Text tool: a primary press on empty canvas (or a frame's click-through interior)
+    // starts dragging out a text box. A press on an object, or on a frame's label or outline,
+    // is Fabric's as before (it has a target). A plain click is this draft too, settled as a
+    // default box. Only facts are recorded here.
+    c.on('mouse:down', (opt) => {
+      if (!this.editable || this.gesture || this.state.tool !== 'text' || this.state.handActive || !isPrimary(opt.e) || opt.target) return
+      const p = c.getScenePoint(opt.e)
+      const start = { x: p.x, y: p.y }
+      this.gesture = { id: ++this.gestureSeq, kind: 'draft', base: this.snapshot(), draft: { start, end: start, tool: 'text' } }
+    })
     c.on('mouse:move', (opt) => {
       const g = this.gesture
       if (g?.kind !== 'draft' || !g.draft) return
@@ -775,6 +790,8 @@ export class Editor {
         const id = g.id
         queueMicrotask(() => this.settle(id))
       }
+      // A Text-tool click with no draft behind it (Fabric always fires the press first, which
+      // starts a draft, so this is a fallback). Never together with a draft: one text per press.
       if (this.editable && !this.gesture && this.state.tool === 'text' && !this.state.handActive && !opt.target && opt.isClick) {
         const p = c.getScenePoint(opt.e)
         const at = { x: p.x, y: p.y }
@@ -814,7 +831,8 @@ export class Editor {
   }
 
   /** The Frame tool's release: one new frame, selected, and back to the Select tool. A new frame owns nothing (rule O5). */
-  private settleDraft(draft: { start: Point; end: Point }) {
+  private settleDraft(draft: { start: Point; end: Point; tool?: 'text' }) {
+    if (draft.tool === 'text') return this.settleTextDraft(draft)
     this.canvas.draft = null
     const { start, end } = draft
     const zoom = this.getViewport().zoom
@@ -831,6 +849,23 @@ export class Editor {
     }
     this.switchTool('select') // the tool is single-use
     this.insertFrame(box)
+  }
+
+  /**
+   * The Text tool's release: one new, blank text being edited, and back to the Select tool.
+   * Dragged: the box takes the drag's left, top and width (at least `MIN_TEXT_DRAG_EMS` font
+   * sizes, growing away from the press point); its height stays that of its text. A click (a
+   * drag shorter than the slop): today's default box at the press point. An image import that
+   * finished during the drag is added first, as its own step, because adding it ends any edit
+   * and would discard the new text while it is still blank.
+   */
+  private settleTextDraft(draft: { start: Point; end: Point }) {
+    this.canvas.draft = null
+    const { start, end } = draft
+    const dragged = Math.hypot(end.x - start.x, end.y - start.y) * this.getViewport().zoom >= DRAFT_CLICK_SLOP
+    this.gesture = null
+    this.idle()
+    this.addTextAt(start, 'top-left', dragged ? end : undefined)
   }
 
   /** Adds a frame in front of every other frame and behind all content, and selects it. */
@@ -1386,14 +1421,18 @@ export class Editor {
     this.addTextAt(this.viewCenterScene(), 'center')
   }
 
-  private addTextAt(at: Point, anchor: 'center' | 'top-left') {
+  /**
+   * `dragTo`: the Text tool's box was dragged out from `at` to here: it takes the drag's
+   * width (with a minimum) and starts at the drag's smaller x and y. Otherwise the default box.
+   */
+  private addTextAt(at: Point, anchor: 'center' | 'top-left', dragTo?: Point) {
     if (!this.editable || this.busy) return
     // Placement is single-use. Switch tools first: switching ends any editing.
     if (this.state.tool !== 'select') this.switchTool('select')
     this.finishEditing()
     const zoom = this.getViewport().zoom
     const fontSize = Math.round(clamp(24 / zoom, 12, 160))
-    const width = fontSize * 10
+    const width = dragTo ? Math.max(Math.abs(dragTo.x - at.x), fontSize * MIN_TEXT_DRAG_EMS) : fontSize * 10
     const rec: TextRecord = {
       id: newId(),
       type: 'text',
@@ -1401,8 +1440,8 @@ export class Editor {
       fontSize,
       width,
       angle: 0,
-      left: anchor === 'center' ? at.x - width / 2 : at.x,
-      top: anchor === 'center' ? at.y - fontSize * 0.625 : at.y,
+      left: dragTo ? (dragTo.x < at.x ? at.x - width : at.x) : anchor === 'center' ? at.x - width / 2 : at.x,
+      top: dragTo ? Math.min(at.y, dragTo.y) : anchor === 'center' ? at.y - fontSize * 0.625 : at.y,
     }
     const obj = createObject(rec, () => undefined)
     if (!(obj instanceof Textbox)) return

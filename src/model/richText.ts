@@ -496,11 +496,12 @@ export function setHeading(text: string, fmt: TextFormatting, level: number, sta
 }
 
 /**
- * Sets the heading level (0: body text) of every line of the box (see `lastBoxLine`): an empty
- * last line keeps its level.
+ * Sets the heading level of every line of the box (see `lastBoxLine`): a heading level leaves
+ * an empty last line as it is, while body text (0) also clears it, so that no box control
+ * leaves behind a tall empty line that none of them can remove.
  */
 export function setHeadingEverywhere(text: string, fmt: TextFormatting, level: number): TextFormatting {
-  return setHeadingOfLines(text, fmt, level, 0, lastBoxLine(text))
+  return setHeadingOfLines(text, fmt, level, 0, level === 0 ? paragraphCount(text) - 1 : lastBoxLine(text))
 }
 
 /**
@@ -695,8 +696,7 @@ export function matchTypingShortcut(text: string, caret: number, inserted: strin
   const open = j - n + 1
   if (open < 0 || (n === 2 && text[open] !== '*')) return null
   const before = open > 0 ? text[open - 1] : undefined
-  if (before === '*') return null // touches another `*`
-  if (before !== undefined && !isSpace(before) && !OPENERS.includes(before)) return null // inside a word
+  if (before !== undefined && !isSpace(before) && !OPENERS.includes(before)) return null // inside a word, or touching another `*`
   for (const i of [open, j, close, caret - 1]) if (!ownCharacter(text, i)) return null
   const start = open === 0 ? 0 : text.lastIndexOf('\n', open - 1) + 1
   return {
