@@ -180,7 +180,7 @@ test.describe('two tabs on one board', () => {
     await expect(banner(second)).toContainText('Read-only')
     await expect(banner(second)).toContainText('changed in another tab')
     await expect(status(second)).toContainText('Not saving')
-    await expect(second.getByRole('button', { name: 'Select' })).toBeDisabled()
+    await expect(second.getByRole('button', { name: 'Select', exact: true })).toBeDisabled()
     await second.waitForTimeout(AUTOSAVE_QUIET_MS)
     expect(await storedDoc(second)).toEqual(saved) // the first tab's board is untouched
     expect((await snapshotIdb(second)).assets).toEqual((await snapshotIdb(first)).assets)
@@ -302,6 +302,87 @@ test.describe('a read-only board that contains frames', () => {
     expect(after.assets).toEqual(before.assets) // every byte, including the undecodable one
     expect(await rawRow(page)).toEqual(rowBefore)
     await expect(status(page)).toContainText('Not saving')
+    expect(errors).toEqual([])
+  })
+})
+
+test.describe('storage that refuses or stalls', () => {
+  test('a database from a newer build is read-only here and nothing in it is written', async ({ page }) => {
+    const errors = errorsOf(page)
+    await openBlank(page)
+    await seedRaw(page, 3, { version: 1, title: 'From the future', objects: [TEXT], viewport: UNIT })
+    const before = await snapshotIdb(page)
+    await page.goto('/')
+    await expect(page.locator('.toolbar')).toBeVisible()
+    await expect(banner(page)).toContainText('newer yuriful')
+    await expect(status(page)).toContainText('Not saving')
+    await page.keyboard.press('t')
+    await page.mouse.click(400, 400)
+    await page.keyboard.type('nope')
+    await page.keyboard.press('f')
+    await page.mouse.click(500, 500)
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(before)
+    expect(await dbVersion(page)).toBe(3)
+    expect(errors).toEqual([])
+  })
+
+  test('a first framed save blocked by another tab fails with Retry and writes nothing; once unblocked, Retry saves it', async ({ context }) => {
+    test.setTimeout(60_000)
+    const seed = await context.newPage()
+    await openBlank(seed)
+    await seedMilestone1(seed, legacyBoard(), [PIC])
+    await seed.close()
+
+    // A tab that holds the database open and ignores the request to let go.
+    const stubborn = await context.newPage()
+    await openBlank(stubborn)
+    await stubborn.evaluate(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          const open = indexedDB.open('yuriful')
+          open.onerror = () => reject(open.error)
+          open.onsuccess = () => {
+            open.result.onversionchange = () => {}
+            ;(window as unknown as { __db: IDBDatabase }).__db = open.result
+            resolve()
+          }
+        }),
+    )
+    /** Reads through the stubborn tab's own connection (a new open would queue behind the blocked upgrade). */
+    const held = () =>
+      stubborn.evaluate(
+        () =>
+          new Promise<{ version: number; docVersion: number; hasFrames: boolean }>((resolve, reject) => {
+            const db = (window as unknown as { __db: IDBDatabase }).__db
+            const get = db.transaction('boards', 'readonly').objectStore('boards').get('current')
+            get.onsuccess = () => resolve({ version: db.version, docVersion: get.result.doc.version, hasFrames: 'frames' in get.result.doc })
+            get.onerror = () => reject(get.error)
+          }),
+      )
+
+    const page = await context.newPage()
+    const errors = errorsOf(page)
+    await openApp(page)
+    const at = await sceneToPage(page, UNIT)
+    await page.keyboard.press('f')
+    await drag(page, at(250, 150), at(900, 520))
+    await expect(page.locator('.inspector-title')).toHaveText('Frame')
+
+    await expect(status(page)).toContainText('Couldn’t save', { timeout: 15_000 }) // after the deadline, not forever "Saving…"
+    const retry = page.getByRole('button', { name: 'Retry' })
+    await expect(retry).toBeVisible()
+    await expect(page.locator('.toast-error')).toContainText('Close other yuriful tabs')
+    expect(await held()).toEqual({ version: 1, docVersion: 1, hasFrames: false }) // nothing was written, nothing upgraded
+    await expect(banner(page)).toHaveCount(0) // still editable: this is a retryable failure, not a conflict
+
+    await stubborn.evaluate(() => (window as unknown as { __db: IDBDatabase }).__db.close()) // the other tab goes away
+    await retry.click()
+    await waitSaved(page)
+    const saved = await storedDoc(page)
+    expect(saved.version).toBe(2)
+    expect(saved.frames).toHaveLength(1)
+    expect(await dbVersion(page)).toBe(2)
     expect(errors).toEqual([])
   })
 })

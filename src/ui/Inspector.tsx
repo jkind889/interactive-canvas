@@ -26,6 +26,20 @@ function FramePanel({ editor, selection }: { editor: Editor; selection: Selectio
     return () => editor.setFrameRenamer(null)
   }, [editor])
 
+  // A name being typed is committed when the pointer goes down anywhere else. Waiting for the
+  // browser's own blur is too late: by then the canvas has already handled the press (the
+  // selection has changed, or a drag has begun) and the editor would refuse the rename. The
+  // capture phase on the document runs before any of that. It also covers the panel's own
+  // buttons, which deliberately do not take focus.
+  useEffect(() => {
+    const commitPending = (e: PointerEvent) => {
+      const input = nameInput.current
+      if (input && document.activeElement === input && e.target !== input) input.blur()
+    }
+    document.addEventListener('pointerdown', commitPending, true)
+    return () => document.removeEventListener('pointerdown', commitPending, true)
+  }, [])
+
   const commit = (input: HTMLInputElement) => {
     // The editor normalizes the name (and refuses while it is busy or read-only): show what it really is.
     input.value = editor.renameFrame(input.value) ?? name

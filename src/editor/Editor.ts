@@ -592,7 +592,18 @@ export class Editor {
         // text after this callback, and they fail on a text that has no canvas any more.
         queueMicrotask(() => {
           if (this.disposed || target.isEditing || target.text.trim() !== '' || !c.getObjects().includes(target)) return
-          c.remove(target)
+          // Shift-clicking another object leaves the edit AND puts this text into a new
+          // multi-selection. Take it out again, or the selection would keep a member that is
+          // no longer on the canvas.
+          const active = c.getActiveObject()
+          if (active instanceof ActiveSelection && active.getObjects().includes(target) && !c._currentTransform) {
+            const rest = active.getObjects().filter((o) => o !== target)
+            c.discardActiveObject()
+            c.remove(target)
+            this.selectByIds(rest)
+          } else {
+            c.remove(target)
+          }
           c.requestRenderAll()
           this.syncState()
         })

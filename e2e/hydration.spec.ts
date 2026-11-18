@@ -119,7 +119,7 @@ test.describe('failed load is read-only and preserves the original document and 
     await expect(page.locator('.empty-state')).toHaveCount(0) // what loaded is shown; no "add" prompts
 
     // Editing controls are disabled; navigation is not.
-    await expect(page.getByRole('button', { name: 'Select' })).toBeDisabled()
+    await expect(page.getByRole('button', { name: 'Select', exact: true })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Add image' })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Text' })).toBeDisabled()
     await expect(page.getByRole('button', { name: 'Frame', exact: true })).toBeDisabled()

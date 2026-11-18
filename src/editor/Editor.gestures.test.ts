@@ -809,6 +809,23 @@ describe('a new text that is abandoned untouched', () => {
     expect(editor.getState()).toMatchObject({ objectCount: 0, canUndo: false })
   })
 
+  it('Shift-clicked into a selection as it is left, it is taken out of that selection again', async () => {
+    const { editor, canvas, byId } = await setup()
+    const { ActiveSelection } = await import('./testing/fakeFabric.ts')
+    const tb = canvas.objects[1] as Textbox
+    canvas.setActiveObject(tb)
+    tb.enterEditing()
+    tb.type('')
+    // What Fabric does on a Shift-click: leave the edit, then group the text with the clicked object.
+    tb.exitEditing()
+    canvas.setActiveObject(new ActiveSelection([tb, byId('img-1')]))
+    expect(editor.getState().selection).toMatchObject({ kind: 'multiple', count: 2 })
+    await tick()
+    expect(canvas.objects).toEqual([byId('img-1')])
+    expect(canvas.getActiveObject()).toBe(byId('img-1')) // the image alone, not a selection with a ghost in it
+    expect(editor.getState().selection).toMatchObject({ kind: 'image', count: 1 })
+  })
+
   it('an existing text emptied and left is removed as one undoable step, with its owner restored by undo', async () => {
     const { editor, store, canvas } = await setup()
     const tb = canvas.objects[1] as Textbox

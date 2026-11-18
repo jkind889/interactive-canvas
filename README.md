@@ -38,7 +38,7 @@ A frame is a white sheet with an outline and a name label. It sits behind all co
 
 - **Draw one** with the Frame tool (`F`): drag out a rectangle, or just click for a default-sized frame. The tool is single-use.
 - **Grab a frame by its label or its outline.** Its interior is click-through, so you can still select and marquee the things inside it.
-- **Rename** it in the panel on the right (double-clicking the label puts the cursor there).
+- **Rename** it in the panel on the right (double-clicking the label, or the outline, puts the cursor there). A name you are typing is kept when you click elsewhere; Esc discards it.
 - **Resizing a frame alone** changes its shape freely and leaves its contents where they are.
 
 ### What belongs to a frame

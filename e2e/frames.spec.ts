@@ -437,6 +437,65 @@ test.describe('moving and resizing frames', () => {
     expect(o.errors).toEqual([])
   })
 
+  test('in a selection: Shift-click on a member frame label removes just that frame; an unselected frame label inside the box does not beat the selection', async ({ page }) => {
+    // B's label (y 316..336) lies inside the box of the selection {A, picked, far}.
+    const B = frameRec('B', 420, 340, 200, 120)
+    const o = await openFramed(page, [A, B], [image('picked', 350, 250, { frameId: 'A' }), image('far', 760, 420)])
+    const before = await storedDoc(page)
+    const labelA = labelOf(o, A)
+    await page.mouse.click(labelA.x, labelA.y)
+    await page.keyboard.down('Shift')
+    await page.mouse.click(o.at(380, 270).x, o.at(380, 270).y) // picked
+    await page.mouse.click(o.at(860, 480).x, o.at(860, 480).y) // far
+    await page.keyboard.up('Shift')
+    await expect(title(page)).toHaveText('3 objects')
+
+    // Plain press on the unselected frame B's label, inside the selection's box: the selection is dragged, B stays.
+    const labelB = labelOf(o, B)
+    await drag(page, labelB, { x: labelB.x + 40, y: labelB.y + 20 })
+    const moved = await storedWhen(page, (d) => frameOf(d, 'A').left === 340)
+    expect(frameOf(moved, 'B')).toEqual(frameOf(before, 'B')) // the multi-selection body won (D2)
+    expect(obj(moved, 'picked')).toMatchObject({ left: 390, top: 270 })
+    expect(obj(moved, 'far')).toMatchObject({ left: 800, top: 440 })
+    await expect(title(page)).toHaveText('3 objects')
+
+    // Shift-click on member frame A's label: only A leaves the selection.
+    const labelAMoved = { x: labelA.x + 40, y: labelA.y + 20 }
+    await page.keyboard.down('Shift')
+    await page.mouse.click(labelAMoved.x, labelAMoved.y)
+    await page.keyboard.up('Shift')
+    await expect(title(page)).toHaveText('2 objects')
+    await page.keyboard.press('Delete') // proves which two were left: the images
+    const after = await storedWhen(page, (d) => d.objects.length === 0)
+    expect((after.frames ?? []).map((f) => f.id)).toEqual(['A', 'B'])
+    expect(o.errors).toEqual([])
+  })
+
+  test('six lone resizes out and back, and Esc mid-resize, leave a frame exactly where it started', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('member', 350, 250, { frameId: 'A' })])
+    const before = await storedDoc(page)
+    const label = labelOf(o, A)
+    await page.mouse.click(label.x, label.y)
+    for (let i = 0; i < 3; i++) {
+      await drag(page, o.at(700, 500), o.at(823, 571))
+      await storedWhen(page, (d) => frameOf(d, 'A').width === 523)
+      await drag(page, o.at(823, 571), o.at(700, 500))
+      await storedWhen(page, (d) => frameOf(d, 'A').width === 400)
+    }
+    expect(await storedDoc(page)).toEqual(before) // frame and member records exact after six gestures
+    await waitSaved(page)
+
+    const untouched = await snapshotIdb(page)
+    await drag(page, o.at(700, 500), o.at(900, 640), { hold: true })
+    await page.keyboard.press('Escape') // interrupted
+    await page.mouse.up()
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(untouched)
+    for (let i = 0; i < 6; i++) await undoButton(page).click()
+    await expect(undoButton(page)).toBeDisabled() // six steps: the cancelled one left nothing
+    expect(o.errors).toEqual([])
+  })
+
   test('a frame moved over a loose image does not adopt it; moving the image itself does; reload keeps both states', async ({ page }) => {
     const small = frameRec('A', 100, 200, 300, 250)
     const o = await openFramed(page, [small], [image('pic', 600, 250)]) // centre (700, 310)
@@ -665,20 +724,78 @@ test.describe('frame panel and toolbar', () => {
     await page.waitForTimeout(AUTOSAVE_QUIET_MS)
     expect(frameOf(await storedDoc(page), 'A').name).toBe('Back cover')
 
-    // Typing a name must not trigger canvas shortcuts (Delete, F, T ...).
-    await name.fill('Fit text')
-    await name.press('Delete')
-    await name.press('Enter')
-    doc = await storedWhen(page, (d) => frameOf(d, 'A').name === 'Fit text')
-    expect(doc.frames).toHaveLength(1)
+    // Typing a name must not trigger canvas shortcuts: real key presses for tools, zoom, layers, pan and delete.
+    await name.click()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.type('vht fi x[]0=-')
+    await page.keyboard.press('Space')
+    await page.keyboard.press('Backspace')
+    await page.keyboard.press('Delete')
+    await page.keyboard.press('Enter')
+    doc = await storedWhen(page, (d) => frameOf(d, 'A').name === 'vht fi x[]0=-')
+    expect(doc.frames).toHaveLength(1) // the frame was not deleted
+    expect(doc.viewport).toEqual(UNIT) // nothing zoomed or panned
+    await expect(page.getByRole('button', { name: 'Select', exact: true })).toHaveAttribute('aria-pressed', 'true') // no tool was switched
+    await expect(title(page)).toHaveText('Frame')
 
+    await page.waitForTimeout(1000) // past the coalescing window: the next rename is a step of its own
     await name.fill('   ')
     await name.press('Enter')
     await expect(name).toHaveValue('Frame')
     await storedWhen(page, (d) => frameOf(d, 'A').name === 'Frame')
 
     await undoButton(page).click()
-    await storedWhen(page, (d) => frameOf(d, 'A').name !== 'Frame')
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'vht fi x[]0=-') // exactly the name before it
+    expect(o.errors).toEqual([])
+  })
+
+  test('a name being typed is kept when the pointer goes elsewhere: the board, the frame own label, a drag, a panel button', async ({ page }) => {
+    const o = await openFramed(page, [A], [image('member', 350, 250, { frameId: 'A' })])
+    const label = labelOf(o, A)
+    const name = nameField(page)
+    const typeName = async (text: string) => {
+      await page.mouse.click(label.x, label.y)
+      await name.click()
+      await page.keyboard.press('Control+a')
+      await page.keyboard.type(text)
+    }
+
+    await typeName('Clicked away')
+    const empty = o.at(900, 600)
+    await page.mouse.click(empty.x, empty.y) // empty board: this also deselects the frame
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'Clicked away')
+    await expect(page.locator('.inspector')).toHaveCount(0)
+
+    await typeName('Clicked the label')
+    await page.mouse.click(label.x, label.y)
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'Clicked the label')
+    await expect(name).toHaveValue('Clicked the label')
+
+    await typeName('Dragged')
+    await drag(page, label, { x: label.x + 60, y: label.y + 30 }) // the same press commits the name and moves the frame
+    const moved = await storedWhen(page, (d) => frameOf(d, 'A').left === 360)
+    expect(frameOf(moved, 'A')).toMatchObject({ name: 'Dragged', left: 360, top: 230 })
+    expect(obj(moved, 'member')).toMatchObject({ left: 410, top: 280 })
+
+    const now = { x: label.x + 60, y: label.y + 30 }
+    await page.mouse.click(now.x, now.y)
+    await name.click()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.type('With contents')
+    await withContents(page).click()
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'With contents')
+    await expect(title(page)).toHaveText('2 objects')
+
+    // Esc is still the way to throw a typed name away.
+    await page.keyboard.press('Escape')
+    await page.mouse.click(now.x, now.y)
+    await name.click()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.type('Discarded')
+    await page.keyboard.press('Escape')
+    await page.mouse.click(empty.x, empty.y)
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(frameOf(await storedDoc(page), 'A').name).toBe('With contents')
     expect(o.errors).toEqual([])
   })
 

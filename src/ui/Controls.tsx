@@ -4,12 +4,13 @@ import { IconButton } from './IconButton.tsx'
 import { FitIcon, MinusIcon, PlusIcon, RedoIcon, UndoIcon } from './icons.tsx'
 
 export function HistoryControls({ editor, state }: { editor: Editor; state: EditorState }) {
+  const locked = state.readOnly !== null // a read-only board cannot be changed, by undo either
   return (
     <div className="floating controls controls-left" role="group" aria-label="History">
-      <IconButton label="Undo" shortcut="Ctrl+Z" keys="Control+Z Meta+Z" disabled={!state.canUndo} onClick={() => editor.undo()}>
+      <IconButton label="Undo" shortcut="Ctrl+Z" keys="Control+Z Meta+Z" disabled={locked || !state.canUndo} onClick={() => editor.undo()}>
         <UndoIcon />
       </IconButton>
-      <IconButton label="Redo" shortcut="Ctrl+Shift+Z" keys="Control+Shift+Z Meta+Shift+Z Control+Y" disabled={!state.canRedo} onClick={() => editor.redo()}>
+      <IconButton label="Redo" shortcut="Ctrl+Shift+Z" keys="Control+Shift+Z Meta+Shift+Z Control+Y" disabled={locked || !state.canRedo} onClick={() => editor.redo()}>
         <RedoIcon />
       </IconButton>
     </div>

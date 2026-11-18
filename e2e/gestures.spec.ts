@@ -100,6 +100,56 @@ test.describe('cancelling', () => {
     expect(errors).toEqual([])
   })
 
+  test('a window blur mid-drag restores the board and records nothing', async ({ page }) => {
+    const { errors, at } = await open(page)
+    const before = await snapshotIdb(page)
+    await drag(page, at(CENTRE.x, CENTRE.y), at(CENTRE.x + 180, CENTRE.y + 90), { hold: true })
+    await page.evaluate(() => window.dispatchEvent(new Event('blur'))) // the window lost focus (e.g. alt-tab)
+    await page.mouse.move(at(CENTRE.x + 240, CENTRE.y + 120).x, at(CENTRE.x + 240, CENTRE.y + 120).y, { steps: 3 })
+    await page.mouse.up()
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(before)
+    await expect(undoButton(page)).toBeDisabled()
+    await drag(page, at(CENTRE.x, CENTRE.y), at(CENTRE.x + 30, CENTRE.y)) // it is back where it was, and still draggable
+    await expect.poll(async () => byId((await storedDoc(page)).objects, 'img').left).toBe(330)
+    expect(errors).toEqual([])
+  })
+
+  test('Esc mid-scale of a multi-selection restores every member exactly and records nothing', async ({ page }) => {
+    const second = { ...IMAGE, id: 'img2', left: 700, top: 420, angle: 25 }
+    const { errors, at } = await open(page, [IMAGE, second])
+    const before = await snapshotIdb(page)
+    await page.keyboard.press('Control+a')
+    await expect(page.locator('.inspector-title')).toHaveText('2 objects')
+    const handle = at(300, 200) // top-left corner of the selection (the first image's corner)
+    await drag(page, handle, { x: handle.x + 150, y: handle.y + 100 }, { hold: true, steps: 10 })
+    await page.keyboard.press('Escape')
+    await page.mouse.up()
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(before)
+    await expect(undoButton(page)).toBeDisabled()
+    await expect(page.locator('.inspector-title')).toHaveText('2 objects') // the selection is re-formed
+    expect(errors).toEqual([])
+  })
+
+  test('ten drags out and back return the board to exactly where it started, each one undoable', async ({ page }) => {
+    const { errors, at } = await open(page)
+    const before = (await storedDoc(page)).objects
+    for (let i = 0; i < 5; i++) {
+      await drag(page, at(CENTRE.x, CENTRE.y), at(CENTRE.x + 137, CENTRE.y - 53))
+      await expect.poll(async () => byId((await storedDoc(page)).objects, 'img').left).toBe(437)
+      await drag(page, at(CENTRE.x + 137, CENTRE.y - 53), at(CENTRE.x, CENTRE.y))
+      await expect.poll(async () => byId((await storedDoc(page)).objects, 'img').left).toBe(300)
+    }
+    expect((await storedDoc(page)).objects).toEqual(before) // no drift after ten gestures
+    for (let i = 0; i < 10; i++) {
+      await expect(undoButton(page)).toBeEnabled()
+      await undoButton(page).click()
+    }
+    await expect(undoButton(page)).toBeDisabled() // ten steps, no more and no fewer
+    expect(errors).toEqual([])
+  })
+
   test('a click that moves nothing records nothing and saves nothing', async ({ page }) => {
     const { at } = await open(page)
     const before = await snapshotIdb(page)
@@ -138,6 +188,20 @@ test.describe('a text that ends blank', () => {
     await page.keyboard.press('Backspace')
     await page.mouse.click(at(CENTRE.x, CENTRE.y).x, at(CENTRE.x, CENTRE.y).y) // the image
     await expect(page.locator('.inspector-title')).toHaveText('Image') // not swallowed by an error
+    await expect.poll(async () => (await storedDoc(page)).objects.map((o) => o.id)).toEqual(['img'])
+    expect(errors).toEqual([])
+  })
+
+  test('Shift-clicking another object out of an emptied text selects just that object', async ({ page }) => {
+    const { errors, at } = await open(page, [IMAGE, NOTE])
+    const inside = at(712, 212)
+    await page.mouse.dblclick(inside.x, inside.y)
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('Backspace')
+    await page.keyboard.down('Shift')
+    await page.mouse.click(at(CENTRE.x, CENTRE.y).x, at(CENTRE.x, CENTRE.y).y)
+    await page.keyboard.up('Shift')
+    await expect(page.locator('.inspector-title')).toHaveText('Image') // not "2 objects" with a ghost
     await expect.poll(async () => (await storedDoc(page)).objects.map((o) => o.id)).toEqual(['img'])
     expect(errors).toEqual([])
   })
