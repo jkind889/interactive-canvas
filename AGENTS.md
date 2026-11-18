@@ -53,7 +53,8 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 - Commit in logical slices. Every commit must be a safe checkpoint: the app works and whatever it stores is valid. Run the checks for the changed surface, inspect the full diff, then commit.
 - Write commit messages around what changes for the person using the canvas, then why. Report the checks actually run; never invent impact, counts or verification.
 - Do not push, merge, reset, switch branches, rewrite history or clean up destructively unless asked. Preserve uncommitted changes you did not make.
-- Check where work lives before basing a branch. At the time of writing the milestone branches are local and unpublished, `feat/milestone-2-frames` is stacked on `feat/milestone-1-canvas`, and `origin/main` holds only the initial commit.
+- Choose the base of new work deliberately. Until `main` contains the current app together with `AGENTS.md` and `CLAUDE.md`, `main` is only the initial commit: new work must descend from `origin/feat/milestone-2-frames`, or from a newer approved branch that descends from it. Once that work is integrated into `main`, use the up-to-date approved base instead; this is not a standing rule to branch from the feature branch.
+- Before starting, confirm that both instruction files exist on the chosen base and on the new branch. If they are missing, the base is wrong: pick a base that has them rather than copying the files onto an older app they do not describe.
 - For a pull request: a short specific title; open with what was wrong or missing and what changes for the user; then the checks run and any gaps. Writing a description does not authorize pushing, filing or merging.
 
 ## Project shape
