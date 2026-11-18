@@ -209,6 +209,40 @@ None of them is built or tested here, and none changes this branch's scope:
   rule), and clicking a formatting button while a text is edited never ends it or loses the
   selected range.
 
+Concrete names on the other branch for the lock (their commit `9061a0c`, under independent
+review there at the time of writing, so names may still change):
+
+- model: `locked?: true` on a record, left out otherwise;
+- `src/editor/objects.ts`: `isLocked(obj)`, `setLocked(obj, …)`;
+- `SelectionInfo.locked`;
+- `Editor.setSelectionLocked` and `Editor.toggleLayerLock`;
+- shortcut Ctrl/Cmd+Shift+L.
+
+At integration, the guards of this branch's text mutations (the formatting commands, the
+in-edit key handling, the font size command, entering an edit, the typing shortcuts, the
+`text:changed` tidy-up path if a locked text could ever receive one) should call `isLocked`
+on the text, and the text section of the panel should follow `SelectionInfo.locked`.
+Ctrl/Cmd+Shift+L does not collide with anything here: this branch claims Ctrl/Cmd+B/I/U
+without Shift only.
+
+### Scenario for the integrated hands-on QA
+
+Once both branches are integrated (with the owner's authorization), the final QA pass should
+walk one realistic design-journal board end to end, adapting to what was actually delivered.
+This is a test scenario, not implementation scope:
+
+1. Drop in several inspiration images and overlap them.
+2. Add a note: drag out a text box, type a heading with `# `, a line with `**bold**` and
+   `*italic*`, change the font, alignment and colour from the panel.
+3. Draw a frame; move the note and one image into it; leave other images loose; move the
+   frame and check that only what belongs to it travels, and that formatting the note never
+   changes what it belongs to.
+4. Reorder layers from the layer list, lock an image and the note, and check that the locked
+   note cannot be formatted, edited or re-sized; unlock it and format it again.
+5. Replace, crop or fit an image and check the note and frame are untouched.
+6. Undo and redo through the whole sequence; reload; confirm the board looks the same and
+   take a screenshot for the record.
+
 ## Open questions for the owner
 
 - Whether to bundle font files so that a board looks the same on every machine (matters once
