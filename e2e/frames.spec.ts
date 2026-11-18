@@ -786,6 +786,23 @@ test.describe('frame panel and toolbar', () => {
     await storedWhen(page, (d) => frameOf(d, 'A').name === 'With contents')
     await expect(title(page)).toHaveText('2 objects')
 
+    // Clicking Undo with a name still being typed: the name is committed, and is the step Undo takes back.
+    // Nothing is lost: Redo returns it.
+    await page.keyboard.press('Escape')
+    await page.mouse.click(now.x, now.y)
+    await page.waitForTimeout(1000) // past the coalescing window, so this rename is a step of its own
+    await name.click()
+    await page.keyboard.press('Control+a')
+    await page.keyboard.type('Typed then undone')
+    await undoButton(page).click()
+    await expect(name).toHaveValue('With contents')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(frameOf(await storedDoc(page), 'A').name).toBe('With contents')
+    await redoButton(page).click()
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'Typed then undone')
+    await undoButton(page).click()
+    await storedWhen(page, (d) => frameOf(d, 'A').name === 'With contents')
+
     // Esc is still the way to throw a typed name away.
     await page.keyboard.press('Escape')
     await page.mouse.click(now.x, now.y)

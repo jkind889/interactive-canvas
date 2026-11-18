@@ -181,6 +181,7 @@ test.describe('two tabs on one board', () => {
     await expect(banner(second)).toContainText('changed in another tab')
     await expect(status(second)).toContainText('Not saving')
     await expect(second.getByRole('button', { name: 'Select', exact: true })).toBeDisabled()
+    await expect(undoButton(second)).toBeDisabled() // it has a history step (the drag), but a read-only board cannot be changed by undo either
     await second.waitForTimeout(AUTOSAVE_QUIET_MS)
     expect(await storedDoc(second)).toEqual(saved) // the first tab's board is untouched
     expect((await snapshotIdb(second)).assets).toEqual((await snapshotIdb(first)).assets)

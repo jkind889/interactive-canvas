@@ -34,6 +34,9 @@ function FramePanel({ editor, selection }: { editor: Editor; selection: Selectio
   useEffect(() => {
     const commitPending = (e: PointerEvent) => {
       const input = nameInput.current
+      // Also for Undo: the typed name is committed first and is then the step that Undo takes
+      // back, so Redo returns it. (Leaving it pending instead would lose it whenever the undo
+      // changes the frame's name and this field is rebuilt.)
       if (input && document.activeElement === input && e.target !== input) input.blur()
     }
     document.addEventListener('pointerdown', commitPending, true)
