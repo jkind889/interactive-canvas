@@ -163,6 +163,27 @@ behind the same `editable && !busy` guards as the existing commands, so a lock t
 object from being selected also keeps it from being formatted; a lock that still allows
 selection will need to gate these commands explicitly.
 
+What the other branch has told this one (as of 2026-11-18; their branch does not contain
+this branch's changes):
+
+- Their optional `locked` and crop fields are accepted in stored versions 1 and 2, with no
+  document or database version change. Together with this branch that makes two sets of
+  optional fields in the same versions; neither needs a bump.
+- A locked object is skipped by canvas clicks, the marquee and select-all, but can still be
+  selected on its own from the layer list, without handles. Every mutation of it is blocked
+  until it is unlocked; the one exception is that moving the frame that owns it still
+  carries it.
+
+Acceptance case for the integration and for the final QA pass: **a locked text selected
+from the layer list must not be formattable.** The `editable && !busy` guards are not
+enough, because that object is the active object. At integration every text formatting
+command (marks, heading, font, alignment, colour, font size), Ctrl/Cmd+B/I/U, entering a
+text edit by double-click, and the typing shortcuts must reject a locked text: nothing on
+the canvas changes, no history step, no save. The panel should show its formatting controls
+disabled or not at all. This cannot be implemented or tested on this branch alone, since the
+lock does not exist here; it is an integration task, to be done only when the owner
+authorizes merging the two.
+
 ## Open questions for the owner
 
 - Whether to bundle font files so that a board looks the same on every machine (matters once
