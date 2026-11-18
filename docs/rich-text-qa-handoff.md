@@ -12,10 +12,38 @@ using the app; `AGENTS.md` states the same rules as constraints.
 
 - Branch `feat/milestone-2-frames` in the root checkout, local only, ahead of
   `origin/feat/milestone-2-frames` (`698b628`).
-- Last code commit: `a4b921c`. Every commit after it changes documentation only.
+- Last code commit: `188a6a8`. Every commit after it changes documentation only.
 - Code commits, in order: `b307275` (slice 1), `2210acc` and `42739a3` (its review fixes),
   `f43bb1b` (slice 2), `4dd927b` (slice 3), `0bbbb5c` (slice 4), `a4b921c` (its review
-  fixes). `git log 698b628..HEAD --oneline` shows them between the plan commits.
+  fixes), `188a6a8` (the repair from the first QA pass, below). `git log 698b628..HEAD
+  --oneline` shows them between the plan commits.
+
+## Focused recheck after the first QA pass
+
+The first hands-on QA pass ran at `939f16e` and held sign-off for one finding: bold chosen
+with only a caret, then a heading (H1 from the panel, or `# `), "Title", Enter, "Body" left
+the body line stored and drawn bold. Repaired in `188a6a8` and cleared by the centralized
+reviewer. What to recheck:
+
+- The reproduction in its three modes (control, panel H1, `# `): stored `headings:[1]` and no
+  spans; "Body" drawn plain; the panel's Bold pressed and greyed out on the heading line and
+  not pressed on the new line.
+- The same with `## ` and `### `, and with H1 followed by Enter straight away.
+- Other pending marks survive: italic (or underline, strikethrough) chosen together with
+  bold before the heading still applies to the heading and to the next line.
+- Normal lines are unchanged: bold chosen and typed on a normal line, Enter, more typing is
+  still bold.
+- Backspace straight after `# ` brings back the typed characters and the pending bold, so
+  what is typed next on that normal line is bold.
+- A join: bold chosen on a normal second line, Backspace at its start joins it into the
+  heading above, type, Enter, type: the last line is plain.
+- Accepted consequence, not a defect: going back to Body on the line does not bring the
+  dropped bold back; press Ctrl+B again.
+
+The repair touches `pendingMarksAt` in `src/model/richText.ts` and
+`dropPendingBoldOnHeading` in `src/editor/Editor.ts` (called from the heading command and at
+the end of the `text:changed` handler), plus tests and one phrase each in the README and
+`AGENTS.md`. Nothing else changed since `939f16e`.
 
 ## Running it without touching the owner's board
 
@@ -121,24 +149,26 @@ several texts at once.
 
 ## Test evidence
 
-Run by the coordinator on `a4b921c` in the root checkout (Windows 11, Playwright's bundled
+Run by the coordinator on `188a6a8` in the root checkout (Windows 11, Playwright's bundled
 Chromium, e2e server on `127.0.0.1:5199`):
 
 | Check | Result |
 | ----- | ------ |
 | `npm run lint` | clean |
 | `npm run typecheck` | clean |
-| `npm test` | 19 files, 559 tests passed |
+| `npm test` | 19 files, 569 tests passed |
 | `npm run build` | succeeded |
-| `npm run test:e2e`, first run | 167 passed |
-| `npm run test:e2e`, second run | 167 passed |
+| `npm run test:e2e`, first run | 175 passed |
+| `npm run test:e2e`, second run | 175 passed |
 
 Baseline before the milestone (`698b628`): 347 unit tests and 70 Chromium tests. The new
 real-browser specs are `e2e/text.spec.ts`, `e2e/formatting.spec.ts`, `e2e/typing.spec.ts`
 and `e2e/texttool.spec.ts`; the unit tests are beside the code they cover.
 
-The independent reviewer ran the same gate on `a4b921c` in its own copy on port 5243 with the
-same counts, plus its own probes, and confirmed that named deliberate breaks fail tests.
+The independent reviewer ran the same gate on `188a6a8` in its own copy on port 5245 with the
+same counts, ran the first QA pass's three reproduction tests unchanged (all pass), added its
+own probes, and confirmed that named deliberate breaks fail tests. Before the repair, on
+`a4b921c` and `939f16e`, the counts were 559 unit and 167 Chromium tests.
 Per-slice findings and how each was handled are in the plan's review log.
 
 Not run, by anyone: Firefox or WebKit; the Edge and Chrome channels; macOS; a real input
@@ -158,6 +188,10 @@ Kept outside the repository. Astra captures the final visual evidence separately
 
 Both were taken during slice 2, before the "mixed" button state was restyled as a half-filled
 button, and before slices 3 and 4. They show the panel's layout, not the final details.
+
+From the first QA pass at `939f16e` (evidence available separately): `journal.png`, `inspector.png`, `pending-bold.png`
+(the defect before the repair), and its probe specs `astra-heading-matrix.spec.ts`,
+`astra-heading.spec.ts`, `astra-probe.spec.ts`, `astra-range.spec.ts`.
 
 ## Who did what
 

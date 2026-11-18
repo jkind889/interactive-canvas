@@ -120,10 +120,11 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | done: `4dd927b`, cleared by review; its nits are handled in slice 4 |
 | 4 | Text tool: drag out a box. | done: `0bbbb5c`, review fixes `a4b921c`, cleared by recheck |
 
-All four slices are implemented and independently reviewed; the last code commit is
-`a4b921c`. The branch now goes to a further independent hands-on QA and final review (Astra,
-coordinated separately): see [rich-text-qa-handoff.md](rich-text-qa-handoff.md) for what to
-exercise, the known limits and the test evidence. The milestone is not finished before that.
+All four slices are implemented and independently reviewed. The hands-on QA and final review
+(Astra, coordinated separately) ran at `939f16e` and held sign-off for one finding, repaired
+in `188a6a8`, which is now the last code commit and awaits that QA's focused recheck. See
+[rich-text-qa-handoff.md](rich-text-qa-handoff.md) for what to exercise, the known limits
+and the test evidence. The milestone is not finished before that recheck signs off.
 
 ## Integration contract with `feat/layers-image-tools`
 
@@ -391,6 +392,25 @@ gives the dragged width; that a plain click stores exactly what it did before; a
 named deliberate break fails both unit and real-browser tests. One observation, recorded as
 a known limit in the handoff: the font size never goes below 12, so at zoom 4 a drag must be
 about 96 screen pixels wide to count as a dragged width, against 48 at zoom 1.
+
+### Final hands-on QA (Astra) at `939f16e`
+
+An independent hands-on QA and code pass by a different reviewer on a different model. It
+confirmed the design-journal sitting, a frame scaled with its contents through undo, redo
+and reload, Unicode and joined-emoji underline, cancellation, and the agreement between the
+canvas text and the hidden textarea, and ran the full gate clean (559 unit, 167 Chromium).
+It held sign-off for one finding:
+
+| # | Finding | Severity | Disposition |
+| - | ------- | -------- | ----------- |
+| 1 | Bold chosen with only a caret, then a heading (H1 from the panel or `# `), "Title", Enter, "Body": the body line was stored and drawn bold, because the pending bold survived the line becoming a heading | should-fix | Accepted by the coordinator after reproducing it from the QA's evidence. Fixed in `188a6a8`: a pending bold is dropped whenever the caret's line is or becomes a heading (panel, `# `/`## `/`### `, or a join into a heading above); other pending marks are kept; Backspace straight after `# ` still restores the pending bold |
+
+Recheck of `188a6a8` by the centralized reviewer, verdict "the code is clear at 188a6a8",
+no findings. It ran the QA's own three reproduction tests unchanged (all pass), added probes
+for a pending bold-off with italic, underline and strikethrough kept through a heading, an
+input-method composition on a heading line, and the Backspace revert, and confirmed that
+each named deliberate break fails unit and real-browser tests. The repair goes back to the
+same QA thread for a focused recheck.
 
 One usage limit was hit during the milestone: the slice 3 implementer's first run failed
 with the provider's rate-limit error after about twelve minutes and was resumed in the same
