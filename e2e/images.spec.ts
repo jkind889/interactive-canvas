@@ -486,3 +486,27 @@ test.describe('a multi-selection with a cropped image', () => {
     expect(o.errors).toEqual([])
   })
 })
+
+test.describe('review fixes', () => {
+  test('a Fill that used to land 0.01 px away the second time: after one Fill the button is disabled and there is exactly one undo step', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('P', 200, 150, { crop: { x: 0, y: 0, width: 20, height: 62 } })])
+    await select(page, o.at(210, 181))
+    await fillButton(page).click()
+    const stored = await storedWhen(page, (d) => obj(d, 'P').crop?.height === 160)
+    expect(obj(stored, 'P')).toMatchObject({ crop: { x: 94.2, y: 0, width: 51.61, height: 160 }, scaleX: 0.3875, scaleY: 0.3875 })
+    await expect(fillButton(page)).toBeDisabled()
+    await undoButton(page).click()
+    await storedWhen(page, (d) => obj(d, 'P').crop?.height === 62)
+    await expect(undoButton(page)).toBeDisabled()
+    expect(o.errors).toEqual([])
+  })
+
+  test('Ctrl+A in crop mode selects nothing on the page and nothing on the board', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('P', 200, 150)])
+    await select(page, o.at(320, 230))
+    await openCrop(page)
+    await page.keyboard.press('Control+a')
+    expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('')
+    await expect(cropHelp(page)).toBeVisible()
+  })
+})

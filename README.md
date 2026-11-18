@@ -91,9 +91,9 @@ Select one image and the panel on the right shows **Crop**, **Fit** and **Fill**
 ### Crop
 
 - **Start** with **Crop**, or double-click the image (with the Select tool). The whole original appears in place, the part outside the crop is dimmed, and a box with eight handles shows what will be kept. Nothing on the board moves: the part you keep stays exactly where it was.
-- **Drag a handle** to move that edge or corner (any shape you like), or **drag inside the box** to move it over the image. The box always stays on the image and never gets smaller than 8 units a side.
+- **Drag a handle** to move that edge or corner (any shape you like), or **drag inside the box** to move it over the image. The box always stays on the image. Dragging a handle inwards stops 8 units short of the opposite side (as the box is shown on the board, and never less than one pixel of the original); a side that is already shorter than that, for example after Fill, can grow but is not made longer for you.
 - **Apply** with Enter, **Done**, or by clicking anywhere outside the box (that click does nothing else). **Cancel** with Esc or **Cancel**: the image is exactly as it was and nothing is recorded.
-- Pan and zoom work as usual while cropping (wheel, Space-drag, middle button, the zoom keys and buttons). Every other key waits. Clicking a tool, a layer row, Undo or another button applies the crop first and then does what you clicked.
+- Pan and zoom work as usual while cropping (wheel, Space-drag, middle button, the zoom keys and buttons). Every other key is ignored until the crop is applied or cancelled (it is not remembered for later). Clicking a tool, a layer row, Undo or another button applies the crop first and then does what you clicked.
 - **Cropping never throws anything away.** The original image is kept whole; crop it again later and the whole original comes back, so you can widen the crop or drag it back out to the full image (the crop is then gone). A crop is one undo step.
 - A crop counts as resizing the image: if what is left has its centre outside the frame it belonged to, it no longer belongs to it (and joins a frame in front that does contain its centre, as when you resize it).
 
@@ -101,9 +101,9 @@ Select one image and the panel on the right shows **Crop**, **Fit** and **Fill**
 
 Both keep the image where it is and work on its current box: what you see of it now.
 
-- **Fill** keeps the box exactly as it is and fills it with as much of the image as fits, centred. For example, a 600 x 400 photo cropped to its top-left corner as a square: Fill keeps the square and shows the middle 400 x 400 of the photo in it instead.
+- **Fill** keeps the box as it is (to the precision the board is saved in: crops to a hundredth of a pixel of the original, so on an image shown greatly enlarged a side can move by a fraction of a unit) and fills it with as much of the image as fits, centred. For example, a 600 x 400 photo cropped to its top-left corner as a square: Fill keeps the square and shows the middle 400 x 400 of the photo in it instead.
 - **Fit** shows the whole image again, as large as fits inside the box, centred on it. The square from the example becomes a 3:2 picture as wide as the square, centred where the square was. Since an image has no empty area, the box shrinks to the image's shape.
-- Each is one undo step. A button that would change nothing is greyed out. Fit counts as resizing for frame belonging, like a crop; Fill never changes what belongs to which frame.
+- Each is one undo step. A button that would change nothing is greyed out, so straight after Fill the Fill button is greyed out (a second Fill would change nothing), and the same for Fit. Fit counts as resizing for frame belonging, like a crop; Fill never changes what belongs to which frame.
 
 A locked image cannot be cropped, fitted or filled until it is unlocked.
 
@@ -130,6 +130,9 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - While cropping, the dimmed part of the image and the crop box are drawn over everything, including anything that lies on top of the image; the image itself keeps its place in the stacking order.
 - Starting a crop with the Hand tool selected switches to the Select tool (as from the Text and Frame tools), so the crop box can be dragged straight away.
 - A crop handle is grabbed within 8 screen pixels. On a very small crop box the handles cover the whole box, so it can be resized but not moved; zoom in to move it.
+- Zoom to fit (`Shift+1` or the button) while cropping fits the whole original as it is shown during the crop; only the view changes.
+- A saved crop that reaches outside its image (only possible if the stored board was edited by hand or damaged) is trimmed to the image when the board opens. Opening writes nothing, but the next save stores the trimmed crop.
+- Pressing on the board while cropping does not take the keyboard focus away from a field you were typing in, such as the board title (as with the Hand tool). Enter and Esc then go to that field, not to the crop; use Done or Cancel instead.
 - On the board itself nothing shows that something is locked, apart from the plain cursor over it and the fact that it does not respond; the padlock in the layer list does show it.
 - A locked item selected from the list is let go as soon as you press on it on the board, because the press goes to whatever lies beneath it (or starts a marquee).
 - "Select with contents" stays available for a frame that owns only locked things; it then selects the frame alone.

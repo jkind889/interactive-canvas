@@ -227,26 +227,70 @@ function placeCentred<T extends ImageRecord>(rec: T, centre: Point, width: numbe
   return out
 }
 
+/** Rounds down to 2 decimals (a side that must not grow past the image). */
+const floor2 = (n: number) => Math.floor(n * 100 + 1e-9) / 100
+
 /**
- * Fill: the displayed box stays exactly as it is (centre, size, angle) and the image covers
- * it, with the largest centred crop of the original that has the box's aspect ratio and one
- * uniform scale. Rounded as stored.
+ * How an image of `size` covers a box of `box.width` x `box.height` displayed units: what Fill
+ * does, and what keeping an image's box when its picture changes needs.
+ *
+ * The crop is the largest centred rectangle of the original with the box's aspect ratio,
+ * rounded as stored: its sides first (the side the image limits is the image's own side; the
+ * other follows the box's aspect ratio, to 0.01 source pixels), then its position, centred
+ * from those rounded sides. The scale is one uniform scale, rounded as stored (5 decimals),
+ * chosen from two candidates (box width / crop width, box height / crop height) as the one
+ * that keeps both sides of the box closest. Undefined crop: the whole image.
+ *
+ * Idempotent: covering the box this produces gives exactly the same crop and scale. The box
+ * is kept to stored precision: a side moves by at most about 0.005 source pixels times the
+ * scale, plus the scale's rounding (0.000005) times that side in source pixels.
+ */
+export function coverBox(size: Size, box: Size): { crop: CropRect | undefined; scale: number } {
+  const aspect = box.width / box.height
+  if (!(aspect > 0) || !Number.isFinite(aspect)) return { crop: undefined, scale: roundPositive(box.width / size.width, 5) }
+  let width: number
+  let height: number
+  if (size.height * aspect <= size.width) {
+    height = floor2(size.height)
+    width = Math.min(roundPositive(height * aspect), floor2(size.width))
+  } else {
+    width = floor2(size.width)
+    height = Math.min(roundPositive(width / aspect), floor2(size.height))
+  }
+  const crop = isWholeImage({ x: 0, y: 0, width, height }, size)
+    ? undefined
+    : {
+        x: Math.max(0, Math.min(round((size.width - width) / 2), size.width - width)),
+        y: Math.max(0, Math.min(round((size.height - height) / 2), size.height - height)),
+        width,
+        height,
+      }
+  const shown = crop ?? wholeRect(size)
+  const drift = (s: number) => Math.max(Math.abs(shown.width * s - box.width), Math.abs(shown.height * s - box.height))
+  const byWidth = roundPositive(box.width / shown.width, 5)
+  const byHeight = roundPositive(box.height / shown.height, 5)
+  return { crop, scale: drift(byHeight) < drift(byWidth) ? byHeight : byWidth }
+}
+
+/**
+ * Fill: the displayed box stays as it is (centre, size and angle, to stored precision; see
+ * `coverBox`) and the image covers it, with the largest centred crop of the original that has
+ * the box's aspect ratio and one uniform scale. Idempotent: a second Fill changes nothing.
  */
 export function fillRecord<T extends ImageRecord>(rec: T, size: Size): T {
   const box = displayBox(rec, size)
-  const raw = largestCentredCrop(size, box.width / box.height)
-  const crop = isWholeImage(raw, size) ? undefined : roundCrop(raw)
+  const { crop, scale } = coverBox(size, box)
   const shown = crop ?? wholeRect(size)
-  return placeCentred(rec, box.centre, box.width, box.height, box.width / shown.width, crop)
+  return placeCentred(rec, box.centre, shown.width * scale, shown.height * scale, scale, crop)
 }
 
 /**
  * Fit: the whole original (no crop) at the largest uniform scale at which it fits inside the
- * displayed box, centred on the box's centre, same angle. The box shrinks to the image's
- * aspect ratio. Rounded as stored.
+ * displayed box (to stored precision), centred on the box's centre, same angle. The box
+ * shrinks to the image's aspect ratio. Rounded as stored. Idempotent.
  */
 export function fitRecord<T extends ImageRecord>(rec: T, size: Size): T {
   const box = displayBox(rec, size)
-  const scale = fitInsideScale(size, box)
+  const scale = roundPositive(fitInsideScale(size, box), 5)
   return placeCentred(rec, box.centre, size.width * scale, size.height * scale, scale, undefined)
 }

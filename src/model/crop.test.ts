@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   MIN_CROP_SCENE,
   clampCrop,
+  coverBox,
   croppedPlacement,
   displayBox,
   dragCropRect,
@@ -247,5 +248,108 @@ describe('Fit and Fill maths', () => {
     fillRecord(rec, SIZE)
     fitRecord(rec, SIZE)
     expect(rec).toEqual(copy)
+  })
+})
+
+describe('Fit and Fill are idempotent and Fill keeps the box (seeded sweep)', () => {
+  /** A small seeded generator (mulberry32), so a failure can be reproduced. */
+  function rng(seed: number) {
+    let a = seed >>> 0
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0
+      let t = a
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+  /** Records as they can be stored: positions to 2 decimals, scales to 5, a valid rounded crop or none. */
+  function sample(seed: number, n: number): Array<{ rec: ImageRecord; size: { width: number; height: number } }> {
+    const r = rng(seed)
+    const between = (lo: number, hi: number) => lo + (hi - lo) * r()
+    const logBetween = (lo: number, hi: number) => Math.exp(between(Math.log(lo), Math.log(hi)))
+    const out = []
+    for (let i = 0; i < n; i++) {
+      const kind = i % 4
+      // Ordinary, tiny, huge, and extreme aspect ratios.
+      const size =
+        kind === 0
+          ? { width: Math.round(between(50, 1200)), height: Math.round(between(50, 1200)) }
+          : kind === 1
+            ? { width: Math.round(between(1, 12)), height: Math.round(between(1, 12)) }
+            : kind === 2
+              ? { width: Math.round(between(2000, 9000)), height: Math.round(between(2000, 9000)) }
+              : r() < 0.5
+                ? { width: Math.round(between(1, 40)), height: Math.round(between(2000, 6000)) }
+                : { width: Math.round(between(2000, 6000)), height: Math.round(between(1, 40)) }
+      const s = roundPositiveLike(logBetween(0.002, 25))
+      const uniform = r() < 0.6
+      const rec = img({
+        left: Math.round(between(-5000, 5000) * 100) / 100,
+        top: Math.round(between(-5000, 5000) * 100) / 100,
+        angle: r() < 0.5 ? 0 : Math.round(between(-180, 180) * 100) / 100,
+        scaleX: s,
+        scaleY: uniform ? s : roundPositiveLike(s * logBetween(0.2, 5)),
+      })
+      if (r() < 0.6) {
+        const w = Math.max(0.01, Math.round(between(0.01, size.width) * 100) / 100)
+        const h = Math.max(0.01, Math.round(between(0.01, size.height) * 100) / 100)
+        const crop = { x: Math.round(between(0, size.width - w) * 100) / 100, y: Math.round(between(0, size.height - h) * 100) / 100, width: w, height: h }
+        if (!isWholeImage(crop, size)) rec.crop = crop
+      }
+      out.push({ rec, size })
+    }
+    return out
+  }
+  const roundPositiveLike = (n: number) => Math.max(0.00001, Math.round(n * 1e5) / 1e5)
+
+  it('Fill applied twice equals Fill applied once (4000 records)', () => {
+    const failures = sample(1, 4000).filter(({ rec, size }) => JSON.stringify(fillRecord(fillRecord(rec, size), size)) !== JSON.stringify(fillRecord(rec, size)))
+    expect(failures.slice(0, 3)).toEqual([])
+  })
+
+  it('Fit applied twice equals Fit applied once (4000 records)', () => {
+    const failures = sample(2, 4000).filter(({ rec, size }) => JSON.stringify(fitRecord(fitRecord(rec, size), size)) !== JSON.stringify(fitRecord(rec, size)))
+    expect(failures.slice(0, 3)).toEqual([])
+  })
+
+  it('Fill keeps the displayed box to stored precision: centre within 0.01, each side within 0.015 x scale + 0.000005 x the side in source pixels', () => {
+    for (const { rec, size } of sample(3, 4000)) {
+      const before = displayBox(rec, size)
+      const out = fillRecord(rec, size)
+      const after = displayBox(out, size)
+      const shown = out.crop ?? { width: size.width, height: size.height }
+      const tolerance = (side: number) => 0.015 * out.scaleX + 0.000005 * side + 1e-6
+      expect(Math.hypot(after.centre.x - before.centre.x, after.centre.y - before.centre.y)).toBeLessThanOrEqual(0.01)
+      expect(Math.abs(after.width - before.width)).toBeLessThanOrEqual(tolerance(shown.width))
+      expect(Math.abs(after.height - before.height)).toBeLessThanOrEqual(tolerance(shown.height))
+      expect(out.scaleX).toBe(out.scaleY)
+      expect(out.angle).toBe(rec.angle)
+      if (out.crop) {
+        // A valid stored crop: inside the image, rounded as stored, centred to 0.01.
+        expect(out.crop.x).toBeGreaterThanOrEqual(0)
+        expect(out.crop.y).toBeGreaterThanOrEqual(0)
+        expect(out.crop.x + out.crop.width).toBeLessThanOrEqual(size.width + 1e-9)
+        expect(out.crop.y + out.crop.height).toBeLessThanOrEqual(size.height + 1e-9)
+        expect(roundCrop(out.crop)).toEqual(out.crop)
+        expect(Math.abs(out.crop.x - (size.width - out.crop.width - out.crop.x))).toBeLessThanOrEqual(0.0100001)
+        expect(Math.abs(out.crop.y - (size.height - out.crop.height - out.crop.y))).toBeLessThanOrEqual(0.0100001)
+      }
+    }
+  })
+
+  it("the reviewer's case: 240 x 160 at scale 1, crop {0, 0, 20, 62}: a second Fill changes nothing", () => {
+    const size = { width: 240, height: 160 }
+    const once = fillRecord(img({ crop: { x: 0, y: 0, width: 20, height: 62 } }), size)
+    expect(once.crop).toMatchObject({ y: 0, height: 160 })
+    expect(fillRecord(once, size)).toEqual(once)
+  })
+
+  it('coverBox centres the crop from its rounded sides and picks the scale that keeps the box closest', () => {
+    const { crop, scale } = coverBox({ width: 240, height: 160 }, { width: 20, height: 62 })
+    expect(crop).toEqual({ x: 94.2, y: 0, width: 51.61, height: 160 }) // (240 - 51.61) / 2 = 94.195
+    // 51.61 x 160 at 0.3875 (from the height) is 19.999 x 62; at 0.38752 (from the width) 20 x 62.003.
+    expect(scale).toBe(0.3875)
+    expect(coverBox({ width: 400, height: 200 }, { width: 800, height: 400 })).toEqual({ crop: undefined, scale: 2 })
   })
 })

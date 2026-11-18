@@ -558,6 +558,8 @@ export class Editor {
   private imageInfo(img: FabricImage, locked: boolean): SelectionInfo['image'] {
     const rec = toRecord(img)
     if (rec?.type !== 'image') return null
+    // While cropping the image is shown whole; it counts as cropped if the crop the session began with was.
+    if (this.crop?.target === img) return { cropped: !isWholeImage(this.crop.start, this.crop.size), canFit: false, canFill: false }
     if (locked || this.crop) return { cropped: rec.crop !== undefined, canFit: false, canFill: false }
     const size = imageSizeOf(img)
     const changes = (next: ImageRecord) => !sceneEqual({ frames: [], objects: [rec] }, { frames: [], objects: [next] })
@@ -1259,6 +1261,8 @@ export class Editor {
       } else if (action && ZOOM_ACTIONS.has(action)) {
         e.preventDefault()
         this.run(action)
+      } else if (action) {
+        e.preventDefault() // a shortcut that is ignored: the browser must not act on it either (Ctrl+A would select the page's text)
       }
       return
     }
@@ -1282,6 +1286,8 @@ export class Editor {
       } else if (action && ZOOM_ACTIONS.has(action)) {
         e.preventDefault()
         this.run(action)
+      } else if (action) {
+        e.preventDefault() // a shortcut that is ignored: the browser must not act on it either
       }
       return
     }
@@ -1482,6 +1488,8 @@ export class Editor {
       setOwner(img, ownerAfterManipulation(ownerOf(img), centerOf(img), this.frameRecords(), NO_FRAMES))
     }
     this.applyToolState()
+    // The element keeps the last resize or move cursor until Fabric next sets one (on a mouse move): reset it now.
+    this.canvas.upperCanvasEl.style.cursor = this.canvas.defaultCursor
     this.canvas.requestRenderAll()
     if (apply && !unchanged && onCanvas) this.commit()
     this.syncState()

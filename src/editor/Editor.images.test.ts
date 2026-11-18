@@ -837,3 +837,96 @@ describe('reload', () => {
     expect(again.store.attempts).toHaveLength(0) // loading never rewrites
   })
 })
+
+describe('review fixes', () => {
+  it('straight after Fill (or Fit) its button is disabled, and a second one records nothing and saves nothing', async () => {
+    // Crops whose Fill used to land 0.01 px away the second time (the fake image is 200 x 100).
+    const crops = [
+      { x: 0, y: 0, width: 20, height: 62 },
+      { x: 3, y: 1, width: 7, height: 93 },
+      { x: 10, y: 5, width: 33.33, height: 71 },
+      { x: 0, y: 0, width: 199, height: 3 },
+      { x: 50, y: 20, width: 13, height: 17 },
+    ]
+    for (const [i, crop] of crops.entries()) {
+      for (const scale of [1, 0.37, 2.5]) {
+        const b = await board([], [img('P', 100, 50, { crop, scaleX: scale, scaleY: scale })])
+        b.editor.selectLayer('P')
+        b.editor.fillImage()
+        await flush()
+        const attempts = b.store.attempts.length
+        const once = b.rec('P')
+        expect(b.sel()?.image?.canFill, `crop ${i} at ${scale}`).toBe(false)
+        b.editor.fillImage()
+        await flush()
+        expect(b.rec('P')).toEqual(once)
+        expect(b.store.attempts).toHaveLength(attempts)
+        expect(b.editor.getState().save.kind).toBe('saved')
+        b.editor.undo()
+        expect(b.canUndo(), `crop ${i} at ${scale}: one step only`).toBe(false)
+
+        b.editor.redo()
+        b.editor.fitImage()
+        await flush()
+        const fitAttempts = b.store.attempts.length
+        expect(b.sel()?.image?.canFit).toBe(false)
+        b.editor.fitImage()
+        await flush()
+        expect(b.store.attempts).toHaveLength(fitAttempts)
+        b.editor.dispose()
+      }
+    }
+  })
+
+  it('an ignored shortcut in crop mode or mid-gesture is kept from the browser (Ctrl+A would select the page); other keys and keys in fields are not', async () => {
+    const b = await board([], [img('P', 100, 50), img('Q', 400, 50)])
+    const send = (k: KeyboardEvent, target: EventTarget = window) => {
+      target.dispatchEvent(k)
+      return k.defaultPrevented
+    }
+    b.editor.selectLayer('P')
+    b.editor.startCrop()
+    expect(send(key('a', { ctrlKey: true }))).toBe(true)
+    expect(send(key('Delete'))).toBe(true)
+    expect(send(key('x'))).toBe(false) // not a shortcut: left alone
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    expect(send(key('a', { ctrlKey: true }), input)).toBe(false) // typed in a field: the field's own
+    expect(b.cropping()).toBe(true)
+    expect(b.activeIds()).toEqual(['P'])
+    b.editor.cancelCrop()
+
+    const t = press(b.canvas, b.obj('P'))
+    dragBy(b.canvas, t, 5, 0)
+    expect(send(key('a', { ctrlKey: true }))).toBe(true)
+    expect(send(key('x'))).toBe(false)
+    expect(send(key('a', { ctrlKey: true }), input)).toBe(false)
+    release(b.canvas, t)
+    await tick()
+    input.remove()
+  })
+
+  it('the canvas cursor is reset as soon as crop mode ends, by any path', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    const el = b.canvas.upperCanvasEl
+    for (const end of [() => window.dispatchEvent(key('Enter')), () => window.dispatchEvent(key('Escape')), () => b.editor.applyCrop(), () => b.editor.cancelCrop()]) {
+      b.editor.startCrop()
+      el.style.cursor = 'nwse-resize' // what Fabric shows over a handle
+      end()
+      expect(b.cropping()).toBe(false)
+      expect(el.style.cursor).toBe('default')
+    }
+  })
+
+  it('while cropping, the selection counts as cropped if the crop it began with was', async () => {
+    const b = await board([], [img('P', 100, 50, { crop: { x: 20, y: 10, width: 100, height: 60 } }), img('Q', 400, 50)])
+    b.editor.selectLayer('P')
+    b.editor.startCrop()
+    expect(b.sel()?.image).toEqual({ cropped: true, canFit: false, canFill: false })
+    b.editor.cancelCrop()
+    b.editor.selectLayer('Q')
+    b.editor.startCrop()
+    expect(b.sel()?.image).toEqual({ cropped: false, canFit: false, canFill: false })
+  })
+})
