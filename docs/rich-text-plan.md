@@ -110,8 +110,8 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | - | ----- | ----- |
 | 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | done: `b307275`, review fixes `2210acc` and `42739a3`, cleared by recheck |
 | 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | done: `f43bb1b`, cleared by review; its nits are fixed in slice 3 |
-| 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | committed, in review |
-| 4 | Text tool: drag out a box. | not started |
+| 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | done: `4dd927b`, cleared by review; its nits are handled in slice 4 |
+| 4 | Text tool: drag out a box. | in progress |
 
 After the last slice is reviewed, the branch goes to a further independent hands-on QA and
 final review (Astra, coordinated separately). The milestone is not finished before that.
@@ -282,8 +282,12 @@ This is a test scenario, not implementation scope:
 
 ## Review log
 
-Every worker and reviewer below was a separate delegate run as `claude-opus-5-5`. Reviewers
-ran their checks in their own copy of the commit on their own port.
+Every worker and reviewer below ran as `claude-opus-5-5`, and no reviewer wrote code.
+Reviewers ran their checks in their own copy of the commit on their own port. Slices 1 and 2
+used a separate delegate for each implementation pass and each review pass. From slice 3 on,
+at the owner's direction, one implementer thread and one reviewer thread (the slice 2
+reviewer) are reused for every remaining pass, and the coordinator decides the disposition
+of each finding instead of forwarding all of them.
 
 ### Slice 1 (`b307275`)
 
@@ -333,6 +337,27 @@ of a line does not count that line; a choice made with only a caret also applies
 pasted at that caret; a wider font or heading widens the box and changing back does not
 narrow it (known limit; undo restores the width); two quick Ctrl+B presses on a box coalesce
 into no undo step; the panel background does not take focus.
+
+### Slice 3 (`4dd927b`)
+
+The slice 3 implementer was cut off by a usage limit part-way and resumed in the same thread
+with its uncommitted work intact. Review by the centralized reviewer, verdict "clear to
+build slice 4 on", no blockers and nothing at should-fix level:
+
+| # | Finding | Severity | Disposition |
+| - | ------- | -------- | ----------- |
+| 1 | Bolding a long word by typing `**word**` leaves the box wider than Ctrl+B does, because the box widened while the markers were typed and never narrows by itself | nit | Widths not changed: this is the existing "a widened box does not narrow" behaviour. README known limit extended to name the case (step 0 of slice 4) |
+| 2 | One check in the shortcut matcher is redundant | nit | Removed in step 0 of slice 4; no behaviour change |
+| 3 | Body on a box does not clear an empty last line that is already a heading | nit | Fixed in step 0 of slice 4: Body on a box also clears it |
+| - | Test gaps: pending marks combined with a shortcut, and holding Backspace after a shortcut, were not pinned in a real browser | gap | Both added to `e2e/typing.spec.ts` in step 0 of slice 4 |
+| - | Test gap: the board going read-only mid-edit after a shortcut is covered only on the fake canvas | gap | Not added: the reviewer verified it by hand in a real browser (the edit ended, nothing was written, no page errors) |
+| - | Observation: the Backspace revert is still offered after a window blur and refocus or a click on the panel background | not a finding | Kept: nothing changed the text or the caret, so it is still "straight after" |
+
+Real-browser evidence the reviewer gathered beyond the committed tests: the canvas text and
+the hidden textarea agree after a shortcut and after a revert through Enter, Delete,
+Shift+End, cut, arrow keys and paste; an input-method composition straight after a shortcut
+or a revert gives the right text; `*` typed with AltGr (reported as Ctrl+Alt), on the numpad
+and by key repeat converts, and a key reported as "Unidentified" stays literal.
 
 Known limit recorded here rather than in the README (the app cannot produce it): a stored
 text containing a lone carriage return is drawn with it as a character, and the first
