@@ -109,7 +109,7 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 | # | Slice | State |
 | - | ----- | ----- |
 | 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | done: `b307275`, review fixes `2210acc` and `42739a3`, cleared by recheck |
-| 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | committed (`f43bb1b`), in review |
+| 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | done: `f43bb1b`, cleared by review; its nits are fixed in slice 3 |
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | not started |
 | 4 | Text tool: drag out a box. | not started |
 
@@ -272,6 +272,13 @@ This is a test scenario, not implementation scope:
   frames are published).
 - Whether a new text should belong to the frame that was clicked in (already listed in the
   README's known limits; unchanged here).
+- Whether the Undo button should be usable while a text is being edited. Today it is
+  disabled until the edit ends, because an edit is recorded as one step when it ends; inside
+  an edit Ctrl/Cmd+Z is the browser's own undo of the typing, which does not know about
+  formatting.
+- Whether on macOS only Cmd (not Ctrl) should trigger Bold, Italic and Underline, so that
+  Ctrl+B keeps its native "move back one character" in a text. Undo already accepts both.
+- Whether formatting controls should work on several selected texts at once (today: one).
 
 ## Review log
 
@@ -306,6 +313,26 @@ Recheck of `42739a3`, verdict "clear to build slice 2 on":
 | # | Finding | Severity | Disposition |
 | - | ------- | -------- | ----------- |
 | 1 | Replacing the line break after a heading with Enter stores bold on the next line's first character | nit / should-fix | Fixed as step 0 of slice 2 (`f43bb1b`), with unit and real-browser tests |
+
+### Slice 2 (`f43bb1b`)
+
+Review, verdict "clear to build slice 3 on", no blockers and nothing at should-fix level:
+
+| # | Finding | Severity | Disposition |
+| - | ------- | -------- | ----------- |
+| 1 | "Formatting never changes which frame a text belongs to" overstates it for a new text, whose owner is still decided when its first edit ends | nit, docs | Wording corrected to "an existing text" as step 0 of slice 3; the rule is unchanged |
+| 2 | The Undo button stays disabled during an edit until the edit ends (already true of typing; more visible with formatting) | nit, existing behaviour | Not changed; open question for the owner below |
+| 3 | Holding Ctrl/Cmd+B toggles on every key repeat | nit | Fixed as step 0 of slice 3: auto-repeat is ignored |
+| 4 | On macOS Ctrl+B (move caret back) is taken over while editing, because Ctrl and Cmd are both accepted, as for Undo | nit | Not changed; open question for the owner below |
+| 5 | A box whose text ends with an empty line shows its heading as mixed, and a whole-box heading also makes the empty last line a heading | nit | Fixed as step 0 of slice 3: a trailing empty line is left out |
+| 6 | Heading buttons' accessible names do not contain their visible "H1" label; the disabled Bold button shows two tooltips | nit, accessibility | Fixed as step 0 of slice 3 |
+| 7 | Bold stays enabled on a range that is only a line break, where it does nothing | nit | Not changed: harmless |
+
+The reviewer agreed with the worker's judgement calls: a range ending exactly at the start
+of a line does not count that line; a choice made with only a caret also applies to text
+pasted at that caret; a wider font or heading widens the box and changing back does not
+narrow it (known limit; undo restores the width); two quick Ctrl+B presses on a box coalesce
+into no undo step; the panel background does not take focus.
 
 Known limit recorded here rather than in the README (the app cannot produce it): a stored
 text containing a lone carriage return is drawn with it as a character, and the first
