@@ -125,21 +125,13 @@ function rotate(x: number, y: number, deg: number): [number, number] {
 
 /**
  * The object's centre in scene coordinates, whether or not it is inside a multi-selection.
- * This is the point the ownership rules test against a frame.
- *
- * For text it is the centre of what is actually typed, not of the wrap box: a new text
- * has a wide, mostly empty box (ten times its font size), whose centre can lie outside
- * the frame the user clicked in. Text is left-aligned, so its content starts at the box's
- * left edge and is `calcTextWidth()` wide.
+ * This is the point the ownership rules test against a frame, and it is the centre of the
+ * object's box for every kind of object: for a text, the centre of its wrap box (its
+ * width is the wrapping width, not the width of what is typed).
  */
 export function centerOf(obj: FabricObject): Point {
-  const m = obj.calcTransformMatrix()
-  if (obj instanceof Textbox) {
-    const content = Math.min(obj.width, Math.max(0, obj.calcTextWidth()))
-    const dx = (content - obj.width) / 2 // the content centre, relative to the box centre, along the text's own x axis
-    return { x: m[0] * dx + m[4], y: m[1] * dx + m[5] }
-  }
-  return { x: m[4], y: m[5] }
+  const d = util.qrDecompose(obj.calcTransformMatrix())
+  return { x: d.translateX, y: d.translateY }
 }
 
 /**

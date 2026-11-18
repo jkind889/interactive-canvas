@@ -574,47 +574,6 @@ test.describe('moving and resizing frames', () => {
 })
 
 test.describe('new text inside a frame', () => {
-  test('clicked near the right edge it still belongs to the frame, while typing, after the edit, and when nudged', async ({ page }) => {
-    const A = frameRec('A', 300, 200, 400, 300)
-    const o = await openFramed(page, [A], [])
-    await page.keyboard.press('t')
-    const p = o.at(620, 300) // 80 px inside the right edge: the empty text box is 240 px wide and sticks out of the frame
-    await page.mouse.click(p.x, p.y)
-    await page.keyboard.type('edge')
-    const typed = await storedWhen(page, (d) => d.objects.length === 1 && d.objects[0]!.text === 'edge')
-    expect(typed.objects[0]).toMatchObject({ frameId: 'A', left: 620, top: 300 })
-    expect(typed.objects[0]!.left + typed.objects[0]!.width! / 2).toBeGreaterThan(700) // its box centre really is outside A
-    await page.keyboard.press('Escape')
-    await waitSaved(page)
-    const id = typed.objects[0]!.id
-    expect(obj(await storedDoc(page), id).frameId).toBe('A')
-
-    await drag(page, { x: p.x + 12, y: p.y + 12 }, { x: p.x + 16, y: p.y + 17 }) // nudged by (4, 5)
-    const nudged = await storedWhen(page, (d) => obj(d, id).left === 624)
-    expect(obj(nudged, id)).toMatchObject({ left: 624, top: 305, frameId: 'A' })
-
-    const label = labelOf(o, A)
-    await drag(page, label, { x: label.x + 100, y: label.y })
-    const moved = await storedWhen(page, (d) => frameOf(d, 'A').left === 400)
-    expect(obj(moved, id)).toMatchObject({ left: 724, top: 305, frameId: 'A' }) // and it travels with the frame
-    expect(o.errors).toEqual([])
-  })
-
-  test('clicked just left of a frame it is loose, although its wide empty box reaches into the frame', async ({ page }) => {
-    const A = frameRec('A', 500, 200, 400, 300)
-    const o = await openFramed(page, [A], [])
-    await page.keyboard.press('t')
-    const p = o.at(400, 300) // 100 px left of the frame; the 240 px box has its centre inside it
-    await page.mouse.click(p.x, p.y)
-    await page.keyboard.type('beside')
-    const typed = await storedWhen(page, (d) => d.objects.length === 1 && d.objects[0]!.text === 'beside')
-    expect(typed.objects[0]).not.toHaveProperty('frameId')
-    await page.keyboard.press('Escape')
-    await waitSaved(page)
-    expect((await storedDoc(page)).objects[0]).not.toHaveProperty('frameId')
-    expect(o.errors).toEqual([])
-  })
-
   test('a text that is opened and abandoned untouched is never stored, even if the view is panned meanwhile', async ({ page }) => {
     const A = frameRec('A', 300, 200, 400, 300)
     const o = await openFramed(page, [A], [])

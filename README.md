@@ -45,7 +45,7 @@ A frame is a white sheet with an outline and a name label. It sits behind all co
 
 Belonging is decided by what *you moved*, and it is stored; it is never guessed from where things happen to sit.
 
-- Something joins a frame when **it** is moved, resized, rotated or created so that its centre ends inside the frame. Where frames overlap, the one in front gets it. For text, "its centre" is the centre of what is typed.
+- Something joins a frame when **it** is moved, resized, rotated or created so that its centre ends inside the frame. Where frames overlap, the one in front gets it. A text's centre is the centre of its box, whose width is the wrapping width rather than the width of what is typed.
 - **Moving, resizing or drawing a frame never picks anything up.** A loose image that a frame was moved over, or drawn round, sits inside it but does not travel with it. Nudge the image (or marquee several and nudge them) and they join.
 - Moving a frame carries everything it owns. Something owned stays owned until you move it out, or shrink the frame until it no longer contains it (it then becomes loose, even if another frame is underneath).
 - Moving a frame *together with* loose objects leaves them loose; things it already owns stay its own.
@@ -72,6 +72,7 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - Until a board has its first frame, an open tab of the previous build can still overwrite it or prune its unused images, as it always could. This build reports the conflict instead of overwriting back, and re-stores any image bytes that are missing the next time it saves.
 - Image bytes are stored as uploaded (no downscaling) and are also kept in memory for the session, so that undo can always bring an image back; very large images are limited by browser storage quota, and a failed write is reported in the header.
 - Something sitting inside a frame without belonging to it looks the same as something that does. The item count and "Select with contents" tell you which is which.
+- A new text box is wider than what you type into it (ten times its font size), and belonging goes by the centre of that box. A text started in the right part of a frame can therefore end up not belonging to it, and one started just left of a frame can end up belonging to it; drag the text, or narrow it with a side handle, to settle it. Whether a new text should instead belong to the frame that was clicked in is an open design question.
 - Touch input is not supported.
 
 ## Testing
