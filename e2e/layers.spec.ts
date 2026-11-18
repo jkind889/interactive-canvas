@@ -195,8 +195,55 @@ test.describe('the layer list', () => {
     await expect(row(page, 'f1')).toHaveText('Spread')
     const stored = await storedWhen(page, (d) => (d.frames ?? [])[0]?.name === 'Spread')
     expect(stored.frames).toHaveLength(1)
-    await undoButton(page).click() // the rename was its own step
+    await undoButton(page).click() // the rename was its own step, recorded once
     await expect(row(page, 'f1')).toHaveText('Cover')
+    await expect(undoButton(page)).toBeDisabled()
+    expect(o.errors).toEqual([])
+  })
+
+  test('a row click lets go of the font size field: its keys then act on the newly selected object', async ({ page }) => {
+    const text = (id: string, left: number) => ({ type: 'text', id, left, top: 400, angle: 0, text: id, fontSize: 24, width: 200 })
+    const o = await openSeeded(page, [], [text('alpha', 100), text('beta', 500)])
+    await row(page, 'alpha').click()
+    const size = page.getByLabel('Font size', { exact: true })
+    await size.click()
+    await expect(size).toBeFocused()
+    await row(page, 'beta').click()
+    await expect.poll(() => selectedRows(page)).toEqual(['beta'])
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+    await page.keyboard.press('Delete')
+    await expect.poll(() => rowIds(page)).toEqual(['alpha'])
+    const stored = await storedWhen(page, (d) => d.objects.length === 1)
+    expect(stored.objects.map((x) => [x.id, x.fontSize])).toEqual([['alpha', 24]]) // neither size was changed
+    expect(o.errors).toEqual([])
+  })
+
+  test('a row click commits a board title being typed and lets go of the field: the board’s shortcuts then work', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('i1', 500, 100)])
+    const titleInput = page.getByLabel('Board title', { exact: true })
+    await titleInput.click()
+    await page.keyboard.type('Moodboard')
+    await row(page, 'i1').click()
+    await expect.poll(() => selectedRows(page)).toEqual(['i1'])
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+    await expect(titleInput).toHaveValue('Moodboard')
+    await page.keyboard.press('Delete')
+    await expect(page.locator('.layers')).toHaveCount(0)
+    const stored = await storedWhen(page, (d) => d.objects.length === 0)
+    expect(stored.title).toBe('Moodboard')
+    expect(o.errors).toEqual([])
+  })
+
+  test('holding Ctrl+Enter on a focused row toggles it once, not on every key repeat', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('i1', 100, 100), image('i2', 500, 100)])
+    await row(page, 'i1').click()
+    await row(page, 'i2').focus()
+    await page.keyboard.down('Control')
+    await page.keyboard.down('Enter')
+    await page.keyboard.down('Enter') // an auto-repeat
+    await page.keyboard.up('Enter')
+    await page.keyboard.up('Control')
+    await expect.poll(() => selectedRows(page)).toEqual(['i2', 'i1'])
     expect(o.errors).toEqual([])
   })
 
@@ -267,4 +314,127 @@ test.describe('the layer panel on screen', () => {
       expect(o.errors).toEqual([])
     })
   }
+})
+
+test.describe('Alt-pressing an object selected from the list', () => {
+  test('a covered image: a plain press still goes to the image on top; Alt-drag moves the selected one, as one undo step, by the normal ownership rule', async ({ page }) => {
+    // "small" lies entirely under "big"; both belong to the frame.
+    const o = await openSeeded(
+      page,
+      [frameRec('f1', 100, 100, 600, 450, 'Cover')],
+      [image('small', 300, 200, { frameId: 'f1' }), image('big', 250, 150, { assetId: 'a2', frameId: 'f1' })],
+      [PIC, BIG],
+    )
+    // Unchanged default: a plain drag on the covered image moves the one on top.
+    await row(page, 'small').click()
+    await drag(page, o.at(400, 260), o.at(440, 290))
+    let stored = await storedWhen(page, (d) => obj(d, 'big').left === 290)
+    expect(obj(stored, 'big')).toMatchObject({ left: 290, top: 180, frameId: 'f1' })
+    expect(obj(stored, 'small')).toMatchObject({ left: 300, top: 200, frameId: 'f1' })
+    await expect.poll(() => selectedRows(page)).toEqual(['big'])
+    await undoButton(page).click()
+    await storedWhen(page, (d) => obj(d, 'big').left === 250)
+    await expect(undoButton(page)).toBeDisabled()
+
+    // With Alt held, the press acts on the selected image. Dragged out of the frame, it becomes loose.
+    await row(page, 'small').click()
+    await page.keyboard.down('Alt')
+    await drag(page, o.at(400, 260), o.at(800, 260))
+    await page.keyboard.up('Alt')
+    stored = await storedWhen(page, (d) => obj(d, 'small').left === 700)
+    expect(obj(stored, 'small')).toMatchObject({ left: 700, top: 200 })
+    expect(obj(stored, 'small').frameId).toBeUndefined()
+    expect(obj(stored, 'big')).toMatchObject({ left: 250, top: 150, frameId: 'f1' })
+    expect(stored.objects.map((x) => x.id)).toEqual(['small', 'big']) // stacking unchanged
+    await expect.poll(() => selectedRows(page)).toEqual(['small'])
+    await expect(row(page, 'small').locator('.layer-frame')).toHaveCount(0)
+
+    // One undo step takes it all back.
+    await undoButton(page).click()
+    stored = await storedWhen(page, (d) => obj(d, 'small').left === 300)
+    expect(obj(stored, 'small')).toMatchObject({ left: 300, top: 200, frameId: 'f1' })
+    await expect(undoButton(page)).toBeDisabled()
+
+    // An Alt-drag is cancelled by Esc like any drag: nothing moves, no step, no save.
+    await expect.poll(() => selectedRows(page)).toEqual(['small'])
+    await page.keyboard.down('Alt')
+    await drag(page, o.at(400, 260), o.at(500, 330), { hold: true })
+    await page.keyboard.press('Escape')
+    await page.mouse.up()
+    await page.keyboard.up('Alt')
+    // So is one interrupted by the window losing focus.
+    await page.keyboard.down('Alt')
+    await drag(page, o.at(400, 260), o.at(470, 300), { hold: true })
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+    await page.mouse.up()
+    await page.keyboard.up('Alt')
+    await waitSaved(page)
+    stored = await storedDoc(page)
+    expect(obj(stored, 'small')).toMatchObject({ left: 300, top: 200, frameId: 'f1' })
+    expect(obj(stored, 'big')).toMatchObject({ left: 250, top: 150, frameId: 'f1' })
+    await expect(undoButton(page)).toBeDisabled()
+    expect(o.errors).toEqual([])
+  })
+
+  test('Alt changes nothing else: a marquee, a press beside the selection, and a selected frame’s interior behave as without it', async ({ page }) => {
+    const o = await openSeeded(page, [frameRec('f1', 100, 100, 400, 300, 'Cover')], [image('pic', 650, 150), image('other', 650, 400)])
+    await page.keyboard.down('Alt')
+    // A marquee on the empty board selects what it encloses.
+    await drag(page, o.at(600, 120), o.at(900, 300))
+    await expect.poll(() => selectedRows(page)).toEqual(['pic'])
+    // A press where the selected object is not under the pointer acts on what is there.
+    await page.mouse.click(o.at(750, 460).x, o.at(750, 460).y)
+    await expect.poll(() => selectedRows(page)).toEqual(['other'])
+    await page.mouse.click(o.at(580, 600).x, o.at(580, 600).y)
+    await expect.poll(() => selectedRows(page)).toEqual([])
+    await page.keyboard.up('Alt')
+
+    // A selected frame is still hit only by its label or outline: its interior stays click-through.
+    await row(page, 'f1').click()
+    await expect.poll(() => selectedRows(page)).toEqual(['f1'])
+    await page.keyboard.down('Alt')
+    await drag(page, o.at(300, 250), o.at(350, 300))
+    await page.keyboard.up('Alt')
+    await expect.poll(() => selectedRows(page)).toEqual([])
+    expect((await storedDoc(page)).frames![0]).toMatchObject({ left: 100, top: 100, width: 400, height: 300 })
+    await expect(undoButton(page)).toBeDisabled()
+    expect(o.errors).toEqual([])
+  })
+})
+
+test.describe('Alt and frame labels', () => {
+  test('Alt never reaches the selected object through a frame’s label: the label still wins', async ({ page }) => {
+    // The frame's label (just above its top-left corner) lies over the selected image.
+    const o = await openSeeded(page, [frameRec('f2', 300, 300, 300, 200, 'Low')], [image('pic', 280, 240)])
+    await row(page, 'pic').click()
+    const corner = o.at(300, 300)
+    const label = { x: corner.x + 10, y: corner.y - 14 }
+    await page.keyboard.down('Alt')
+    await drag(page, label, { x: label.x + 40, y: label.y + 30 })
+    await page.keyboard.up('Alt')
+    const stored = await storedWhen(page, (d) => (d.frames ?? [])[0]?.left === 340)
+    expect(stored.frames![0]).toMatchObject({ left: 340, top: 330, width: 300, height: 200 })
+    expect(obj(stored, 'pic')).toMatchObject({ left: 280, top: 240 })
+    expect(obj(stored, 'pic').frameId).toBeUndefined() // moving a frame adopts nothing
+    await expect.poll(() => selectedRows(page)).toEqual(['f2'])
+    expect(o.errors).toEqual([])
+  })
+})
+
+test.describe('the layer list, collapsed', () => {
+  test('stays collapsed when the list empties and fills again', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('i1', 300, 200)])
+    const toggle = page.locator('.layers-header')
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await page.mouse.click(o.at(400, 260).x, o.at(400, 260).y)
+    await page.keyboard.press('Delete')
+    await expect(page.locator('.layers')).toHaveCount(0)
+    await undoButton(page).click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(list(page)).toHaveCount(0)
+    await toggle.click()
+    await expect.poll(() => rowIds(page)).toEqual(['i1'])
+    expect(o.errors).toEqual([])
+  })
 })

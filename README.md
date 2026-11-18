@@ -63,9 +63,11 @@ A multi-selection can be moved, scaled proportionally from a corner, and (if it 
 The **Layers** panel at the bottom right lists everything on the board, front-most first: all images and texts from front to back, then all frames from front to back (frames always sit behind content). Its header collapses and expands it.
 
 - **Click a row to select that object**, even one hidden completely under a bigger image. Ctrl/Cmd-click or Shift-click adds a row to the selection or takes it out, so you can build a multi-selection from the list and then move or scale it on the board.
+- **Alt-drag moves a covered object you selected from the list.** Its handles work as usual, but a plain press on its body goes to whatever lies on top of it, as everywhere on the board. Hold Alt while pressing and the press goes to the selected object instead, if it is under the pointer. It is an ordinary drag: one undo step, cancelled by Esc (even with Alt still held), and dragged out of its frame it stops belonging to it. A frame's label or outline still wins over it.
 - `[` / `]` and the Layer buttons in the panel on the right reorder the selection; the list shows the new order straight away.
+- A text's row follows what you type. While a text is empty it is not listed, because an empty text is never kept.
 - The list is flat. Something that belongs to a frame is not shown inside it, because stacking order is shared by the whole board and has nothing to do with belonging; its row shows the frame's name instead.
-- Selecting from the list changes nothing on the board, so it is never an undo step and never saves. If you were typing a text, the text is kept first, as when you click anywhere else.
+- Selecting from the list changes nothing on the board, so it is never an undo step and never saves. If you were typing a text, leaving it works as when you click anywhere else: typed text is kept as its own undo step, and a text left empty is discarded. A field you were typing in (font size, frame name, board title) keeps what you typed and lets go, so your next keys act on the board.
 - On a read-only board the list still shows what is there, but its rows do nothing.
 
 ## Storage, tabs and older builds
@@ -85,6 +87,7 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - Something sitting inside a frame without belonging to it looks the same as something that does. The item count and "Select with contents" tell you which is which.
 - A new text box is wider than what you type into it (ten times its font size), and belonging goes by the centre of that box. A text started in the right part of a frame can therefore end up not belonging to it, and one started just left of a frame can end up belonging to it; drag the text, or narrow it with a side handle, to settle it. Whether a new text should instead belong to the frame that was clicked in is an open design question.
 - Touch input is not supported.
+- The layer list cannot be stepped through with the arrow keys (Tab and Enter work), and it is not laid out for windows shorter than about 600 px.
 
 ## Testing
 
@@ -96,7 +99,7 @@ npm run test:e2e           # starts its own dev server on :5199 and runs e2e/*.s
 ```
 
 - **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, and the `Editor` state machines (hydration, gestures, frames) on a small fake of Fabric, since jsdom has no canvas.
-- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `layers.spec.ts` (selecting covered objects from the layer list, reordering, multi-selections built from the list, leaving a text edit, the panel's place on screen) and `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
+- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `layers.spec.ts` (selecting covered objects from the layer list and Alt-dragging them, reordering, multi-selections built from the list, leaving a text edit, the panel's place on screen) and `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
 - Use a browser already on your machine instead of the bundled one with `PW_CHANNEL=msedge` or `PW_CHANNEL=chrome`; change the port with `E2E_PORT`.
 - Failure traces and screenshots go to `test-results/` (git-ignored).
 
@@ -117,7 +120,7 @@ Shortcuts never fire while you are typing in a field or editing text. While a dr
 | `+` / `-` / `0` / `Shift+1` | Zoom in / out / 100% / fit     |
 | `Esc`                       | Cancel what is in progress; otherwise leave the tool, or deselect |
 
-Only the primary mouse button edits. The middle button pans.
+Only the primary mouse button edits. The middle button pans. Holding Alt while pressing acts on the selected object even when something lies on top of it (see Layers); without Alt a press goes to the front-most object, and a frame's label or outline wins either way.
 
 ## Architecture
 

@@ -183,15 +183,42 @@ describe('the layer list', () => {
     expect(b.layers()).toBe(single)
   })
 
-  it('does not list a blank text being typed into; a typed text appears once its edit ends', async () => {
+  it('does not list a blank text being typed into; a typed text appears as soon as it has text', async () => {
     const b = await board(FRAMES, OBJECTS)
     b.editor.addText()
     expect(b.ids()).toEqual(['i2', 't1', 'i1', 'B', 'A']) // the new, blank text is not in the scene
     const tb = b.canvas.getActiveObject() as Textbox
     tb.type('Hello\n  world')
+    expect(b.layers()[0]).toMatchObject({ kind: 'text', label: 'Hello world', selected: true })
     tb.exitEditing()
     await tick()
     expect(b.layers()[0]).toMatchObject({ kind: 'text', label: 'Hello world', selected: true })
+  })
+
+  it('follows typing: the label changes as it is typed, an emptied text leaves the list and comes back; history only when the edit ends', async () => {
+    const b = await board(FRAMES, OBJECTS)
+    b.select('t1')
+    const tb = b.obj('t1') as Textbox
+    tb.enterEditing()
+    const before = b.layers()
+    tb.type('hello')
+    expect(b.layers().find((l) => l.id === 't1')).toMatchObject({ label: 'hello', selected: true })
+    expect(b.layers()).not.toBe(before)
+    tb.type('')
+    expect(b.ids()).toEqual(['i2', 'i1', 'B', 'A']) // blank right now: not part of the scene, so not listed (no stale row to click)
+    tb.type('hello again')
+    expect(b.ids()).toEqual(['i2', 't1', 'i1', 'B', 'A'])
+    expect(b.layers().find((l) => l.id === 't1')).toMatchObject({ label: 'hello again', selected: true })
+    const same = b.layers()
+    tb.type('hello again') // nothing in the list changed: the same array
+    expect(b.layers()).toBe(same)
+    expect(b.editor.getState().canUndo).toBe(false) // typing records no history
+    tb.exitEditing()
+    await tick()
+    expect(b.editor.getState().canUndo).toBe(true)
+    b.editor.undo() // one step takes the whole edit back
+    expect(b.layers().find((l) => l.id === 't1')!.label).toBe('t1')
+    expect(b.editor.getState().canUndo).toBe(false)
   })
 
   it('clears every selected flag when the board goes read-only (another tab changed it)', async () => {
@@ -418,6 +445,10 @@ describe('leaving a text edit by selecting from the list', () => {
     b.editor.addText()
     const tb = b.canvas.getActiveObject() as Textbox
     b.editor.selectLayer('i1', { toggle: true })
+    // Straight away, before the deferred removal of the blank text could tidy the selection up.
+    expect(b.activeIds()).toEqual(['i1'])
+    expect(b.canvas.getActiveObject()).toBe(b.obj('i1'))
+    expect(b.selectedIds()).toEqual(['i1'])
     await tick()
     expect(b.canvas.objects).not.toContain(tb)
     expect(b.activeIds()).toEqual(['i1'])

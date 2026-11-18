@@ -55,6 +55,8 @@ describe('resolveShortcut: actions', () => {
     expect(resolveShortcut(key('Delete'), idle)).toBe('delete')
     expect(resolveShortcut(key('Backspace'), idle)).toBe('delete')
     expect(resolveShortcut(key('Escape'), idle)).toBe('escape')
+    expect(resolveShortcut(key('Escape', { altKey: true }), idle)).toBe('escape') // cancels an Alt-drag
+    expect(resolveShortcut(key('Escape', { ctrlKey: true }), idle)).toBeNull()
     expect(resolveShortcut(key('a', { ctrlKey: true }), idle)).toBe('select-all')
   })
 

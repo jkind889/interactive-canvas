@@ -15,7 +15,7 @@ type TargetsInfo = ReturnType<Canvas['searchPossibleTargets']>
  * inside it (and the board beneath it, for a marquee) stays reachable. The outline and
  * label are drawn over the scene in screen pixels, from the same geometry that is hit.
  *
- * The four overrides reach into Fabric internals. They use the `override` keyword, so
+ * The five overrides reach into Fabric internals. They use the `override` keyword, so
  * a rename in Fabric is a compile error rather than a silent loss of behaviour.
  */
 export class FrameCanvas extends Canvas {
@@ -77,6 +77,26 @@ export class FrameCanvas extends Canvas {
   override _checkTarget(obj: FabricObject, pointer: Point): boolean {
     if (isFrame(obj)) return this.frameOverlayAt([obj], pointer) !== undefined
     return super._checkTarget(obj, pointer)
+  }
+
+  /**
+   * With Alt held (`altSelectionKey`), Fabric gives a press to the selected object when it is
+   * under the pointer, even beneath other content: that is how a covered object selected
+   * from the layer list is dragged. A frame's label or outline still wins over content,
+   * as without Alt, so where one is under the pointer the press is resolved as usual (the
+   * selected object's own handles are still found first).
+   */
+  override findTarget(e: TPointerEvent): ReturnType<Canvas['findTarget']> {
+    const key = this.altSelectionKey
+    if (!this._targetInfo && key && (e as MouseEvent)[key] && this.frameOverlayAt(this._objects, this.getScenePoint(e))) {
+      this.altSelectionKey = null
+      try {
+        return super.findTarget(e)
+      } finally {
+        this.altSelectionKey = key
+      }
+    }
+    return super.findTarget(e)
   }
 
   /**

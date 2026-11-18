@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Editor } from '../editor/Editor.ts'
 import { HistoryControls, ZoomControls } from './Controls.tsx'
 import { CloseIcon } from './icons.tsx'
@@ -13,6 +13,10 @@ export function Overlays({ editor }: { editor: Editor }) {
   const fileInput = useRef<HTMLInputElement>(null)
   const root = useRef<HTMLDivElement>(null)
   const [dragging, setDragging] = useState(false)
+  // Whether the layer list is expanded. Kept here, for this session only, so that it survives
+  // the list becoming empty (which unmounts the panel) and filling again.
+  const [layersOpen, setLayersOpen] = useState(true)
+  const toggleLayers = useCallback(() => setLayersOpen((v) => !v), [])
 
   useEffect(() => {
     editor.setImagePicker(() => fileInput.current?.click())
@@ -111,7 +115,9 @@ export function Overlays({ editor }: { editor: Editor }) {
         // The inspector on top and the layer list anchored at the bottom share one column, so they never overlap.
         <div className="side-stack">
           {state.selection && <Inspector editor={editor} selection={state.selection} />}
-          {state.layers.length > 0 && <LayerPanel editor={editor} layers={state.layers} readOnly={readOnly !== null} />}
+          {state.layers.length > 0 && (
+            <LayerPanel editor={editor} layers={state.layers} readOnly={readOnly !== null} open={layersOpen} onToggleOpen={toggleLayers} />
+          )}
         </div>
       )}
 

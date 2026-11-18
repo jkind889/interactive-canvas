@@ -68,6 +68,8 @@ export function resolveShortcut(e: KeyEventLike, ctx: ShortcutContext): Shortcut
     if (key === '[') return 'layer-back'
     return null
   }
+  // Esc also counts with Alt held: Alt-drag moves a covered selected object, and Esc must cancel it.
+  if (key === 'Escape') return 'escape'
   if (e.altKey) return null
 
   switch (key) {

@@ -208,6 +208,10 @@ export class Editor {
       // Every scale is proportional: no Shift free-scaling and no Shift skewing, which the document could not store.
       uniScaleKey: null,
       altActionKey: null,
+      // A press with Alt held goes to the selected object when it is under the pointer, even if
+      // something lies on top of it (a covered object selected from the layer list). Without
+      // Alt a press goes to the front-most object. Frames are still hit only by label or outline.
+      altSelectionKey: 'altKey',
       selectionColor: 'rgba(108, 123, 242, 0.08)',
       selectionBorderColor: ACCENT,
       selectionLineWidth: 1,
@@ -588,6 +592,7 @@ export class Editor {
     c.on('text:editing:entered', () => this.syncState())
     c.on('text:changed', () => {
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
+      this.syncState() // the layer list follows typing (a text that is blank right now is not listed); marks nothing dirty
     })
     c.on('text:editing:exited', ({ target }) => {
       // A press inside the text may still be held (it started no gesture, and the text could

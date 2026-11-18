@@ -108,10 +108,11 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 ## Layers (settled)
 
 - The layer list (`EditorState.layers`) is derived from the canvas and never stored. It is flat and front-most first: all content front to back, then all frames front to back. Content is never grouped under its frame, because stacking order is global and independent of ownership; an owned item only names its owner, taken from stored ownership.
-- A blank text is not listed. A text's label is current at the latest when its edit ends.
+- A blank text is not listed, including one emptied while it is being edited. A text's label follows typing: `text:changed` refreshes the derived state, which marks nothing dirty and records nothing.
+- A plain press goes to the front-most object under the pointer. With Alt held (`altSelectionKey`), a press goes to the selected object if it is under the pointer, even beneath other content, so that a covered object selected from the list can be dragged. It is an ordinary gesture (same settle path, ownership rules, one history step; Esc, also with Alt still held, and a window blur cancel it). Alt never changes frame hit rules: a frame's label or outline still wins over the selected object (`FrameCanvas.findTarget`), and a frame's interior stays click-through.
 - Selecting from the list (`selectLayer`) changes nothing on the board: no history entry, no save, no ownership change. It ends a text edit first, like every other command, so typed text is committed as its own step. It is inert before the board has loaded, on a read-only board and while a gesture is unsettled.
 - Reordering stays what `[`/`]` and `Ctrl/Cmd+[`/`]` already do: each kind moves within its own band, so frames stay behind content, and ownership never changes.
-- Rows must not take focus on a mouse press, or Space-to-pan and the letter shortcuts would act on the list.
+- Rows must not take focus on a mouse press, or Space-to-pan and the letter shortcuts would act on the list. A row press first blurs a focused chrome field (font size, frame name, title), so that its keys do not act on the new selection; Fabric's hidden textarea is left to `selectLayer`, which ends a text edit itself.
 
 ## Storage and migration
 
