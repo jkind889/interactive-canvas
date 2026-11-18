@@ -31,3 +31,21 @@ export function canReorder(order: readonly string[], selected: ReadonlySet<strin
   const next = reorder(order, selected, op)
   return next.some((id, i) => id !== order[i])
 }
+
+/** The two z-bands of a board, each back to front. Every frame sits behind every object. */
+export interface LayeredOrder {
+  frames: readonly string[]
+  objects: readonly string[]
+}
+
+/**
+ * Reorders a selection that may mix frames and content. Each kind moves only within
+ * its own band, so a frame can never rise above content (or content sink below a frame).
+ */
+export function reorderLayered(order: LayeredOrder, selected: ReadonlySet<string>, op: LayerOp): { frames: string[]; objects: string[] } {
+  return { frames: reorder(order.frames, selected, op), objects: reorder(order.objects, selected, op) }
+}
+
+export function canReorderLayered(order: LayeredOrder, selected: ReadonlySet<string>, op: LayerOp): boolean {
+  return canReorder(order.frames, selected, op) || canReorder(order.objects, selected, op)
+}

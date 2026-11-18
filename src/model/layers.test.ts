@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { canReorder, reorder } from './layers.ts'
+import { canReorder, canReorderLayered, reorder, reorderLayered } from './layers.ts'
 
 const order = ['a', 'b', 'c', 'd', 'e']
 const sel = (...ids: string[]) => new Set(ids)
@@ -45,5 +45,36 @@ describe('canReorder', () => {
     expect(canReorder(order, sel('a'), 'back')).toBe(false)
     expect(canReorder(order, sel('a'), 'backward')).toBe(false)
     expect(canReorder(order, sel('c'), 'forward')).toBe(true)
+  })
+})
+
+describe('reorderLayered', () => {
+  const layered = { frames: ['f1', 'f2', 'f3'], objects: ['a', 'b', 'c'] }
+
+  it('moves content only within the content band', () => {
+    expect(reorderLayered(layered, sel('a'), 'front')).toEqual({ frames: ['f1', 'f2', 'f3'], objects: ['b', 'c', 'a'] })
+    expect(reorderLayered(layered, sel('c'), 'back')).toEqual({ frames: ['f1', 'f2', 'f3'], objects: ['c', 'a', 'b'] })
+  })
+
+  it('never lets a frame rise above content, whatever the operation', () => {
+    for (const op of ['front', 'forward', 'backward', 'back'] as const) {
+      const next = reorderLayered(layered, sel('f1', 'f3'), op)
+      expect(next.objects).toEqual(layered.objects)
+      expect([...next.frames].sort()).toEqual(['f1', 'f2', 'f3'])
+    }
+    expect(reorderLayered(layered, sel('f1'), 'front').frames).toEqual(['f2', 'f3', 'f1'])
+    expect(reorderLayered(layered, sel('f3'), 'front').frames).toEqual(['f1', 'f2', 'f3']) // already front-most frame
+  })
+
+  it('reorders a mixed selection inside each band independently', () => {
+    expect(reorderLayered(layered, sel('f1', 'a'), 'forward')).toEqual({ frames: ['f2', 'f1', 'f3'], objects: ['b', 'a', 'c'] })
+  })
+
+  it('reports whether anything would move', () => {
+    expect(canReorderLayered(layered, sel('f3'), 'front')).toBe(false)
+    expect(canReorderLayered(layered, sel('f3'), 'back')).toBe(true)
+    expect(canReorderLayered(layered, sel('f3', 'a'), 'front')).toBe(true) // the content can still move
+    expect(canReorderLayered(layered, sel('f3', 'c'), 'front')).toBe(false)
+    expect(canReorderLayered({ frames: ['f1'], objects: [] }, sel('f1'), 'front')).toBe(false)
   })
 })

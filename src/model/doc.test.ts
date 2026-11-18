@@ -1,43 +1,186 @@
 import { describe, expect, it } from 'vitest'
-import { createEmptyDoc, normalizeTitle, objectsEqual, parseDoc, referencedAssetIds } from './doc.ts'
-import type { BoardDoc, ObjectRecord } from './types.ts'
+import {
+  createEmptyDoc,
+  normalizeFrameName,
+  normalizeTitle,
+  objectsEqual,
+  parseDoc,
+  referencedAssetIds,
+  round,
+  roundPositive,
+  sceneEqual,
+  serializeDoc,
+} from './doc.ts'
+import type { BoardDoc, FrameRecord, ImageRecord, ObjectRecord, TextRecord } from './types.ts'
 
-const text: ObjectRecord = { type: 'text', id: 't1', left: 1, top: 2, angle: 0, text: 'hi', fontSize: 24, width: 200 }
-const image: ObjectRecord = { type: 'image', id: 'i1', left: 5, top: 6, angle: 15, assetId: 'asset-1', scaleX: 0.5, scaleY: 0.5 }
+const text: TextRecord = { type: 'text', id: 't1', left: 1, top: 2, angle: 0, text: 'hi', fontSize: 24, width: 200 }
+const image: ImageRecord = { type: 'image', id: 'i1', left: 5, top: 6, angle: 15, assetId: 'asset-1', scaleX: 0.5, scaleY: 0.5 }
+const frame: FrameRecord = { id: 'f1', name: 'Cover', left: -10, top: -20, width: 640, height: 480 }
 const good = (): BoardDoc => ({ ...createEmptyDoc(), title: 'Mine', objects: [image, text], viewport: { zoom: 2, panX: 10, panY: -4 } })
+const framed = (): BoardDoc => ({ ...good(), frames: [frame, { ...frame, id: 'f2', name: 'Back' }], objects: [{ ...image, frameId: 'f1' }, text] })
+/** A milestone 1 document exactly as that build stored it. */
+const wireV1 = () => ({ version: 1, title: 'Mine', objects: [image, text], viewport: { zoom: 2, panX: 10, panY: -4 } })
+const wire = (doc: BoardDoc) => JSON.parse(JSON.stringify(serializeDoc(doc))) as Record<string, unknown>
 
-describe('parseDoc', () => {
-  it('round-trips a valid document through JSON', () => {
-    const doc = good()
-    expect(parseDoc(JSON.parse(JSON.stringify(doc)))).toEqual(doc)
+describe('parseDoc: wire version 1 (milestone 1 boards)', () => {
+  it('parses a milestone 1 document to the same objects with no frames', () => {
+    expect(parseDoc(wireV1())).toEqual(good())
+    expect(parseDoc(wireV1())?.frames).toEqual([])
   })
 
-  it('rejects non-objects, wrong versions and bad object lists', () => {
+  it('never reads frameId or frames from a version 1 document', () => {
+    const parsed = parseDoc({ ...wireV1(), frames: [frame], objects: [{ ...image, frameId: 'f1' }, text] })
+    expect(parsed?.frames).toEqual([])
+    expect(parsed?.objects[0]).not.toHaveProperty('frameId')
+  })
+
+  it('rejects non-objects, unknown versions and bad object lists', () => {
     expect(parseDoc(null)).toBeNull()
     expect(parseDoc('x')).toBeNull()
     expect(parseDoc([])).toBeNull()
-    expect(parseDoc({ ...good(), version: 2 })).toBeNull()
-    expect(parseDoc({ ...good(), objects: 'nope' })).toBeNull()
+    expect(parseDoc({ ...wireV1(), version: 3 })).toBeNull()
+    expect(parseDoc({ ...wireV1(), version: 0 })).toBeNull()
+    expect(parseDoc({ ...wireV1(), version: '1' })).toBeNull()
+    expect(parseDoc({ ...wireV1(), objects: 'nope' })).toBeNull()
   })
 
   it('rejects the whole document when any object is malformed (never partially loads)', () => {
-    expect(parseDoc({ ...good(), objects: [text, { ...image, assetId: 5 }] })).toBeNull()
-    expect(parseDoc({ ...good(), objects: [{ ...text, fontSize: 0 }] })).toBeNull()
-    expect(parseDoc({ ...good(), objects: [{ ...text, left: Number.NaN }] })).toBeNull()
-    expect(parseDoc({ ...good(), objects: [{ ...text, type: 'blob' }] })).toBeNull()
-    expect(parseDoc({ ...good(), objects: [text, { ...image, id: 't1' }] })).toBeNull()
+    expect(parseDoc({ ...wireV1(), objects: [text, { ...image, assetId: 5 }] })).toBeNull()
+    expect(parseDoc({ ...wireV1(), objects: [{ ...text, fontSize: 0 }] })).toBeNull()
+    expect(parseDoc({ ...wireV1(), objects: [{ ...text, left: Number.NaN }] })).toBeNull()
+    expect(parseDoc({ ...wireV1(), objects: [{ ...text, type: 'blob' }] })).toBeNull()
+    expect(parseDoc({ ...wireV1(), objects: [text, { ...image, id: 't1' }] })).toBeNull()
   })
 
   it('strips unknown fields', () => {
-    const parsed = parseDoc({ ...good(), objects: [{ ...text, evil: '<script>' }] })
+    const parsed = parseDoc({ ...wireV1(), objects: [{ ...text, evil: '<script>' }] })
     expect(parsed?.objects[0]).not.toHaveProperty('evil')
   })
 
   it('falls back to defaults for a bad title or viewport', () => {
-    const parsed = parseDoc({ ...good(), title: '   ', viewport: { zoom: 1000, panX: 0, panY: 0 } })
+    const parsed = parseDoc({ ...wireV1(), title: '   ', viewport: { zoom: 1000, panX: 0, panY: 0 } })
     expect(parsed?.title).toBe('Untitled board')
     expect(parsed?.viewport).toEqual({ zoom: 1, panX: 0, panY: 0 })
-    expect(parseDoc({ ...good(), viewport: undefined })?.viewport.zoom).toBe(1)
+    expect(parseDoc({ ...wireV1(), viewport: undefined })?.viewport.zoom).toBe(1)
+  })
+})
+
+describe('parseDoc: wire version 2 (frames)', () => {
+  it('round-trips frames and a valid frameId through serializeDoc and JSON', () => {
+    const doc = framed()
+    expect(wire(doc).version).toBe(2)
+    expect(parseDoc(wire(doc))).toEqual(doc)
+  })
+
+  it('drops a dangling or non-string frameId instead of rejecting', () => {
+    const raw = wire(framed())
+    raw.objects = [
+      { ...image, frameId: 'gone' },
+      { ...text, frameId: 7 },
+    ]
+    const parsed = parseDoc(raw)
+    expect(parsed?.objects).toEqual([image, text])
+    expect(parsed?.objects[0]).not.toHaveProperty('frameId')
+    expect(parsed?.objects[1]).not.toHaveProperty('frameId')
+  })
+
+  it('never recomputes membership: an object inside a frame without frameId stays loose', () => {
+    const inside = { ...text, left: 0, top: 0 }
+    const parsed = parseDoc({ ...wire(framed()), objects: [inside] })
+    expect(parsed?.objects[0]).not.toHaveProperty('frameId')
+  })
+
+  it('rejects the whole document for a malformed frame', () => {
+    const bad = (patch: Record<string, unknown>) => parseDoc({ ...wire(framed()), frames: [{ ...frame, ...patch }] })
+    expect(bad({ width: 0 })).toBeNull()
+    expect(bad({ height: -1 })).toBeNull()
+    expect(bad({ left: Number.NaN })).toBeNull()
+    expect(bad({ name: 5 })).toBeNull()
+    expect(bad({ id: '' })).toBeNull()
+    expect(parseDoc({ ...wire(framed()), frames: 'nope' })).toBeNull()
+    expect(parseDoc({ ...wire(framed()), frames: undefined })).toBeNull()
+  })
+
+  it('rejects duplicate ids across frames and objects', () => {
+    expect(parseDoc({ ...wire(framed()), frames: [frame, frame] })).toBeNull()
+    expect(parseDoc({ ...wire(framed()), objects: [{ ...text, id: 'f1' }] })).toBeNull()
+  })
+
+  it('strips unknown frame fields', () => {
+    const parsed = parseDoc({ ...wire(framed()), frames: [{ ...frame, angle: 30, evil: 1 }] })
+    expect(parsed?.frames[0]).toEqual(frame)
+  })
+})
+
+describe('serializeDoc', () => {
+  it('writes a frameless board in exactly the milestone 1 shape', () => {
+    const stored = serializeDoc(good())
+    expect(stored).toEqual(wireV1())
+    expect(Object.keys(stored)).toEqual(['version', 'title', 'objects', 'viewport'])
+  })
+
+  it('never writes frameId when no frame exists', () => {
+    const stored = serializeDoc({ ...good(), objects: [{ ...image, frameId: 'stale' }] })
+    expect(stored.version).toBe(1)
+    expect(stored.objects[0]).not.toHaveProperty('frameId')
+  })
+
+  it('round-trips both shapes back to the same in-memory document', () => {
+    for (const doc of [good(), framed(), createEmptyDoc()]) expect(parseDoc(wire(doc))).toEqual(doc)
+  })
+
+  it('does not alias the document it was given', () => {
+    const doc = framed()
+    const stored = serializeDoc(doc)
+    expect(stored.objects[0]).not.toBe(doc.objects[0])
+    expect(stored.viewport).not.toBe(doc.viewport)
+  })
+})
+
+describe('roundPositive', () => {
+  it('rounds ordinary values exactly like round', () => {
+    for (const [n, digits] of [
+      [0.123456789, 5],
+      [1, 5],
+      [199.996, 2],
+      [0.5, 2],
+      [23.456, 2],
+      [0.00001, 5],
+    ] as const) {
+      expect(roundPositive(n, digits)).toBe(round(n, digits))
+    }
+  })
+
+  it('keeps tiny positive values positive instead of rounding them to zero', () => {
+    expect(round(0.000004, 5)).toBe(0)
+    expect(roundPositive(0.000004, 5)).toBe(0.000004)
+    expect(roundPositive(0.0000001234567, 2)).toBe(1.23457e-7)
+    for (let e = 0; e >= -12; e--) {
+      const n = 10 ** e
+      for (const digits of [2, 5]) expect(roundPositive(n, digits)).toBeGreaterThan(0)
+    }
+  })
+
+  it('leaves zero and negatives to plain rounding', () => {
+    expect(roundPositive(0, 5)).toBe(0)
+    expect(roundPositive(-0.000004, 5)).toBe(0)
+  })
+
+  it('positive extremes survive a round trip through the stored document', () => {
+    for (let e = 0; e >= -12; e--) {
+      const n = roundPositive(10 ** e * 0.4, 5)
+      const doc: BoardDoc = {
+        ...createEmptyDoc(),
+        frames: [{ ...frame, width: n, height: n }],
+        objects: [
+          { ...image, scaleX: n, scaleY: n },
+          { ...text, width: n, fontSize: n },
+        ],
+      }
+      const parsed = parseDoc(wire(doc))
+      expect(parsed).toEqual(doc)
+      expect((parsed?.objects[0] as ImageRecord).scaleX).toBeGreaterThan(0)
+    }
   })
 })
 
@@ -47,14 +190,37 @@ describe('helpers', () => {
   })
 
   it('compares object lists structurally', () => {
-    expect(objectsEqual([text], [{ ...text }])).toBe(true)
-    expect(objectsEqual([text], [{ ...text, left: 2 }])).toBe(false)
+    const list: ObjectRecord[] = [text]
+    expect(objectsEqual(list, [{ ...text }])).toBe(true)
+    expect(objectsEqual(list, [{ ...text, left: 2 }])).toBe(false)
     expect(objectsEqual([text, image], [image, text])).toBe(false)
+  })
+
+  it('compares scenes structurally, including order, frames and ownership', () => {
+    const a = { frames: [frame], objects: [image, text] }
+    expect(sceneEqual(a, { frames: [{ ...frame }], objects: [{ ...image }, { ...text }] })).toBe(true)
+    expect(sceneEqual(a, { frames: [frame], objects: [text, image] })).toBe(false)
+    expect(sceneEqual(a, { frames: [{ ...frame, name: 'Other' }], objects: [image, text] })).toBe(false)
+    expect(sceneEqual(a, { frames: [], objects: [image, text] })).toBe(false)
+    expect(sceneEqual(a, { frames: [frame], objects: [{ ...image, frameId: 'f1' }, text] })).toBe(false)
+    expect(sceneEqual(a, { frames: [frame], objects: [image] })).toBe(false)
+  })
+
+  it('scene equality ignores key order and an explicit undefined owner', () => {
+    const reordered = { angle: 15, scaleY: 0.5, scaleX: 0.5, assetId: 'asset-1', top: 6, left: 5, id: 'i1', type: 'image' } as ImageRecord
+    expect(sceneEqual({ frames: [], objects: [image] }, { frames: [], objects: [reordered] })).toBe(true)
+    expect(sceneEqual({ frames: [], objects: [image] }, { frames: [], objects: [{ ...image, frameId: undefined }] })).toBe(true)
   })
 
   it('normalizes titles', () => {
     expect(normalizeTitle('  My   board ')).toBe('My board')
     expect(normalizeTitle('')).toBe('Untitled board')
     expect(normalizeTitle('x'.repeat(500))).toHaveLength(120)
+  })
+
+  it('normalizes frame names', () => {
+    expect(normalizeFrameName('  Cover   page ')).toBe('Cover page')
+    expect(normalizeFrameName('   ')).toBe('Frame')
+    expect(normalizeFrameName('x'.repeat(500))).toHaveLength(80)
   })
 })

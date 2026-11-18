@@ -1,4 +1,5 @@
-export const DOC_VERSION = 1
+/** In-memory document version. The wire format may be older; see `StoredDoc`. */
+export const DOC_VERSION = 2
 export const DEFAULT_TITLE = 'Untitled board'
 
 export interface RecordBase {
@@ -9,6 +10,11 @@ export interface RecordBase {
   top: number
   /** Degrees, clockwise. */
   angle: number
+  /**
+   * The frame that owns this object, if any. Ownership is stored, never recomputed:
+   * an owner need not contain the object, and an object inside a frame need not be owned by it.
+   */
+  frameId?: string
 }
 
 export interface ImageRecord extends RecordBase {
@@ -29,19 +35,55 @@ export interface TextRecord extends RecordBase {
 
 export type ObjectRecord = ImageRecord | TextRecord
 
+/** A named, unrotated rectangle in scene coordinates. */
+export interface FrameRecord {
+  id: string
+  name: string
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
 export interface Viewport {
   zoom: number
   panX: number
   panY: number
 }
 
-/** The persisted board. Array order is z-order, back to front. */
+/**
+ * The board as the app holds it. `frames` and `objects` are each in z-order, back to
+ * front; every frame sits behind every object.
+ */
 export interface BoardDoc {
   version: typeof DOC_VERSION
   title: string
+  frames: FrameRecord[]
   objects: ObjectRecord[]
   viewport: Viewport
 }
+
+/** What undo/redo and gestures snapshot: everything on the canvas, nothing about the view. */
+export type Scene = Pick<BoardDoc, 'frames' | 'objects'>
+
+/** Exactly the shape milestone 1 wrote. Still written for any board without frames. */
+export interface StoredDocV1 {
+  version: 1
+  title: string
+  objects: Array<Omit<ImageRecord, 'frameId'> | Omit<TextRecord, 'frameId'>>
+  viewport: Viewport
+}
+
+export interface StoredDocV2 {
+  version: 2
+  title: string
+  frames: FrameRecord[]
+  objects: ObjectRecord[]
+  viewport: Viewport
+}
+
+/** The document as stored on disk. */
+export type StoredDoc = StoredDocV1 | StoredDocV2
 
 export interface StoredAsset {
   id: string

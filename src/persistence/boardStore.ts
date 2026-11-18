@@ -1,5 +1,5 @@
-import { parseDoc } from '../model/doc.ts'
-import type { BoardDoc, StoredAsset } from '../model/types.ts'
+import { parseDoc, serializeDoc } from '../model/doc.ts'
+import type { BoardDoc, StoredAsset, StoredDoc } from '../model/types.ts'
 
 export interface LoadedBoard {
   doc: BoardDoc
@@ -30,9 +30,10 @@ const ASSETS = 'assets'
 /** Milestone 1 has a single board; the key leaves room for a board list later. */
 const CURRENT_BOARD = 'current'
 
+/** As written. On read, `doc` is untrusted and goes through parseDoc. */
 interface BoardRow {
   id: string
-  doc: BoardDoc
+  doc: StoredDoc
   updatedAt: number
 }
 
@@ -97,7 +98,7 @@ export class IndexedDbBoardStore implements BoardStore {
   async load(): Promise<LoadedBoard | null> {
     const db = await this.open()
     const tx = db.transaction([BOARDS, ASSETS], 'readonly')
-    const row = (await request(tx.objectStore(BOARDS).get(CURRENT_BOARD))) as BoardRow | undefined
+    const row = (await request(tx.objectStore(BOARDS).get(CURRENT_BOARD))) as { doc?: unknown } | undefined
     if (!row) return null
     const doc = parseDoc(row.doc)
     if (!doc) throw new UnreadableBoardError()
@@ -117,7 +118,7 @@ export class IndexedDbBoardStore implements BoardStore {
     try {
       const assets = tx.objectStore(ASSETS)
       for (const a of newAssets) assets.put(a)
-      const row: BoardRow = { id: CURRENT_BOARD, doc, updatedAt: Date.now() }
+      const row: BoardRow = { id: CURRENT_BOARD, doc: serializeDoc(doc), updatedAt: Date.now() }
       tx.objectStore(BOARDS).put(row)
     } catch (e) {
       try {

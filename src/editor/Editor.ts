@@ -213,7 +213,7 @@ export class Editor {
   }
 
   private getDoc(): BoardDoc {
-    return { version: DOC_VERSION, title: this.state.title, objects: this.snapshot(), viewport: this.getViewport() }
+    return { version: DOC_VERSION, title: this.state.title, frames: [], objects: this.snapshot(), viewport: this.getViewport() }
   }
 
   /** Records the live board as a history step (no-op when nothing changed). */
