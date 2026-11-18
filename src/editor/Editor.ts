@@ -1,7 +1,28 @@
 import { ActiveSelection, Textbox } from 'fabric'
 import type { FabricObject, Transform } from 'fabric'
-import { DEFAULT_VIEWPORT, MAX_FONT_SIZE, MIN_FONT_SIZE, clamp, normalizeTitle, referencedAssetIds, sceneEqual } from '../model/doc.ts'
-import { allowedScaleFactor } from '../model/frames.ts'
+import {
+  DEFAULT_VIEWPORT,
+  MAX_FONT_SIZE,
+  MIN_FONT_SIZE,
+  clamp,
+  normalizeFrameName,
+  normalizeTitle,
+  referencedAssetIds,
+  round,
+  roundPositive,
+  sceneEqual,
+} from '../model/doc.ts'
+import {
+  DEFAULT_FRAME_SCREEN,
+  MIN_FRAME_SIZE,
+  allowedScaleFactor,
+  membersToRelease,
+  minFrameSide,
+  nextFrameName,
+  ownerAfterManipulation,
+  rectFromDrag,
+} from '../model/frames.ts'
+import type { Box } from '../model/frames.ts'
 import { History } from '../model/history.ts'
 import { canReorderLayered, reorderLayered } from '../model/layers.ts'
 import type { LayerOp } from '../model/layers.ts'
@@ -18,15 +39,38 @@ import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
 import { FrameCanvas } from './FrameCanvas.ts'
 import type { AssetSource } from './assets.ts'
-import { ACCENT, createFrame, createObject, hasResidualScale, idOf, isFrame, newId, normalizeTextScale, toFrameRecord, toRecord } from './objects.ts'
+import {
+  ACCENT,
+  centerOf,
+  createFrame,
+  createObject,
+  frameNameOf,
+  hasResidualScale,
+  idOf,
+  isFrame,
+  newId,
+  normalizeTextScale,
+  ownerOf,
+  setFrameName,
+  setOwner,
+  toFrameRecord,
+  toRecord,
+} from './objects.ts'
 
-export type Tool = 'select' | 'hand' | 'text'
+export type Tool = 'select' | 'hand' | 'text' | 'frame'
 
 export interface SelectionInfo {
-  kind: 'image' | 'text' | 'multiple'
+  kind: 'image' | 'text' | 'frame' | 'multiple'
   count: number
   /** Only for a single text object. */
   fontSize: number | null
+  /** Only for a single frame. */
+  frameName: string | null
+  /**
+   * Only for a single frame: how many objects it owns. Ownership is not the same as
+   * "what sits inside": an object the frame was moved over or drawn round is not owned.
+   */
+  memberCount: number | null
   layer: Record<LayerOp, boolean>
 }
 
@@ -65,11 +109,30 @@ export interface EditorState {
 interface Gesture {
   /** Fresh per gesture, so a queued settlement can tell that it has been cancelled or replaced. */
   id: number
-  kind: 'transform' | 'settling'
+  kind: 'draft' | 'transform' | 'settling'
   base: Scene
-  /** Fabric's own transform record for this press; identifies the gesture in Fabric's events. */
-  transform: Transform
+  /** A press on an object: Fabric's own transform record, which identifies the gesture in Fabric's events. */
+  transform?: Transform
+  /** A drag: the unselected members of the frames being moved, which follow them. */
+  carry?: Carry
+  /** The Frame tool: the rectangle being drawn, in scene coordinates. */
+  draft?: { start: Point; end: Point }
 }
+
+/**
+ * Followers of a drag: content owned by a frame that is being moved, but which is not
+ * itself in the moved selection. They follow moves only, exactly once, by the same delta.
+ */
+interface Carry {
+  /** Where the dragged target started. */
+  left: number
+  top: number
+  followers: Array<{ obj: FabricObject; left: number; top: number }>
+}
+
+/** A Frame-tool press that moves less than this many screen pixels is a click (default-sized frame). */
+const DRAFT_CLICK_SLOP = 4
+const NO_FRAMES: ReadonlySet<string> = new Set()
 
 const ZOOM_STEP = 1.25
 const MIN_SELECTION_FONT = MIN_FONT_SIZE
@@ -216,15 +279,7 @@ export class Editor {
         this.autosaver.markLoaded(ABSENT)
         break
       case 'restored':
-        if (outcome.doc.frames.length > 0) {
-          // Interim (until frames can be edited): a board that has frames is shown
-          // read-only, exactly like any board this build cannot fully restore, so its
-          // frames and ownership can never be damaged by a half-built editor.
-          this.showStoredBoard(outcome.doc)
-          this.enterReadOnly('This board contains frames, which this build cannot edit yet. It is read-only so nothing is lost.')
-          break
-        }
-        this.showStoredBoard(outcome.doc)
+        this.showStoredBoard(outcome.doc) // ownership is restored exactly as stored, never recomputed
         this.autosaver.markLoaded(outcome.token)
         // Only after a complete, successful restore: drop bytes the stored board never referenced.
         // The store re-checks the token, so a prune that arrives after the board changed does nothing.
@@ -354,6 +409,21 @@ export class Editor {
       .filter((id): id is string => id !== undefined)
   }
 
+  /** Every frame as a record, back to front. */
+  private frameRecords(): FrameRecord[] {
+    const out: FrameRecord[] = []
+    for (const o of this.canvas.getObjects()) {
+      const rec = toFrameRecord(o)
+      if (rec) out.push(rec)
+    }
+    return out
+  }
+
+  /** Rule O4: content that has just been created belongs to the front-most frame its centre is inside. */
+  private ownerForNew(obj: FabricObject): string | undefined {
+    return ownerAfterManipulation(undefined, centerOf(obj), this.frameRecords(), NO_FRAMES)
+  }
+
   /** Canvas ids split into the two z-bands, each back to front. */
   private layeredOrder(): { frames: string[]; objects: string[] } {
     const frames: string[] = []
@@ -371,10 +441,14 @@ export class Editor {
     const order = this.layeredOrder()
     const first = objs[0]
     const single = objs.length === 1 ? first : undefined
+    const frame = single && isFrame(single) ? single : undefined
+    const frameId = frame ? idOf(frame) : undefined
     return {
-      kind: objs.length > 1 ? 'multiple' : single instanceof Textbox ? 'text' : 'image',
+      kind: objs.length > 1 ? 'multiple' : frame ? 'frame' : single instanceof Textbox ? 'text' : 'image',
       count: objs.length,
       fontSize: single instanceof Textbox ? Math.max(MIN_SELECTION_FONT, Math.round(single.fontSize * 10) / 10) : null,
+      frameName: frame ? (frameNameOf(frame) ?? '') : null,
+      memberCount: frame ? this.canvas.getObjects().filter((o) => ownerOf(o) === frameId).length : null,
       layer: {
         front: canReorderLayered(order, ids, 'front'),
         forward: canReorderLayered(order, ids, 'forward'),
@@ -433,7 +507,31 @@ export class Editor {
       const target = transform.target
       // Caret and text-selection presses inside an editing textbox stay on the text path.
       if (target instanceof Textbox && target.isEditing) return
-      this.gesture = { id: ++this.gestureSeq, kind: 'transform', base: this.snapshot(), transform }
+      const g: Gesture = { id: ++this.gestureSeq, kind: 'transform', base: this.snapshot(), transform }
+      if (transform.action === 'drag') g.carry = this.collectFollowers(target)
+      this.gesture = g
+    })
+
+    // Members of a moved frame that are not themselves selected follow it, by the same delta.
+    c.on('object:moving', ({ transform }) => {
+      const g = this.gesture
+      if (g?.kind === 'transform' && g.carry && g.transform === transform) this.placeFollowers(g.carry, transform.target)
+    })
+
+    // The Frame tool: a primary press starts drawing a frame. Only facts are recorded here.
+    c.on('mouse:down', (opt) => {
+      if (!this.editable || this.state.tool !== 'frame' || this.state.handActive || !isPrimary(opt.e)) return
+      const p = c.getScenePoint(opt.e)
+      const start = { x: p.x, y: p.y }
+      this.gesture = { id: ++this.gestureSeq, kind: 'draft', base: this.snapshot(), draft: { start, end: start } }
+    })
+    c.on('mouse:move', (opt) => {
+      const g = this.gesture
+      if (g?.kind !== 'draft' || !g.draft) return
+      const p = c.getScenePoint(opt.e)
+      g.draft.end = { x: p.x, y: p.y }
+      c.draft = rectFromDrag(g.draft.start, g.draft.end) // drawing only; nothing on the board changes
+      c.requestRenderAll()
     })
 
     c.on('object:modified', ({ target, transform }) => {
@@ -480,15 +578,29 @@ export class Editor {
         // already be stored. History never held it (nothing to commit), so say explicitly
         // that the stored board is stale. A text nobody typed into was never saved: no write.
         if (this.typedThisEdit) this.autosaver.markDirty()
+      } else if (target instanceof Textbox && !this.history.current.objects.some((o) => o.id === idOf(target))) {
+        // A NEW text (history has never held it): its box grew while it was typed, so its
+        // owner is decided once more from where it ended up. Re-editing an existing text
+        // never changes its owner, whatever the typing does to its size.
+        setOwner(target, ownerAfterManipulation(ownerOf(target), centerOf(target), this.frameRecords(), NO_FRAMES))
       }
       this.commit()
     })
 
     c.on('mouse:up', (opt) => {
       if (!isPrimary(opt.e)) return // other buttons never start, finish or clear anything
-      // A press that never moved: Fabric fired no `object:modified`. Nothing changed, so
-      // nothing is normalized, recorded or saved.
-      if (this.gesture?.kind === 'transform') this.gesture = null
+      const g = this.gesture
+      if (g?.kind === 'transform') {
+        // A press that never moved: Fabric fired no `object:modified`. Nothing changed, so
+        // nothing is normalized, reconciled, recorded or saved.
+        this.gesture = null
+      } else if (g?.kind === 'draft' && g.draft) {
+        const end = c.getScenePoint(opt.e)
+        g.draft.end = { x: end.x, y: end.y }
+        g.kind = 'settling'
+        const id = g.id
+        queueMicrotask(() => this.settle(id))
+      }
       if (this.editable && !this.gesture && this.state.tool === 'text' && !this.state.handActive && !opt.target && opt.isClick) {
         const p = c.getScenePoint(opt.e)
         const at = { x: p.x, y: p.y }
@@ -503,9 +615,10 @@ export class Editor {
   // ---- gestures ----------------------------------------------------------------------
 
   /**
-   * Finishes a performed transform. Runs in a microtask queued from `object:modified`,
-   * i.e. after Fabric has finished its own mouse-up handling, so dissolving and
-   * re-forming a selection here cannot re-enter Fabric's transform finalization.
+   * Finishes a performed gesture. Runs in a microtask queued from `object:modified` (or
+   * from the release that ends a frame draft), i.e. after Fabric has finished its own
+   * mouse-up handling, so dissolving and re-forming a selection here cannot re-enter
+   * Fabric's transform finalization.
    */
   private settle(id: number) {
     const g = this.gesture
@@ -515,7 +628,8 @@ export class Editor {
       return
     }
     try {
-      this.settleScale(g)
+      if (g.draft) this.settleDraft(g.draft)
+      else if (g.transform) this.settleTransform(g, g.transform)
     } finally {
       // Whatever happened, the gesture is over: the board must never stay busy.
       this.gesture = null
@@ -525,16 +639,121 @@ export class Editor {
     }
   }
 
+  /** The Frame tool's release: one new frame, selected, and back to the Select tool. A new frame owns nothing (rule O5). */
+  private settleDraft(draft: { start: Point; end: Point }) {
+    this.canvas.draft = null
+    const { start, end } = draft
+    const zoom = this.getViewport().zoom
+    const dragged = Math.hypot(end.x - start.x, end.y - start.y) * zoom >= DRAFT_CLICK_SLOP
+    let box: Box
+    if (dragged) {
+      const r = rectFromDrag(start, end)
+      box = { ...r, width: Math.max(r.width, MIN_FRAME_SIZE), height: Math.max(r.height, MIN_FRAME_SIZE) }
+    } else {
+      // A plain click: a default frame of a fixed size on screen, its corner at the click.
+      box = { left: start.x, top: start.y, width: DEFAULT_FRAME_SCREEN.width / zoom, height: DEFAULT_FRAME_SCREEN.height / zoom }
+    }
+    this.switchTool('select') // the tool is single-use
+    this.insertFrame(box)
+  }
+
+  /** Adds a frame in front of every other frame and behind all content, and selects it. */
+  private insertFrame(box: Box): FabricObject {
+    const frames = this.frameRecords()
+    const obj = createFrame({
+      id: newId(),
+      name: nextFrameName(frames.map((f) => f.name)),
+      left: round(box.left),
+      top: round(box.top),
+      width: roundPositive(box.width),
+      height: roundPositive(box.height),
+    })
+    this.canvas.insertAt(frames.length, obj)
+    this.canvas.discardActiveObject()
+    this.canvas.setActiveObject(obj)
+    this.canvas.requestRenderAll()
+    return obj
+  }
+
+  /** A performed transform: followers, the scale limit with folding and baking, then ownership. */
+  private settleTransform(g: Gesture, transform: Transform) {
+    const target = transform.target
+    // Taken before anything is dissolved: these objects are "the transformed set".
+    const members = target instanceof ActiveSelection ? target.getObjects().slice() : [target]
+    if (g.carry) this.placeFollowers(g.carry, target)
+    this.settleScale(g.base, transform, members)
+    this.applyOwnership(g.base, members)
+  }
+
+  /** Unselected members of the frames being dragged, with where they and the target started. */
+  private collectFollowers(target: FabricObject): Carry {
+    const moved = new Set<FabricObject>(target instanceof ActiveSelection ? target.getObjects() : [target])
+    const movedFrames = new Set<string>()
+    for (const o of moved) if (isFrame(o)) movedFrames.add(idOf(o) ?? '')
+    const followers: Carry['followers'] = []
+    if (movedFrames.size > 0) {
+      for (const o of this.canvas.getObjects()) {
+        const owner = ownerOf(o)
+        // A selected member moves through the selection; carrying it too would move it twice.
+        if (owner !== undefined && movedFrames.has(owner) && !moved.has(o)) followers.push({ obj: o, left: o.left, top: o.top })
+      }
+    }
+    return { left: target.left, top: target.top, followers }
+  }
+
+  private placeFollowers(carry: Carry, target: FabricObject) {
+    const dx = target.left - carry.left
+    const dy = target.top - carry.top
+    for (const f of carry.followers) {
+      f.obj.set({ left: f.left + dx, top: f.top + dy })
+      f.obj.setCoords()
+    }
+  }
+
+  /**
+   * Ownership follows what the user manipulated. Evaluated from final scene-space centres
+   * and frame rectangles, and only when the gesture changed something.
+   *  - O1, content in the transformed set: keeps an owner that was transformed with it;
+   *    else keeps an owner that still contains it; else joins the front-most frame that
+   *    contains it and was NOT transformed in this gesture, or becomes loose.
+   *  - O3, a frame in the transformed set whose size changed: members it no longer contains
+   *    (and that were not transformed with it) become loose. They are never transferred.
+   * A frame never gains a member by being moved, resized or drawn. Followers and
+   * everything stationary keep their owner.
+   */
+  private applyOwnership(base: Scene, members: readonly FabricObject[]) {
+    const now = this.snapshot()
+    if (sceneEqual(now, base)) return
+    const transformed = new Set(members)
+    const coTransformed = new Set<string>()
+    for (const m of members) if (isFrame(m)) coTransformed.add(idOf(m) ?? '')
+
+    for (const m of members) {
+      if (!isFrame(m)) setOwner(m, ownerAfterManipulation(ownerOf(m), centerOf(m), now.frames, coTransformed))
+    }
+    for (const id of coTransformed) {
+      const before = base.frames.find((f) => f.id === id)
+      const after = now.frames.find((f) => f.id === id)
+      if (!before || !after || (before.width === after.width && before.height === after.height)) continue
+      const rest = this.canvas.getObjects().filter((o) => ownerOf(o) === id && !transformed.has(o))
+      const released = new Set(membersToRelease(after, rest.map((o) => ({ id: idOf(o) ?? '', centre: centerOf(o) }))))
+      for (const o of rest) if (released.has(idOf(o) ?? '')) setOwner(o, undefined)
+    }
+  }
+
   /**
    * A proportional scale is limited by one common factor for everything it transforms,
    * computed from pre-gesture values, and only then folded into the members. Folding
-   * applies no further limit, so proportions are exact.
+   * and baking apply no further limit, so proportions are exact. A frame resized on its
+   * own is not proportional and is limited per axis instead.
    */
-  private settleScale(g: Gesture) {
-    const { transform, base } = g
+  private settleScale(base: Scene, transform: Transform, members: readonly FabricObject[]) {
     if (!isScaleAction(transform)) return
     const target = transform.target
-    const members = target instanceof ActiveSelection ? target.getObjects() : [target]
+    if (!(target instanceof ActiveSelection) && isFrame(target)) {
+      this.bakeFrameAlone(base, transform)
+      return
+    }
     const baseTexts: Array<{ fontSize: number }> = []
     const baseFrames: FrameRecord[] = []
     for (const m of members) {
@@ -552,17 +771,40 @@ export class Editor {
     if (target instanceof ActiveSelection) {
       // Judged per member, on its absolute scale: a selection that returns to scale 1 can
       // still leave a member scaled (one that joined while the selection was scaled).
-      if (members.some((o) => o instanceof Textbox && hasResidualScale(o))) {
-        // Fold the scale into member text (font size/width), which means dissolving and
-        // re-forming the selection.
+      if (members.some((o) => (o instanceof Textbox || isFrame(o)) && hasResidualScale(o))) {
+        // Fold the scale into member text (font size/width) and bake it into member frames
+        // (which are stored at scale 1), which means dissolving and re-forming the selection.
         const keep = members.slice()
         this.canvas.discardActiveObject()
-        for (const o of keep) if (o instanceof Textbox) normalizeTextScale(o)
+        for (const o of keep) {
+          if (o instanceof Textbox) normalizeTextScale(o)
+          else if (isFrame(o)) bakeFrame(o)
+        }
         this.selectByIds(keep)
       }
     } else if (target instanceof Textbox) {
       normalizeTextScale(target)
     }
+  }
+
+  /**
+   * A frame resized on its own: its scale becomes its size. Each side may not go below
+   * the minimum, or below its own pre-gesture length if that was already smaller (it may
+   * grow, and is never snapped up). The edge opposite the dragged handle stays fixed.
+   */
+  private bakeFrameAlone(base: Scene, transform: Transform) {
+    const frame = transform.target
+    const before = base.frames.find((f) => f.id === idOf(frame))
+    const anchor = frame.translateToOriginPoint(frame.getCenterPoint(), transform.originX, transform.originY)
+    let width = frame.width * Math.abs(frame.scaleX)
+    let height = frame.height * Math.abs(frame.scaleY)
+    if (before) {
+      width = Math.max(width, minFrameSide(before.width))
+      height = Math.max(height, minFrameSide(before.height))
+    }
+    frame.set({ width: roundPositive(width), height: roundPositive(height), scaleX: 1, scaleY: 1 })
+    frame.setPositionByOrigin(anchor, transform.originX, transform.originY)
+    frame.setCoords()
   }
 
   /**
@@ -590,9 +832,16 @@ export class Editor {
   private cancelGesture(): boolean {
     const g = this.gesture
     if (!g) return false
+    if (g.draft) {
+      // Nothing on the board has changed yet: just drop the rectangle being drawn.
+      this.gesture = null
+      this.canvas.draft = null
+      this.canvas.requestRenderAll()
+      return true
+    }
     this.applying = true // Fabric may fire `object:modified` while its transform is ended; it must not settle
     try {
-      if (this.canvas._currentTransform === g.transform) this.canvas.endCurrentTransform()
+      if (g.transform && this.canvas._currentTransform === g.transform) this.canvas.endCurrentTransform()
     } finally {
       this.applying = false
     }
@@ -806,7 +1055,9 @@ export class Editor {
       const action = resolveShortcut(e, ctx)
       if (action === 'escape') {
         e.preventDefault()
+        const drawing = this.gesture?.draft !== undefined
         this.cancelGesture()
+        if (drawing) this.switchTool('select') // Esc while drawing a frame also leaves the Frame tool
         this.queueIdle()
       } else if (action && ZOOM_ACTIONS.has(action)) {
         e.preventDefault()
@@ -845,6 +1096,8 @@ export class Editor {
         return this.setTool('hand')
       case 'tool-text':
         return this.setTool('text')
+      case 'tool-frame':
+        return this.setTool('frame')
       case 'add-image':
         return this.editable && !this.busy ? this.imagePicker?.() : undefined
       case 'zoom-in':
@@ -900,9 +1153,10 @@ export class Editor {
     const hand = tool === 'hand' || this.spaceHeld
     const editable = this.state.ready && this.state.readOnly === null
     this.canvas.selection = editable && tool === 'select' && !hand
-    this.canvas.skipTargetFind = hand || !editable
-    this.canvas.defaultCursor = hand ? 'grab' : tool === 'text' ? 'text' : 'default'
-    this.canvas.hoverCursor = hand ? 'grab' : tool === 'text' ? 'text' : 'move'
+    // The Frame tool draws over whatever is there: it must not grab or select anything.
+    this.canvas.skipTargetFind = hand || !editable || tool === 'frame'
+    this.canvas.defaultCursor = hand ? 'grab' : tool === 'text' ? 'text' : tool === 'frame' ? 'crosshair' : 'default'
+    this.canvas.hoverCursor = hand ? 'grab' : tool === 'text' ? 'text' : tool === 'frame' ? 'crosshair' : 'move'
     this.canvas.requestRenderAll()
     this.setState({ handActive: hand })
   }
@@ -944,6 +1198,9 @@ export class Editor {
     const obj = createObject(rec, () => undefined)
     if (!(obj instanceof Textbox)) return
     this.canvas.add(obj)
+    // Owner first, in the same step that adds it: typing is saved as it happens, so no
+    // save may ever see this text without its owner. (Touches no history.)
+    setOwner(obj, this.ownerForNew(obj))
     this.canvas.setActiveObject(obj)
     obj.enterEditing()
     this.canvas.requestRenderAll()
@@ -1022,6 +1279,7 @@ export class Editor {
       const obj = createObject(rec, (id) => this.assets.get(id))
       if (!obj) continue
       this.canvas.add(obj)
+      setOwner(obj, this.ownerForNew(obj)) // same synchronous step as the add and the commit
       added.push(obj)
     }
     if (added.length === 0) return
@@ -1033,11 +1291,64 @@ export class Editor {
 
   // ---- editing ----------------------------------------------------------------------------
 
+  /** Adds a default-sized frame in the middle of the view (the Frame tool draws one instead). */
+  addFrame() {
+    if (!this.editable || this.busy) return
+    this.finishEditing()
+    if (this.state.tool !== 'select') this.switchTool('select')
+    const zoom = this.getViewport().zoom
+    const width = DEFAULT_FRAME_SCREEN.width / zoom
+    const height = DEFAULT_FRAME_SCREEN.height / zoom
+    const centre = this.viewCenterScene()
+    this.insertFrame({ left: centre.x - width / 2, top: centre.y - height / 2, width, height })
+    this.commit()
+  }
+
+  /** Renames the selected frame. Returns the name actually set, or null when no single frame is selected. */
+  renameFrame(raw: string): string | null {
+    if (!this.editable || this.busy) return null
+    const active = this.canvas.getActiveObject()
+    if (!active || active instanceof ActiveSelection || !isFrame(active)) return null
+    const name = normalizeFrameName(raw)
+    if (name === frameNameOf(active)) return name
+    setFrameName(active, name)
+    this.canvas.requestRenderAll()
+    this.commit(`frame-name:${idOf(active) ?? ''}`)
+    return name
+  }
+
+  /**
+   * Replaces the selection by the selected frames plus everything they own, so that
+   * frame and contents can be moved or scaled together as one multi-selection. Changes
+   * nothing on the board and records no history.
+   */
+  selectFrameContents() {
+    if (!this.editable || this.busy) return
+    const frames = new Set<string>()
+    for (const o of this.canvas.getActiveObjects()) if (isFrame(o)) frames.add(idOf(o) ?? '')
+    if (frames.size === 0) return
+    this.finishEditing()
+    const objs = this.canvas.getObjects().filter((o) => frames.has(idOf(o) ?? '') || frames.has(ownerOf(o) ?? '\u0000'))
+    this.canvas.discardActiveObject()
+    this.selectByIds(objs)
+    this.canvas.requestRenderAll()
+  }
+
   deleteSelection() {
     if (!this.editable || this.busy) return
     this.finishEditing()
     const objs = this.canvas.getActiveObjects()
     if (objs.length === 0) return
+    // Deleting a frame keeps its contents: they become loose (rule O6).
+    const doomed = new Set<FabricObject>(objs)
+    const deletedFrames = new Set<string>()
+    for (const o of objs) if (isFrame(o)) deletedFrames.add(idOf(o) ?? '')
+    if (deletedFrames.size > 0) {
+      for (const o of this.canvas.getObjects()) {
+        const owner = ownerOf(o)
+        if (owner !== undefined && deletedFrames.has(owner) && !doomed.has(o)) setOwner(o, undefined)
+      }
+    }
     this.canvas.discardActiveObject()
     this.canvas.remove(...objs)
     this.canvas.requestRenderAll()
@@ -1174,6 +1485,17 @@ export class Editor {
   static hasFiles(dt: DataTransfer | null): boolean {
     return !!dt && Array.from(dt.types ?? []).includes('Files')
   }
+}
+
+/** Folds a frame's scale into its size: frames are always at scale 1 between gestures. */
+function bakeFrame(frame: FabricObject) {
+  frame.set({
+    width: roundPositive(frame.width * Math.abs(frame.scaleX)),
+    height: roundPositive(frame.height * Math.abs(frame.scaleY)),
+    scaleX: 1,
+    scaleY: 1,
+  })
+  frame.setCoords()
 }
 
 /** Corner (and side) scaling, as opposed to moving, rotating or changing a text's wrap width. */

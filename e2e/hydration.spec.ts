@@ -43,7 +43,7 @@ test.describe('hydration gate: early interaction while the stored board is still
     await expect(page.locator('input[aria-label="Board title"]')).toBeDisabled()
 
     // Everything a user (or a stray event) could do while hydration is pending.
-    for (const key of ['t', 'h', 'v', 'i', 'Control+a', 'Delete', 'Backspace', 'Control+z', 'Control+Shift+z', '=', '-', '0', 'Shift+1', '[', ']', 'Escape']) {
+    for (const key of ['t', 'h', 'v', 'i', 'f', 'Control+a', 'Delete', 'Backspace', 'Control+z', 'Control+Shift+z', '=', '-', '0', 'Shift+1', '[', ']', 'Escape']) {
       await page.keyboard.press(key)
     }
     await page.keyboard.down('Space')

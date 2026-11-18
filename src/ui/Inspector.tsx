@@ -4,7 +4,8 @@ import { MAX_FONT_SIZE, MIN_FONT_SIZE } from '../model/doc.ts'
 import { IconButton } from './IconButton.tsx'
 import { BackwardIcon, ForwardIcon, ToBackIcon, ToFrontIcon, TrashIcon } from './icons.tsx'
 
-const heading = (s: SelectionInfo) => (s.kind === 'multiple' ? `${s.count} objects` : s.kind === 'text' ? 'Text' : 'Image')
+const heading = (s: SelectionInfo) =>
+  s.kind === 'multiple' ? `${s.count} objects` : s.kind === 'text' ? 'Text' : s.kind === 'frame' ? 'Frame' : 'Image'
 
 export function Inspector({ editor, selection }: { editor: Editor; selection: SelectionInfo }) {
   const sizeId = useId()

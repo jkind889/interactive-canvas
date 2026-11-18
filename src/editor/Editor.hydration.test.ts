@@ -73,6 +73,11 @@ describe('Editor: nothing is editable or saved before hydration finishes', () =>
     editor.handleKeyDown(key('a', { ctrlKey: true }))
     editor.handleKeyDown(key(' ', { code: 'Space' }))
     editor.setTool('hand')
+    editor.setTool('frame')
+    editor.handleKeyDown(key('f'))
+    editor.addFrame()
+    editor.renameFrame('Early frame')
+    editor.selectFrameContents()
     editor.setTitle('Hijacked title')
     editor.setFontSize(60)
     editor.arrange('front')
@@ -181,6 +186,11 @@ describe('Editor: a stored image that fails to decode fails closed', () => {
     editor.redo()
     editor.setTool('text')
     editor.setTool('select')
+    editor.setTool('frame')
+    editor.handleKeyDown(key('f'))
+    editor.addFrame()
+    editor.renameFrame('Read-only frame')
+    editor.selectFrameContents()
     editor.handleKeyDown(key('a', { ctrlKey: true }))
     editor.handleKeyDown(key('Delete'))
     editor.handleKeyDown(key('i')) // add-image shortcut must not open the picker
@@ -355,24 +365,50 @@ describe('Editor: a save conflict makes the tab read-only', () => {
   })
 })
 
-describe('Editor: a stored board with frames (interim, until frames are editable)', () => {
-  it('is shown read-only and is never rewritten as a frameless board', async () => {
-    const doc: BoardDoc = {
-      ...storedDoc(),
-      frames: [{ id: 'f1', name: 'Cover', left: 0, top: 0, width: 400, height: 300 }],
-      objects: storedDoc().objects.map((o) => ({ ...o, frameId: 'f1' })),
-    }
-    const store = new SpyStore({ doc, assets: storedAssets() })
+describe('Editor: a stored board with frames', () => {
+  const framedDoc = (): BoardDoc => ({
+    ...storedDoc(),
+    frames: [{ id: 'f1', name: 'Cover', left: 0, top: 0, width: 400, height: 300 }],
+    objects: storedDoc().objects.map((o) => ({ ...o, frameId: 'f1' })),
+  })
+
+  it('restores editable; restoring is not an edit, and the first save keeps frames and owners', async () => {
+    const store = new SpyStore({ doc: framedDoc(), assets: storedAssets() })
     store.holdLoad = false
     const editor = make(store, new FakeAssets())
     await editor.init()
-    expect(editor.getState().readOnly).toMatch(/frames.*read-only/)
-    expect(editor.getState().save.kind).toBe('unavailable')
-    expect(editor.getState().objectCount).toBe(4) // the frame and its three objects are all shown
-    editor.setTitle('would flatten the frames')
-    editor.addText()
+    expect(editor.getState().readOnly).toBeNull()
+    expect(editor.getState().save.kind).toBe('saved')
+    expect(editor.getState().objectCount).toBe(4) // the frame and its three objects
+    expect(editor.getState().canUndo).toBe(false)
     await flush()
-    expect(store.saves).toHaveLength(0)
+    expect(store.attempts).toHaveLength(0)
+    expect(store.prunes).toEqual([{ keep: ['a1', 'a2'], expected: { kind: 'rev', rev: 'stored' } }])
+
+    editor.setTitle('Edited')
+    await flush()
+    expect(store.saves[0]!.doc.frames).toEqual(framedDoc().frames)
+    expect(store.saves[0]!.doc.objects.map((o) => o.frameId)).toEqual(['f1', 'f1', 'f1'])
+  })
+
+  it('that cannot be fully restored is read-only: frames are shown but nothing can be selected, moved or written', async () => {
+    const store = new SpyStore({ doc: framedDoc(), assets: storedAssets() })
+    store.holdLoad = false
+    const editor = make(store, new FakeAssets(new Set(['a2'])))
+    await editor.init()
+    expect(editor.getState().readOnly).toContain('1 saved image could not be loaded')
+    expect(editor.getState().objectCount).toBe(3) // the frame, one image and the text
+    const canvas = canvasOf(editor)
+    expect(canvas).toMatchObject({ skipTargetFind: true, selection: false })
+    editor.setTool('frame')
+    editor.addFrame()
+    editor.selectFrameContents()
+    editor.renameFrame('Nope')
+    editor.handleKeyDown(key('a', { ctrlKey: true }))
+    editor.handleKeyDown(key('Delete'))
+    await flush()
+    expect(editor.getState()).toMatchObject({ tool: 'hand', selection: null, objectCount: 3 })
+    expect(store.attempts).toHaveLength(0)
     expect(store.prunes).toHaveLength(0)
   })
 })

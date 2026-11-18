@@ -143,6 +143,16 @@ export class ActiveSelection extends FakeObject {
   constructor(members: FakeObject[]) {
     super()
     this.members = members
+    // Like Fabric: the selection box is the bounding box of its members.
+    if (members.length > 0) {
+      const boxes = members.map((m) => m.getCoords())
+      const xs = boxes.flatMap((b) => b.map((p) => p.x))
+      const ys = boxes.flatMap((b) => b.map((p) => p.y))
+      this.left = Math.min(...xs)
+      this.top = Math.min(...ys)
+      this.width = Math.max(...xs) - this.left
+      this.height = Math.max(...ys) - this.top
+    }
   }
   getObjects() {
     return this.members
@@ -171,6 +181,8 @@ export class Canvas {
   defaultCursor = ''
   hoverCursor = ''
   uniformScaling = true
+  /** Set by FrameCanvas (the rectangle of a frame being drawn); declared here so tests can read it. */
+  draft: { left: number; top: number; width: number; height: number } | null = null
   _currentTransform: FakeTransform | null = null
   /** Every option the editor passed, so tests can assert on canvas configuration. */
   readonly options: Record<string, unknown>

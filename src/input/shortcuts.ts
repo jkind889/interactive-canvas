@@ -6,6 +6,7 @@ export type ShortcutAction =
   | 'tool-select'
   | 'tool-hand'
   | 'tool-text'
+  | 'tool-frame'
   | 'add-image'
   | 'zoom-in'
   | 'zoom-out'
@@ -97,6 +98,8 @@ export function resolveShortcut(e: KeyEventLike, ctx: ShortcutContext): Shortcut
       return 'tool-hand'
     case 't':
       return 'tool-text'
+    case 'f':
+      return 'tool-frame'
     case 'i':
       return 'add-image'
   }
