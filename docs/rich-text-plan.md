@@ -108,9 +108,9 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 
 | # | Slice | State |
 | - | ----- | ----- |
-| 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | committed (b307275), review fixes committed (2210acc), in re-review |
-| 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | not started |
-| 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert, Enter after a heading. | not started |
+| 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | done: `b307275`, review fixes `2210acc` and `42739a3`, cleared by recheck |
+| 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | committed (`f43bb1b`), in review |
+| 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert. (Enter after a heading was settled in slice 1's review fixes.) | not started |
 | 4 | Text tool: drag out a box. | not started |
 
 After the last slice is reviewed, the branch goes to a further independent hands-on QA and
@@ -160,13 +160,36 @@ Contracts the other branch can rely on, and that this branch needs kept:
   do the same.
 - This branch does not touch z-order, layer reordering or image records.
 
-Expected overlap from the remaining slices: `SelectionInfo` and the `Inspector` gain a text
-section; `Editor` gains formatting commands, a capture-phase key handler for keys pressed
-while a text is edited, and a text variant of the draft gesture used by the Frame tool;
-`src/input/shortcuts.ts` gains Ctrl/Cmd+B/I/U. Formatting commands act on the active object
-behind the same `editable && !busy` guards as the existing commands, so a lock that keeps an
-object from being selected also keeps it from being formatted; a lock that still allows
-selection will need to gate these commands explicitly.
+Added by slice 2 (formatting commands and controls, `f43bb1b`):
+
+- `src/model/richText.ts`: pure functions for toggling marks, setting headings and reading
+  the state of a range, the colour palette, and the `MarkState`, `PendingMarks` and
+  `TextAlign` types, all appended after the slice 1 code.
+- `src/editor/objects.ts`: `applyTextFormatting` (the one path every formatting command
+  writes through) and `selectedRange`; `readTextFormatting` and `reconcileTextFormatting`
+  take an optional pending-marks argument.
+- `src/editor/Editor.ts`: `SelectionInfo.text` (a `TextFormatInfo`), the commands
+  `toggleMark`, `setHeading`, `setTextFont`, `setTextAlign`, `setTextColor`, a private
+  `formatTarget()` that all of them go through, a handler for `text:selection:changed`, and
+  three `format-*` cases in `run`.
+- `src/input/shortcuts.ts`: `format-bold`, `format-italic`, `format-underline` actions,
+  `ShortcutContext.textSelected`, and a separate `resolveEditingShortcut` for keys pressed
+  while a text is edited. No capture-phase listener was needed: the existing window keydown
+  listener handles both.
+- `src/ui/Inspector.tsx`: a text section, a `locked` prop (true when the board is read-only;
+  the name will meet the other branch's object lock and needs reconciling), and a mousedown
+  handler that keeps the panel background from taking focus. `src/ui/Overlays.tsx` passes
+  `locked`; `src/ui/IconButton.tsx` accepts `pressed="mixed"`; `src/ui/icons.tsx` and
+  `src/styles.css` gain icons and classes only.
+
+Where the lock goes at integration: `Editor.formatTarget()` is the single guard of every
+formatting command, and the Inspector's text section is switched off by its `locked` prop.
+A lock that keeps an object from being selected also keeps it from being formatted; a lock
+that still allows selection has to be checked in `formatTarget()`.
+
+Expected overlap from the remaining slices: the typing shortcuts hook into the
+`text:changed` handler, and the Text tool's drag adds a text variant of the draft gesture
+used by the Frame tool.
 
 What the other branch has told this one (as of 2026-11-18; their branch does not contain
 this branch's changes):
@@ -277,6 +300,12 @@ Re-review of `2210acc`, verdict "clear after one should-fix":
 | 3 | Ctrl/Cmd+Z while typing restores characters but not a heading level the undone edit changed (predates this work) | nit | Known limit in the README; taking over that key while typing is an owner decision |
 | 4 | Select-all then pasting the same number of lines keeps levels by position | not a bug | No change; follows the documented rules |
 | - | Test gap: the caret rule was pinned only on the fake canvas | gap | Real-browser test added in the follow-up commit |
+
+Recheck of `42739a3`, verdict "clear to build slice 2 on":
+
+| # | Finding | Severity | Disposition |
+| - | ------- | -------- | ----------- |
+| 1 | Replacing the line break after a heading with Enter stores bold on the next line's first character | nit / should-fix | Fixed as step 0 of slice 2 (`f43bb1b`), with unit and real-browser tests |
 
 Known limit recorded here rather than in the README (the app cannot produce it): a stored
 text containing a lone carriage return is drawn with it as a character, and the first
