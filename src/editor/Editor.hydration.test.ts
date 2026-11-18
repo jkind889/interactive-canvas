@@ -5,6 +5,8 @@ import type { BoardDoc, StoredAsset } from '../model/types.ts'
 import { CONFLICT_MESSAGE } from '../persistence/autosave.ts'
 import { ABSENT, BoardConflictError, IndexedDbBoardStore } from '../persistence/boardStore.ts'
 import { Editor } from './Editor.ts'
+import { canvasOf } from './testing/drive.ts'
+import type { Textbox } from './testing/fakeFabric.ts'
 import { FakeAssets, SpyStore } from './testing/fakes.ts'
 
 vi.mock('fabric', () => import('./testing/fakeFabric.ts'))
@@ -340,12 +342,16 @@ describe('Editor: a save conflict makes the tab read-only', () => {
     store.saveError = new BoardConflictError()
     editor.addText() // enters editing on a new textbox
     expect(editor.getState().editingText).toBe(true)
-    editor.setTitle('Triggers the conflicting save')
-    await flush()
+    const typing = canvasOf(editor).objects[0] as Textbox
+    typing.type('half a thought') // typed text, so leaving the edit WOULD commit if the board were still editable
+    await flush() // the save triggered by typing conflicts
     const state = editor.getState()
     expect(state.readOnly).toBe(CONFLICT_MESSAGE)
+    expect(typing.isEditing).toBe(false)
     expect(state.editingText).toBe(false)
     expect(state.canUndo).toBe(false) // the half-typed text was not committed to history
+    expect(canvasOf(editor).objects).toHaveLength(1) // it stays visible
+    expect(store.saves).toHaveLength(1) // only the save from before the conflict
   })
 })
 
@@ -362,7 +368,7 @@ describe('Editor: a stored board with frames (interim, until frames are editable
     await editor.init()
     expect(editor.getState().readOnly).toMatch(/frames.*read-only/)
     expect(editor.getState().save.kind).toBe('unavailable')
-    expect(editor.getState().objectCount).toBe(3)
+    expect(editor.getState().objectCount).toBe(4) // the frame and its three objects are all shown
     editor.setTitle('would flatten the frames')
     editor.addText()
     await flush()

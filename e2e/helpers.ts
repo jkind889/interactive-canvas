@@ -203,3 +203,151 @@ export function dropImage(page: Page, name: string, base64: string, at = { x: 40
     { name, base64, at },
   )
 }
+
+// ---- seeding IndexedDB directly (boards that the UI cannot easily produce) -------------------
+
+export interface SeedAsset {
+  id: string
+  name: string
+  width: number
+  height: number
+  seed?: number
+}
+
+/** An app-origin page that does not run the app, so storage can be prepared before the app loads. */
+export async function openBlank(page: Page) {
+  await page.route('**/__blank', (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>blank</title>' }))
+  await page.goto('/__blank')
+}
+
+const assetPayload = (assets: readonly SeedAsset[]) =>
+  assets.map((a) => ({ id: a.id, name: a.name, type: 'image/png', base64: pngBuffer(a.width, a.height, a.seed ?? 0).toString('base64') }))
+
+/**
+ * Writes a board exactly as milestone 1 did: through the frozen copy of that build's own
+ * store code (version 1 database, version 1 row without a revision id). Call on a blank page.
+ */
+export function seedMilestone1(page: Page, doc: Record<string, unknown>, assets: readonly SeedAsset[] = []): Promise<void> {
+  return page.evaluate(
+    async ({ doc, assets }) => {
+      const path = '/src/persistence/testing/legacyStoreV1.ts'
+      const { LegacyStoreV1 } = await import(/* @vite-ignore */ path)
+      const store = new LegacyStoreV1()
+      const decoded = assets.map((a) => ({ id: a.id, name: a.name, type: a.type, bytes: Uint8Array.from(atob(a.base64), (c) => c.charCodeAt(0)).buffer }))
+      await store.save(doc, decoded)
+      await store.close()
+    },
+    { doc, assets: assetPayload(assets) },
+  )
+}
+
+/** Writes a row and assets straight into a database of the given version (for boards with frames). Call on a blank page. */
+export function seedRaw(page: Page, version: number, doc: Record<string, unknown>, assets: readonly SeedAsset[] = []): Promise<void> {
+  return page.evaluate(
+    ({ version, doc, assets }) =>
+      new Promise<void>((resolve, reject) => {
+        const open = indexedDB.open('yuriful', version)
+        open.onupgradeneeded = () => {
+          if (!open.result.objectStoreNames.contains('boards')) open.result.createObjectStore('boards', { keyPath: 'id' })
+          if (!open.result.objectStoreNames.contains('assets')) open.result.createObjectStore('assets', { keyPath: 'id' })
+        }
+        open.onerror = () => reject(open.error)
+        open.onsuccess = () => {
+          const db = open.result
+          const tx = db.transaction(['boards', 'assets'], 'readwrite')
+          for (const a of assets) {
+            tx.objectStore('assets').put({ id: a.id, name: a.name, type: a.type, bytes: Uint8Array.from(atob(a.base64), (c) => c.charCodeAt(0)).buffer })
+          }
+          tx.objectStore('boards').put({ id: 'current', doc, rev: 'seeded', updatedAt: 1 })
+          tx.oncomplete = () => {
+            db.close()
+            resolve()
+          }
+          tx.onerror = () => reject(tx.error)
+        }
+      }),
+    { version, doc, assets: assetPayload(assets) },
+  )
+}
+
+export interface StoredObject {
+  id: string
+  type: 'image' | 'text'
+  left: number
+  top: number
+  angle: number
+  frameId?: string
+  scaleX?: number
+  scaleY?: number
+  fontSize?: number
+  width?: number
+  text?: string
+}
+export interface StoredFrame {
+  id: string
+  name: string
+  left: number
+  top: number
+  width: number
+  height: number
+}
+export interface StoredBoard {
+  version: number
+  title: string
+  frames?: StoredFrame[]
+  objects: StoredObject[]
+  viewport: { zoom: number; panX: number; panY: number }
+}
+
+/** The stored document, parsed. */
+export async function storedDoc(page: Page): Promise<StoredBoard> {
+  return JSON.parse((await snapshotIdb(page)).doc) as StoredBoard
+}
+
+export function dbVersion(page: Page): Promise<number> {
+  return page.evaluate(
+    () =>
+      new Promise<number>((resolve, reject) => {
+        const open = indexedDB.open('yuriful')
+        open.onerror = () => reject(open.error)
+        open.onsuccess = () => {
+          const v = open.result.version
+          open.result.close()
+          resolve(v)
+        }
+      }),
+  )
+}
+
+// ---- pointing at things on the canvas ------------------------------------------------------
+
+export interface View {
+  zoom: number
+  panX: number
+  panY: number
+}
+
+/** Converts scene coordinates to page coordinates for the given viewport. */
+export async function sceneToPage(page: Page, view: View) {
+  const box = await page.locator('.canvas-host').boundingBox()
+  if (!box) throw new Error('canvas host not found')
+  return (x: number, y: number) => ({ x: box.x + x * view.zoom + view.panX, y: box.y + y * view.zoom + view.panY })
+}
+
+/** Presses at `from`, moves to `to` in steps, and (unless `hold`) releases. */
+export async function drag(page: Page, from: { x: number; y: number }, to: { x: number; y: number }, opts: { hold?: boolean; steps?: number } = {}) {
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  await page.mouse.move(to.x, to.y, { steps: opts.steps ?? 8 })
+  if (!opts.hold) await page.mouse.up()
+}
+
+/** Loads the app on a seeded board and waits until it is editable. */
+export async function openApp(page: Page) {
+  await page.goto('/')
+  await expect(page.locator('.toolbar')).toBeVisible()
+  await expect(status(page)).toContainText('Saved on this device')
+}
+
+export const undoButton = (page: Page) => page.getByRole('button', { name: 'Undo' })
+export const redoButton = (page: Page) => page.getByRole('button', { name: 'Redo' })
