@@ -6,7 +6,7 @@
  */
 import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
-import { AUTOSAVE_QUIET_MS, drag, openApp, openBlank, redoButton, sceneToPage, seedMilestone1, seedRaw, status, storedDoc, undoButton, waitSaved } from './helpers.ts'
+import { AUTOSAVE_QUIET_MS, drag, imageFile, openApp, openBlank, redoButton, sceneToPage, seedMilestone1, seedRaw, status, storedDoc, undoButton, waitSaved } from './helpers.ts'
 import type { StoredBoard, StoredObject, View } from './helpers.ts'
 
 const UNIT: View = { zoom: 1, panX: 0, panY: 0 }
@@ -119,8 +119,8 @@ test.describe('dragging out a text box', () => {
     expect(errors).toEqual([])
   })
 
-  test('leftward and upward drags; the minimum width grows away from the press point', async ({ page }) => {
-    const { errors, at } = await open(page, [])
+  test('leftward and upward drags; a drag narrower than two font sizes gives the default box at the press point', async ({ page }) => {
+    const { errors, at } = await open(page, [], { view: { zoom: 1, panX: 0, panY: -100 } })
     const make = async (from: P, to: P, typed: string) => {
       await page.keyboard.press('t')
       await drag(page, from, to)
@@ -128,14 +128,20 @@ test.describe('dragging out a text box', () => {
       await page.keyboard.press('Escape')
       await page.keyboard.press('Escape')
     }
-    await make(at(500, 300), at(200, 100), 'up left')
-    await make(at(600, 400), at(605, 500), 'n1') // a word narrower than the minimum box: typing does not widen it
-    await make(at(600, 600), at(595, 700), 'n2')
-    const done = await storedWhen(page, (d) => texts(d).length === 3)
+    await make(at(500, 300), at(200, 150), 'up left')
+    await make(at(300, 400), at(304, 403), 'jitter') // a wobble just past the slop
+    await make(at(300, 500), at(310, 650), 'down') // mostly vertical
+    await make(at(300, 800), at(310, 700), 'up') // mostly vertical, upward: still at the press point
+    await make(at(700, 400), at(660, 450), 'narrow left')
+    await make(at(700, 600), at(748, 620), 'w48') // exactly two font sizes wide: the dragged width
+    const done = await storedWhen(page, (d) => texts(d).length === 6)
     const by = (t: string) => done.objects.find((o) => o.text === t)
-    expect(by('up left')).toMatchObject({ left: 200, top: 100, width: 300 })
-    expect(by('n1')).toMatchObject({ left: 600, top: 400, width: 48 })
-    expect(by('n2')).toMatchObject({ left: 552, top: 600, width: 48 })
+    expect(by('up left')).toMatchObject({ left: 200, top: 150, width: 300 })
+    expect(by('jitter')).toMatchObject({ left: 300, top: 400, width: 240 })
+    expect(by('down')).toMatchObject({ left: 300, top: 500, width: 240 })
+    expect(by('up')).toMatchObject({ left: 300, top: 800, width: 240 })
+    expect(by('narrow left')).toMatchObject({ left: 700, top: 400, width: 240 })
+    expect(by('w48')).toMatchObject({ left: 700, top: 600, width: 48 })
     expect(errors).toEqual([])
   })
 
@@ -282,6 +288,56 @@ test.describe('ownership and history', () => {
     const done = await storedWhen(page, (d) => texts(d).length === 2)
     expect(done.objects.find((o) => o.text === 'in')?.frameId).toBe('F')
     expect(done.objects.find((o) => o.text === 'out')?.frameId).toBeUndefined()
+    expect(errors).toEqual([])
+  })
+
+  test('the owner is decided again from the box centre when the first edit ends: a tall text started near a frame\'s bottom edge ends up loose', async ({ page }) => {
+    const frame = { id: 'F', name: 'Spread', left: 50, top: 50, width: 600, height: 400 }
+    const { errors, at } = await open(page, [], { frames: [frame] })
+    await page.keyboard.press('t')
+    await drag(page, at(100, 380), at(400, 440)) // entirely inside the frame
+    await page.keyboard.type('one')
+    for (const line of ['two', 'three', 'four', 'five', 'six', 'seven']) {
+      await page.keyboard.press('Enter')
+      await page.keyboard.type(line)
+    }
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('t')
+    await drag(page, at(100, 70), at(400, 130)) // the same text started higher stays inside
+    await page.keyboard.type('one')
+    for (const line of ['two', 'three', 'four', 'five', 'six', 'seven']) {
+      await page.keyboard.press('Enter')
+      await page.keyboard.type(line)
+    }
+    await page.keyboard.press('Escape')
+    const done = await storedWhen(page, (d) => texts(d).length === 2)
+    const low = done.objects.find((o) => o.top === 380)!
+    const high = done.objects.find((o) => o.top === 70)!
+    expect(low).toMatchObject({ left: 100, width: 300 })
+    expect(low.frameId).toBeUndefined() // grew downward: its centre is below the frame
+    expect(high.frameId).toBe('F')
+    expect(errors).toEqual([])
+  })
+
+  test('an image import that finishes during a held drag is added first, as its own step; the new box is still being edited', async ({ page }) => {
+    const { errors, at } = await open(page, [])
+    await page.keyboard.press('t')
+    await drag(page, at(100, 100), at(400, 160), { hold: true })
+    await page.setInputFiles('input[type=file]', [imageFile('late.png', 80, 60, 3)])
+    await page.waitForTimeout(400) // decoding finishes while the drag is still held
+    await page.mouse.up()
+    expect(await editing(page)).toBe(true)
+    await page.keyboard.type('after the image')
+    await page.keyboard.press('Escape')
+    const done = await storedWhen(page, (d) => d.objects.length === 2 && texts(d).length === 1)
+    expect(texts(done)[0]).toMatchObject({ text: 'after the image', left: 100, top: 100, width: 300 })
+    await waitSaved(page)
+    await undoButton(page).click() // the text
+    await storedWhen(page, (d) => d.objects.length === 1 && texts(d).length === 0)
+    await undoButton(page).click() // the import
+    await storedWhen(page, (d) => d.objects.length === 0)
+    await expect(undoButton(page)).toBeDisabled() // two steps in all
     expect(errors).toEqual([])
   })
 

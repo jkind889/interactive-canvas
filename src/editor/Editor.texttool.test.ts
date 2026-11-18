@@ -101,14 +101,21 @@ describe('dragging out a text box', () => {
     expect(await drag(400, 100, 100, 300)).toMatchObject({ left: 100, top: 100, width: 300 })
   })
 
-  it('a narrow drag gives the minimum width (two font sizes), growing away from the press point', async () => {
+  it('a drag narrower than two font sizes is no usable width: the default box at the press point, whatever its direction or height', async () => {
     const { editor, drag } = await setup()
-    editor.setTool('text')
-    expect(await drag(100, 100, 110, 200)).toMatchObject({ left: 100, top: 100, width: 48 })
-    editor.setTool('text')
-    expect(await drag(100, 100, 90, 200)).toMatchObject({ left: 52, top: 100, width: 48 })
-    editor.setTool('text')
-    expect(await drag(100, 100, 100, 300)).toMatchObject({ left: 100, top: 100, width: 48 }) // straight down
+    const at = async (x0: number, y0: number, x1: number, y1: number) => {
+      editor.setTool('text')
+      return drag(x0, y0, x1, y1)
+    }
+    const DEFAULT = { width: 240, fontSize: 24 }
+    expect(await at(300, 300, 304, 303)).toMatchObject({ left: 300, top: 300, ...DEFAULT }) // a wobble past the slop
+    expect(await at(100, 100, 110, 300)).toMatchObject({ left: 100, top: 100, ...DEFAULT }) // mostly vertical, down
+    expect(await at(100, 300, 110, 100)).toMatchObject({ left: 100, top: 300, ...DEFAULT }) // mostly vertical, up: still at the press point
+    expect(await at(100, 100, 100, 300)).toMatchObject({ left: 100, top: 100, ...DEFAULT }) // straight down
+    expect(await at(100, 100, 60, 200)).toMatchObject({ left: 100, top: 100, ...DEFAULT }) // narrow, leftward
+    expect(await at(100, 100, 147.9, 120)).toMatchObject({ left: 100, top: 100, ...DEFAULT }) // just under the threshold
+    expect(await at(100, 100, 148, 120)).toMatchObject({ left: 100, top: 100, width: 48 }) // exactly two font sizes: the dragged width
+    expect(await at(100, 100, 52, 80)).toMatchObject({ left: 52, top: 80, width: 48 }) // the same, leftward and upward
   })
 
   it('a drag shorter than the click slop (in screen pixels) is a click: today\'s default box at the press point', async () => {
@@ -123,16 +130,26 @@ describe('dragging out a text box', () => {
     expect(await zoomedIn.drag(10, 10, 10.9, 10.4)).toMatchObject({ width: 120, fontSize: 12 }) // under 4 px on screen: a click
     zoomedIn.editor.setTool('text')
     expect(await zoomedIn.drag(10, 10, 60, 20)).toMatchObject({ left: 10, top: 10, width: 50, fontSize: 12 })
+    zoomedIn.editor.setTool('text')
+    expect(await zoomedIn.drag(10, 10, 33, 60)).toMatchObject({ left: 10, top: 10, width: 120, fontSize: 12 }) // 23 < 24 units wide: the default box
+    zoomedIn.editor.setTool('text')
+    expect(await zoomedIn.drag(10, 10, 34, 60)).toMatchObject({ left: 10, top: 10, width: 24 })
     const zoomedOut = await setup({ viewport: { zoom: 0.25, panX: 0, panY: 0 } })
     zoomedOut.editor.setTool('text')
     expect(await zoomedOut.drag(0, 0, 1000, 400)).toMatchObject({ width: 1000, fontSize: 96 })
     zoomedOut.editor.setTool('text')
-    expect(await zoomedOut.drag(0, 0, 100, 400)).toMatchObject({ width: 192 }) // the minimum, two font sizes
+    expect(await zoomedOut.drag(0, 0, 100, 400)).toMatchObject({ left: 0, top: 0, width: 960 }) // 100 < 192 units wide: the default box
+    zoomedOut.editor.setTool('text')
+    expect(await zoomedOut.drag(0, 0, 192, 400)).toMatchObject({ left: 0, top: 0, width: 192 })
   })
 
-  it('the click path without a press in front of it is unchanged: default box at the release point', async () => {
+  it('a click is the press and its release: the default box at the press point; a release with no press in front of it makes nothing', async () => {
     const { editor, canvas, texts } = await setup()
     editor.setTool('text')
+    canvas.fire('mouse:up', { e: { button: 0, clientX: 40, clientY: 50 }, isClick: true }) // real Fabric always fires the press first
+    await tick()
+    expect(texts()).toHaveLength(0)
+    pressCanvas(canvas, 40, 50)
     canvas.fire('mouse:up', { e: { button: 0, clientX: 40, clientY: 50 }, isClick: true })
     await tick()
     expect(texts()).toHaveLength(1)

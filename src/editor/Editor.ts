@@ -178,7 +178,7 @@ interface Carry {
 
 /** A Frame- or Text-tool press that moves less than this many screen pixels is a click (default-sized frame or text). */
 const DRAFT_CLICK_SLOP = 4
-/** The narrowest text box a drag makes, in font sizes (a narrower drag is widened away from the press point). */
+/** A Text-tool drag narrower than this many font sizes is no usable width: it gives the default box, as a click does. */
 const MIN_TEXT_DRAG_EMS = 2
 const NO_FRAMES: ReadonlySet<string> = new Set()
 
@@ -790,15 +790,6 @@ export class Editor {
         const id = g.id
         queueMicrotask(() => this.settle(id))
       }
-      // A Text-tool click with no draft behind it (Fabric always fires the press first, which
-      // starts a draft, so this is a fallback). Never together with a draft: one text per press.
-      if (this.editable && !this.gesture && this.state.tool === 'text' && !this.state.handActive && !opt.target && opt.isClick) {
-        const p = c.getScenePoint(opt.e)
-        const at = { x: p.x, y: p.y }
-        queueMicrotask(() => {
-          if (this.editable && !this.gesture && this.state.tool === 'text') this.addTextAt(at, 'top-left')
-        })
-      }
       this.queueIdle()
     })
   }
@@ -853,9 +844,10 @@ export class Editor {
 
   /**
    * The Text tool's release: one new, blank text being edited, and back to the Select tool.
-   * Dragged: the box takes the drag's left, top and width (at least `MIN_TEXT_DRAG_EMS` font
-   * sizes, growing away from the press point); its height stays that of its text. A click (a
-   * drag shorter than the slop): today's default box at the press point. An image import that
+   * Dragged (at least the slop long, in screen pixels): the box takes the drag's smaller x and
+   * y and its width, as long as that width is at least `MIN_TEXT_DRAG_EMS` font sizes; its
+   * height stays that of its text. A click, a shorter drag or a narrower one: today's default
+   * box with its top-left at the press point (see `addTextAt`). An image import that
    * finished during the drag is added first, as its own step, because adding it ends any edit
    * and would discard the new text while it is still blank.
    */
@@ -1423,7 +1415,9 @@ export class Editor {
 
   /**
    * `dragTo`: the Text tool's box was dragged out from `at` to here: it takes the drag's
-   * width (with a minimum) and starts at the drag's smaller x and y. Otherwise the default box.
+   * width and starts at the drag's smaller x and y, unless the drag is narrower than
+   * `MIN_TEXT_DRAG_EMS` font sizes, which is no usable width: then, as without `dragTo`, the
+   * default box (ten font sizes wide) at `at`.
    */
   private addTextAt(at: Point, anchor: 'center' | 'top-left', dragTo?: Point) {
     if (!this.editable || this.busy) return
@@ -1432,7 +1426,8 @@ export class Editor {
     this.finishEditing()
     const zoom = this.getViewport().zoom
     const fontSize = Math.round(clamp(24 / zoom, 12, 160))
-    const width = dragTo ? Math.max(Math.abs(dragTo.x - at.x), fontSize * MIN_TEXT_DRAG_EMS) : fontSize * 10
+    const drag = dragTo && Math.abs(dragTo.x - at.x) >= fontSize * MIN_TEXT_DRAG_EMS ? dragTo : undefined
+    const width = drag ? Math.abs(drag.x - at.x) : fontSize * 10
     const rec: TextRecord = {
       id: newId(),
       type: 'text',
@@ -1440,8 +1435,8 @@ export class Editor {
       fontSize,
       width,
       angle: 0,
-      left: dragTo ? (dragTo.x < at.x ? at.x - width : at.x) : anchor === 'center' ? at.x - width / 2 : at.x,
-      top: dragTo ? Math.min(at.y, dragTo.y) : anchor === 'center' ? at.y - fontSize * 0.625 : at.y,
+      left: drag ? Math.min(at.x, drag.x) : anchor === 'center' ? at.x - width / 2 : at.x,
+      top: drag ? Math.min(at.y, drag.y) : anchor === 'center' ? at.y - fontSize * 0.625 : at.y,
     }
     const obj = createObject(rec, () => undefined)
     if (!(obj instanceof Textbox)) return

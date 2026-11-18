@@ -167,6 +167,7 @@ describe('clicks and text', () => {
   it('the text tool places its text after the click has been handled, not inside the canvas callback', async () => {
     const { editor, canvas } = await setup(null)
     editor.setTool('text')
+    canvas.fire('mouse:down', { e: mouse(0, 120, 80) })
     canvas.fire('mouse:up', { e: mouse(0, 120, 80), isClick: true })
     expect(canvas.objects).toHaveLength(0)
     await tick()
