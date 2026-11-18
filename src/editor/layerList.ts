@@ -1,6 +1,6 @@
 import { Textbox } from 'fabric'
 import type { FabricObject } from 'fabric'
-import { frameNameOf, idOf, isFrame, ownerOf, toRecord } from './objects.ts'
+import { frameNameOf, idOf, isFrame, isLocked, ownerOf, toRecord } from './objects.ts'
 
 /** One row of the layer list. */
 export interface LayerItem {
@@ -10,6 +10,8 @@ export interface LayerItem {
   selected: boolean
   /** Content only: the name of the frame that owns it (stored ownership, never position). Null for frames and loose content. */
   frameName: string | null
+  /** Locked: the row's padlock unlocks it, and the row is the only way to select it. */
+  locked: boolean
 }
 
 /** How much of a text the list shows. */
@@ -23,7 +25,7 @@ function textLabel(text: string): string {
 }
 
 const sameItem = (a: LayerItem, b: LayerItem) =>
-  a.id === b.id && a.kind === b.kind && a.label === b.label && a.selected === b.selected && a.frameName === b.frameName
+  a.id === b.id && a.kind === b.kind && a.label === b.label && a.selected === b.selected && a.frameName === b.frameName && a.locked === b.locked
 
 /**
  * The board in stacking order, FRONT-MOST FIRST: all content from front to back, then all
@@ -50,18 +52,18 @@ export function computeLayers(
     const id = idOf(o)
     if (id === undefined) continue
     if (isFrame(o)) {
-      frames.push({ id, kind: 'frame', label: frameNameOf(o) || 'Frame', selected: selected.has(o), frameName: null })
+      frames.push({ id, kind: 'frame', label: frameNameOf(o) || 'Frame', selected: selected.has(o), frameName: null, locked: isLocked(o) })
       continue
     }
     if (o instanceof Textbox && o.text.trim() === '') continue
     const owner = ownerOf(o)
     const frameName = owner !== undefined ? (frameNames.get(owner) ?? null) : null
     if (o instanceof Textbox) {
-      content.push({ id, kind: 'text', label: textLabel(o.text), selected: selected.has(o), frameName })
+      content.push({ id, kind: 'text', label: textLabel(o.text), selected: selected.has(o), frameName, locked: isLocked(o) })
     } else {
       const rec = toRecord(o)
       const name = rec?.type === 'image' ? assetName(rec.assetId)?.trim() : undefined
-      content.push({ id, kind: 'image', label: name || 'Image', selected: selected.has(o), frameName })
+      content.push({ id, kind: 'image', label: name || 'Image', selected: selected.has(o), frameName, locked: isLocked(o) })
     }
   }
   const next = content.concat(frames)

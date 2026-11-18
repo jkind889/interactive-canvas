@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parseDoc, serializeDoc, createEmptyDoc } from '../model/doc.ts'
 import type { FrameRecord, ImageRecord, TextRecord } from '../model/types.ts'
-import { centerOf, createFrame, createObject, frameNameOf, idOf, isFrame, normalizeTextScale, ownerOf, setFrameName, setOwner, toFrameRecord, toRecord } from './objects.ts'
+import { centerOf, createFrame, createObject, frameNameOf, idOf, isFrame, isLocked, normalizeTextScale, ownerOf, setFrameName, setLocked, setOwner, toFrameRecord, toRecord } from './objects.ts'
 
 vi.mock('fabric', () => import('./testing/fakeFabric.ts'))
 
@@ -129,5 +129,62 @@ describe('positive values survive serialization', () => {
   it('ordinary values serialize exactly as before', () => {
     const img = make(image({ scaleX: 0.123456789, scaleY: 0.123456789, left: 1.005, top: 2.004 }))
     expect(toRecord(img)).toMatchObject({ scaleX: 0.12346, scaleY: 0.12346 })
+  })
+})
+
+describe('locking', () => {
+  type Flags = Record<string, unknown>
+  const flags = (o: unknown) => {
+    const f = o as Flags
+    const keys = ['evented', 'selectable', 'hasControls', 'lockMovementX', 'lockMovementY', 'lockScalingX', 'lockScalingY', 'lockRotation', 'editable']
+    return Object.fromEntries(keys.filter((k) => f[k] !== undefined).map((k) => [k, f[k]]))
+  }
+  const LOCKED = { evented: false, selectable: false, hasControls: false, lockMovementX: true, lockMovementY: true, lockScalingX: true, lockScalingY: true, lockRotation: true }
+  const OPEN = { evented: true, selectable: true, hasControls: true, lockMovementX: false, lockMovementY: false, lockScalingX: false, lockScalingY: false }
+
+  it('a locked record creates a locked object (not a target, not selectable, no handles, nothing movable, text not editable), and back', () => {
+    const img = make(image({ locked: true }))
+    expect(isLocked(img)).toBe(true)
+    expect(flags(img)).toEqual(LOCKED)
+    const tb = make(text({ locked: true }))
+    expect(flags(tb)).toEqual({ ...LOCKED, editable: false })
+    const fr = createFrame({ ...frame, locked: true })
+    expect(flags(fr)).toEqual(LOCKED)
+    expect(toRecord(img)).toEqual(image({ locked: true }))
+    expect(toRecord(tb)).toEqual(text({ locked: true }))
+    expect(toFrameRecord(fr)).toEqual({ ...frame, locked: true })
+  })
+
+  it('unlocking restores exactly what creation sets, including a frame’s rotation lock; locking again matches a locked record', () => {
+    const kinds = [(locked?: true) => make(image({ locked })), (locked?: true) => make(text({ locked })), (locked?: true) => createFrame({ ...frame, locked })]
+    for (const build of kinds) {
+      const wasLocked = build(true)
+      setLocked(wasLocked, false)
+      expect(isLocked(wasLocked)).toBe(false)
+      expect(flags(wasLocked)).toEqual(flags(build()))
+      const wasOpen = build()
+      setLocked(wasOpen, true)
+      expect(isLocked(wasOpen)).toBe(true)
+      expect(flags(wasOpen)).toEqual(flags(build(true)))
+    }
+    expect(flags(createFrame(frame))).toEqual({ ...OPEN, lockRotation: true })
+    expect(flags(make(image()))).toEqual({ ...OPEN, lockRotation: false })
+    expect(flags(make(text()))).toEqual({ ...OPEN, lockRotation: false, editable: true })
+  })
+
+  it('an unlocked object has no locked key at all; locking changes nothing else in its record', () => {
+    const img = make(image({ frameId: 'f1' }))
+    expect(toRecord(img)).not.toHaveProperty('locked')
+    expect(toFrameRecord(createFrame(frame))).not.toHaveProperty('locked')
+    setLocked(img, true)
+    expect(toRecord(img)).toEqual(image({ frameId: 'f1', locked: true }))
+    setLocked(img, false)
+    expect(toRecord(img)).toEqual(image({ frameId: 'f1' }))
+    expect(Object.keys(toRecord(img)!)).not.toContain('locked')
+  })
+
+  it('a locked record survives the stored document both ways', () => {
+    const doc = { ...createEmptyDoc(), objects: [toRecord(make(image({ locked: true })))!] }
+    expect(parseDoc(JSON.parse(JSON.stringify(serializeDoc(doc))))?.objects[0]).toEqual(image({ locked: true }))
   })
 })

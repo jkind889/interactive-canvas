@@ -201,6 +201,25 @@ test.describe('the layer list', () => {
     expect(o.errors).toEqual([])
   })
 
+  test('a text’s row follows typing before the edit ends; emptied, the row disappears', async ({ page }) => {
+    const o = await openSeeded(page, [], [{ type: 'text', id: 'note', left: 100, top: 400, angle: 0, text: 'draft', fontSize: 24, width: 200 }])
+    await expect(row(page, 'note')).toHaveText('draft')
+    await page.mouse.dblclick(o.at(130, 412).x, o.at(130, 412).y)
+    await page.keyboard.press('End')
+    await page.keyboard.type(' two')
+    await expect(row(page, 'note')).toHaveText('draft two') // still editing
+    expect(await page.evaluate(() => document.activeElement?.tagName)).toBe('TEXTAREA')
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('Backspace')
+    await expect(row(page, 'note')).toHaveCount(0)
+    await page.keyboard.type('back')
+    await expect(row(page, 'note')).toHaveText('back')
+    await page.keyboard.press('Escape')
+    const stored = await storedWhen(page, (d) => d.objects[0]?.text === 'back')
+    expect(stored.objects).toHaveLength(1)
+    expect(o.errors).toEqual([])
+  })
+
   test('a row click lets go of the font size field: its keys then act on the newly selected object', async ({ page }) => {
     const text = (id: string, left: number) => ({ type: 'text', id, left, top: 400, angle: 0, text: id, fontSize: 24, width: 200 })
     const o = await openSeeded(page, [], [text('alpha', 100), text('beta', 500)])

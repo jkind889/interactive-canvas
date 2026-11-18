@@ -3,7 +3,7 @@ import type { FabricObject, TPointerEvent } from 'fabric'
 import type { Box } from '../model/frames.ts'
 import { drawFrameOverlays, frameOverlay, hitsFrameOverlay } from './frameLayer.ts'
 import type { DrawnFrame } from './frameLayer.ts'
-import { isFrame } from './objects.ts'
+import { isFrame, isLocked } from './objects.ts'
 
 type TargetsInfo = ReturnType<Canvas['searchPossibleTargets']>
 
@@ -103,9 +103,15 @@ export class FrameCanvas extends Canvas {
    * Shift-click inside a multi-selection: Fabric looks among the selected members first,
    * so a frame's label lying over a selected image would toggle the image. A visible
    * label or outline is what the user clicked, so the frame is toggled instead.
+   *
+   * A selection that contains a locked object contains nothing else: Shift-clicking
+   * something while a locked object (selected from the layer list) is selected does not
+   * add to it, and the press is handled as a plain one (it selects what was clicked).
+   * Fabric itself already refuses to add a locked object, which is not `selectable`.
    */
   protected override handleMultiSelection(e: TPointerEvent, target?: FabricObject): boolean {
     const active = this.getActiveObject()
+    if (active && !(active instanceof ActiveSelection) && isLocked(active)) return false
     if (active instanceof ActiveSelection && this.selection && this._isSelectionKeyPressed(e) && !active.getActiveControl()) {
       const frame = this.frameOverlayAt(this.getObjects(), this.getScenePoint(e))
       if (frame && frame.selectable) return super.handleMultiSelection(e, frame)

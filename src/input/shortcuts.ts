@@ -16,6 +16,7 @@ export type ShortcutAction =
   | 'layer-backward'
   | 'layer-front'
   | 'layer-back'
+  | 'toggle-lock'
   | 'escape'
 
 export interface ShortcutContext {
@@ -64,6 +65,7 @@ export function resolveShortcut(e: KeyEventLike, ctx: ShortcutContext): Shortcut
     if (key === 'z') return e.shiftKey ? 'redo' : 'undo'
     if (key === 'y' && !e.shiftKey) return 'redo'
     if (key === 'a' && !e.shiftKey) return 'select-all'
+    if (key === 'l' && e.shiftKey) return 'toggle-lock'
     if (key === ']') return 'layer-front'
     if (key === '[') return 'layer-back'
     return null
@@ -76,8 +78,6 @@ export function resolveShortcut(e: KeyEventLike, ctx: ShortcutContext): Shortcut
     case 'Delete':
     case 'Backspace':
       return 'delete'
-    case 'Escape':
-      return 'escape'
     case ']':
       return 'layer-forward'
     case '[':

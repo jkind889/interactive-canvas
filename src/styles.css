@@ -373,9 +373,15 @@ button:disabled {
   color: var(--danger);
   font-weight: 550;
 }
-.danger-btn:hover {
+.danger-btn:hover:not(:disabled) {
   background: #fdf1f0;
   border-color: #eab8b4;
+}
+.danger-btn:disabled,
+.number-input:disabled,
+.text-input:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 /* ---- right column: inspector on top, layer list anchored at the bottom ---- */
@@ -492,6 +498,44 @@ button:disabled {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.layer-row.is-locked .layer-label {
+  color: var(--muted);
+}
+.layer-row.is-locked.is-selected .layer-label {
+  color: inherit;
+}
+.layer-lock {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-right: -2px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+}
+.layer-lock svg {
+  width: 14px;
+  height: 14px;
+}
+.layer-row:hover .layer-lock,
+.layer-row:focus-within .layer-lock,
+.layer-lock:focus-visible,
+.layer-lock[aria-pressed='true'] {
+  opacity: 1;
+}
+.layer-lock:hover:not(:disabled) {
+  background: var(--surface);
+  color: var(--text);
+}
+.layer-lock:disabled {
+  cursor: default;
 }
 .layer-frame {
   flex: 0 1 auto;

@@ -240,3 +240,72 @@ describe('helpers', () => {
     expect(normalizeFrameName('x'.repeat(500))).toHaveLength(80)
   })
 })
+
+describe('locked: an optional field on both wire versions', () => {
+  it('is read from version 1 and version 2 documents, for objects and frames, only when exactly true', () => {
+    const v1 = parseDoc({ ...wireV1(), objects: [{ ...image, locked: true }, text] })
+    expect(v1?.objects[0]).toEqual({ ...image, locked: true })
+    expect(v1?.objects[1]).not.toHaveProperty('locked')
+    const v2 = parseDoc({
+      version: 2,
+      title: 'Mine',
+      frames: [{ ...frame, locked: true }, { ...frame, id: 'f2', name: 'Back' }],
+      objects: [{ ...image, frameId: 'f1' }, { ...text, locked: true }],
+      viewport: { zoom: 2, panX: 10, panY: -4 },
+    })
+    expect(v2?.frames[0]).toEqual({ ...frame, locked: true })
+    expect(v2?.frames[1]).not.toHaveProperty('locked')
+    expect(v2?.objects[1]).toEqual({ ...text, locked: true })
+    expect(v2?.objects[0]).not.toHaveProperty('locked')
+  })
+
+  it('drops false and garbage values instead of rejecting the board', () => {
+    for (const bad of [false, 'true', 1, null, {}, []]) {
+      const parsed = parseDoc({ ...wireV1(), objects: [{ ...image, locked: bad }, { ...text, locked: bad }] })
+      expect(parsed).not.toBeNull()
+      expect(parsed!.objects[0]).not.toHaveProperty('locked')
+      expect(parsed!.objects[1]).not.toHaveProperty('locked')
+      const framedRaw = wire(framed())
+      ;(framedRaw.frames as Array<Record<string, unknown>>)[0]!.locked = bad
+      expect(parseDoc(framedRaw)!.frames[0]).not.toHaveProperty('locked')
+    }
+  })
+
+  it('a frameless board with a locked object is still written as wire version 1, with the field', () => {
+    const out = wire({ ...good(), objects: [{ ...image, locked: true }, text] })
+    expect(out.version).toBe(1)
+    expect(out).not.toHaveProperty('frames')
+    expect(out.objects).toEqual([{ ...image, locked: true }, text])
+    expect(parseDoc(out)).toEqual({ ...good(), objects: [{ ...image, locked: true }, text] })
+  })
+
+  it('a framed board writes it on frames and objects, and round-trips', () => {
+    const doc: BoardDoc = { ...framed(), frames: [{ ...frame, locked: true }, { ...frame, id: 'f2', name: 'Back' }], objects: [{ ...image, frameId: 'f1', locked: true }, text] }
+    const out = wire(doc)
+    expect(out.version).toBe(2)
+    expect((out.frames as unknown[])[0]).toEqual({ ...frame, locked: true })
+    expect((out.objects as unknown[])[0]).toEqual({ ...image, frameId: 'f1', locked: true })
+    expect(parseDoc(out)).toEqual(doc)
+  })
+
+  it('is never written unless it is true: no locked key, no explicit undefined, no false', () => {
+    const sloppy = {
+      ...framed(),
+      frames: [{ ...frame, locked: undefined }, { ...frame, id: 'f2', name: 'Back', locked: false as unknown as true }],
+      objects: [{ ...image, frameId: 'f1', locked: undefined }, { ...text, locked: false as unknown as true }],
+    } as BoardDoc
+    const v2 = serializeDoc(sloppy)
+    for (const rec of [...(v2 as { frames: object[] }).frames, ...v2.objects]) expect(Object.keys(rec)).not.toContain('locked')
+    const v1 = serializeDoc({ ...sloppy, frames: [] })
+    for (const rec of v1.objects) expect(Object.keys(rec)).not.toContain('locked')
+    expect(JSON.stringify(serializeDoc(framed()))).not.toContain('locked')
+    expect(JSON.stringify(serializeDoc(good()))).not.toContain('locked')
+  })
+
+  it('a lock change is a scene change (so it is an undo step and is saved); absent and undefined are the same', () => {
+    const scene = { frames: [frame], objects: [image, text] as ObjectRecord[] }
+    expect(sceneEqual(scene, { ...scene, objects: [{ ...image, locked: true }, text] })).toBe(false)
+    expect(sceneEqual(scene, { ...scene, frames: [{ ...frame, locked: true }] })).toBe(false)
+    expect(sceneEqual(scene, { ...scene, objects: [{ ...image, locked: undefined }, text] })).toBe(true)
+  })
+})

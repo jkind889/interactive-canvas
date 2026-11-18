@@ -18,6 +18,9 @@ const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'obj
 const isNum = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v)
 const isStr = (v: unknown): v is string => typeof v === 'string'
 
+/** `locked` is kept only when it is exactly `true`; anything else is dropped, not fatal. Both wire versions. */
+const lockOf = (raw: Record<string, unknown>): { locked?: true } => (raw.locked === true ? { locked: true } : {})
+
 /** Allowlist parse: `frameId` is deliberately not read here (see the v2 path in parseDoc). */
 function parseObject(raw: unknown): ObjectRecord | null {
   if (!isRecord(raw)) return null
@@ -26,12 +29,12 @@ function parseObject(raw: unknown): ObjectRecord | null {
   if (type === 'image') {
     const { assetId, scaleX, scaleY } = raw
     if (!isStr(assetId) || !isNum(scaleX) || !isNum(scaleY) || scaleX === 0 || scaleY === 0) return null
-    return { type, id, left, top, angle, assetId, scaleX, scaleY }
+    return { type, id, left, top, angle, assetId, scaleX, scaleY, ...lockOf(raw) }
   }
   if (type === 'text') {
     const { text, fontSize, width } = raw
     if (!isStr(text) || !isNum(fontSize) || !isNum(width) || fontSize <= 0 || width <= 0) return null
-    return { type, id, left, top, angle, text, fontSize, width }
+    return { type, id, left, top, angle, text, fontSize, width, ...lockOf(raw) }
   }
   return null
 }
@@ -42,7 +45,7 @@ function parseFrame(raw: unknown): FrameRecord | null {
   if (!isStr(id) || id === '' || !isStr(name)) return null
   if (!isNum(left) || !isNum(top) || !isNum(width) || !isNum(height) || width <= 0 || height <= 0) return null
   // Like a blank title: a blank name falls back instead of making the board unreadable.
-  return { id, name: name.trim() === '' ? DEFAULT_FRAME_NAME : name, left, top, width, height }
+  return { id, name: name.trim() === '' ? DEFAULT_FRAME_NAME : name, left, top, width, height, ...lockOf(raw) }
 }
 
 /**
@@ -88,10 +91,19 @@ export function parseDoc(raw: unknown): BoardDoc | null {
   return { version: DOC_VERSION, title, frames, objects, viewport }
 }
 
+/** A copy without keys whose value is `undefined`, and with `locked` only when it is `true`. */
+function storable<T extends { locked?: true }>(rec: T): T {
+  const out = { ...rec }
+  for (const k of Object.keys(out) as Array<keyof T>) if (out[k] === undefined) delete out[k]
+  if (out.locked !== true) delete out.locked // never store `locked: false`
+  return out
+}
+
 /**
  * The document as it is written to storage. A board without frames is written in
  * exactly the milestone 1 shape (wire version 1), so only a board that really has a
- * frame needs the newer format.
+ * frame needs the newer format. Optional fields (such as `locked`) are written by both
+ * versions, and only when set: a key whose value is undefined is never stored.
  */
 export function serializeDoc(doc: BoardDoc): StoredDoc {
   if (doc.frames.length === 0) {
@@ -99,7 +111,7 @@ export function serializeDoc(doc: BoardDoc): StoredDoc {
       version: 1,
       title: doc.title,
       objects: doc.objects.map((o) => {
-        const rest = { ...o }
+        const rest = storable(o)
         delete rest.frameId // no frame exists, so there is nothing to own it
         return rest
       }),
@@ -109,12 +121,8 @@ export function serializeDoc(doc: BoardDoc): StoredDoc {
   return {
     version: 2,
     title: doc.title,
-    frames: doc.frames.map((f) => ({ ...f })),
-    objects: doc.objects.map((o) => {
-      const rec = { ...o }
-      if (rec.frameId === undefined) delete rec.frameId // never store an explicit undefined owner
-      return rec
-    }),
+    frames: doc.frames.map((f) => storable(f)),
+    objects: doc.objects.map((o) => storable(o)), // never stores an explicit undefined owner
     viewport: { ...doc.viewport },
   }
 }

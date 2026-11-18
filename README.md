@@ -27,6 +27,7 @@ npm run dev        # http://localhost:5173
 - Move, resize, rotate, multi-select, layer (forward/back/front/back), delete.
 - **Frames**: named rectangles that structure a board without forcing everything into pages (see below).
 - **Layers**: a list of everything on the board in stacking order, so that something completely covered can still be selected (see below).
+- **Locking**: lock a background image, a finished frame or anything else, so that it cannot be grabbed, moved or changed by accident while everything around it stays reachable (see below).
 - Undo / redo for every canvas change. Esc, or switching away from the window, cancels a drag, resize or frame that is still in progress.
 - Autosave to this browser (IndexedDB), including the original image bytes. The header always says what the save state really is, including failures.
 - Fail-closed loading: nothing is editable or saved until the stored board has loaded. If it cannot be fully restored (an image fails to decode, the document is unreadable, or storage is unavailable) the board opens **read-only** with a visible reason, pan/zoom still work, and the stored document and image bytes are never rewritten or deleted.
@@ -52,7 +53,7 @@ Belonging is decided by what *you moved*, and it is stored; it is never guessed 
 - Moving a frame *together with* loose objects leaves them loose; things it already owns stay its own.
 - Deleting a frame keeps its contents on the board.
 
-The panel shows how many items a frame owns. **Select with contents** selects a frame plus everything it owns, so that you can move them, or scale them together from a corner handle.
+The panel shows how many items a frame owns. **Select with contents** selects a frame plus everything it owns that is not locked, so that you can move them, or scale them together from a corner handle.
 
 ### Transforming several things at once
 
@@ -63,12 +64,24 @@ A multi-selection can be moved, scaled proportionally from a corner, and (if it 
 The **Layers** panel at the bottom right lists everything on the board, front-most first: all images and texts from front to back, then all frames from front to back (frames always sit behind content). Its header collapses and expands it.
 
 - **Click a row to select that object**, even one hidden completely under a bigger image. Ctrl/Cmd-click or Shift-click adds a row to the selection or takes it out, so you can build a multi-selection from the list and then move or scale it on the board.
-- **Alt-drag moves a covered object you selected from the list.** Its handles work as usual, but a plain press on its body goes to whatever lies on top of it, as everywhere on the board. Hold Alt while pressing and the press goes to the selected object instead, if it is under the pointer. It is an ordinary drag: one undo step, cancelled by Esc (even with Alt still held), and dragged out of its frame it stops belonging to it. A frame's label or outline still wins over it.
+- **Alt-drag moves a covered object you selected from the list.** Its handles work as usual, but a plain press on its body goes to whatever lies on top of it, as everywhere on the board (inside the box of a multi-selection a press goes to the selection, Alt or not). Hold Alt while pressing and the press goes to the selected object instead, if it is under the pointer. It is an ordinary drag: one undo step, cancelled by Esc (even with Alt still held), and dragged out of its frame it stops belonging to it. A frame's label or outline still wins over it.
 - `[` / `]` and the Layer buttons in the panel on the right reorder the selection; the list shows the new order straight away.
 - A text's row follows what you type. While a text is empty it is not listed, because an empty text is never kept.
 - The list is flat. Something that belongs to a frame is not shown inside it, because stacking order is shared by the whole board and has nothing to do with belonging; its row shows the frame's name instead.
 - Selecting from the list changes nothing on the board, so it is never an undo step and never saves. If you were typing a text, leaving it works as when you click anywhere else: typed text is kept as its own undo step, and a text left empty is discarded. A field you were typing in (font size, frame name, board title) keeps what you typed and lets go, so your next keys act on the board.
-- On a read-only board the list still shows what is there, but its rows do nothing.
+- Each row has a padlock at its right edge (it shows on hover, and always on a locked row). See Locking.
+- On a read-only board the list still shows what is there, but its rows and padlocks do nothing.
+
+## Locking
+
+A locked image, text or frame stays exactly where it is until you unlock it. It is meant for a background image you keep pressing on by accident, or a finished frame you do not want to nudge.
+
+- **Lock** with the padlock on its row in the layer list, the **Lock** button in the panel on the right, or `Ctrl/Cmd+Shift+L`. Locking several selected things locks them all.
+- **It cannot be grabbed on the board.** A press on it goes to whatever lies beneath, as if it were not there: drag a small image out from under a locked background, or drag across the background to marquee what is on it. A marquee, Select all and Shift-click leave it out, a double-click does not edit a locked text, and a locked frame cannot be grabbed by its label or outline. With the Text tool, a click on a locked image places a new text there.
+- **Unlock** with the padlock on its row (it stays visible on a locked row), or select the row and press **Unlock** (or `Ctrl/Cmd+Shift+L`). Clicking a padlock never selects the row.
+- **The layer list is the only way to select it**, and then only on its own: a selection that contains a locked item contains nothing else. Ctrl/Cmd- or Shift-clicking a locked row selects just it, and Ctrl/Cmd- or Shift-clicking another row then selects just that one. While it is selected it shows its outline but no handles, and nothing changes it: it cannot be moved, resized or deleted, it keeps its place in the stacking order, and its font size or frame name cannot be changed.
+- **It still belongs to its frame.** Moving the frame carries a locked image with it. "Select with contents" leaves locked things out, so they follow a move but are not scaled with the frame; like anything else, a locked item is no longer the frame's once the frame is resized so that it no longer contains it. Deleting a frame leaves its locked things on the board. Things can still be moved into or out of a locked frame, and its unlocked contents can be edited as usual.
+- Locking and unlocking are undo steps and are saved, like any other change. They never move anything or change what belongs to which frame.
 
 ## Storage, tabs and older builds
 
@@ -88,6 +101,11 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - A new text box is wider than what you type into it (ten times its font size), and belonging goes by the centre of that box. A text started in the right part of a frame can therefore end up not belonging to it, and one started just left of a frame can end up belonging to it; drag the text, or narrow it with a side handle, to settle it. Whether a new text should instead belong to the frame that was clicked in is an open design question.
 - Touch input is not supported.
 - The layer list cannot be stepped through with the arrow keys (Tab and Enter work), and it is not laid out for windows shorter than about 600 px.
+- Locks are stored as an extra field that the previous build (milestone 1) does not know. It can still open a board without frames that has a lock, but it ignores the lock, and when it saves that board the lock is gone.
+- On the board itself nothing shows that something is locked, apart from the plain cursor over it and the fact that it does not respond; the padlock in the layer list does show it.
+- A locked item selected from the list is let go as soon as you press on it on the board, because the press goes to whatever lies beneath it (or starts a marquee).
+- "Select with contents" stays available for a frame that owns only locked things; it then selects the frame alone.
+- Alt+double-click on a covered text that you selected from the list starts editing it while it is still hidden under whatever covers it, so typing changes text you cannot see. Whether that double-click should be ignored, or bring the text into view, is an open design question.
 
 ## Testing
 
@@ -98,8 +116,8 @@ npm run test:e2e:install   # once: downloads Playwright's bundled Chromium
 npm run test:e2e           # starts its own dev server on :5199 and runs e2e/*.spec.ts
 ```
 
-- **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, and the `Editor` state machines (hydration, gestures, frames) on a small fake of Fabric, since jsdom has no canvas.
-- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `layers.spec.ts` (selecting covered objects from the layer list and Alt-dragging them, reordering, multi-selections built from the list, leaving a text edit, the panel's place on screen) and `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
+- **Unit tests** (`src/**/*.test.ts`, Vitest) cover the pure model (documents, ownership rules, scale limits, hit geometry), history, persistence (revision tokens, the database upgrade, asset presence, with `fake-indexeddb`), keyboard handling, and the `Editor` state machines (hydration, gestures, frames, layers, locking) on a small fake of Fabric, since jsdom has no canvas.
+- **e2e tests** (`e2e/`, Playwright) run the real app with real Fabric and real IndexedDB in a real browser: `hydration.spec.ts` (nothing is editable or saved before the board has loaded; a board that cannot be restored is read-only and untouched), `gestures.spec.ts` (what a save sees during a drag, cancelling, mouse buttons, the single scale factor), `frames.spec.ts` (drawing, hit testing, ownership, carrying, resizing), `layers.spec.ts` (selecting covered objects from the layer list and Alt-dragging them, reordering, multi-selections built from the list, leaving a text edit, the panel's place on screen), `locking.spec.ts` (presses, marquees and Shift-click passing through locked things, a locked member travelling with its frame, the three ways to lock, undo, save and reload) and `storage.spec.ts` (opening a milestone 1 board, the upgrade, two tabs). Fixtures are generated in code, including boards written by a frozen copy of the previous build's storage code; each test gets an isolated browser context, so it never touches your own profile or data.
 - Use a browser already on your machine instead of the bundled one with `PW_CHANNEL=msedge` or `PW_CHANNEL=chrome`; change the port with `E2E_PORT`.
 - Failure traces and screenshots go to `test-results/` (git-ignored).
 
@@ -117,10 +135,11 @@ Shortcuts never fire while you are typing in a field or editing text. While a dr
 | `Ctrl/Cmd+A`                | Select all                     |
 | `[` / `]`                   | Send backward / bring forward (frames stay behind content) |
 | `Ctrl/Cmd+[` / `]`          | Send to back / bring to front  |
+| `Ctrl/Cmd+Shift+L`          | Lock the selection; unlock a locked one |
 | `+` / `-` / `0` / `Shift+1` | Zoom in / out / 100% / fit     |
 | `Esc`                       | Cancel what is in progress; otherwise leave the tool, or deselect |
 
-Only the primary mouse button edits. The middle button pans. Holding Alt while pressing acts on the selected object even when something lies on top of it (see Layers); without Alt a press goes to the front-most object, and a frame's label or outline wins either way.
+Only the primary mouse button edits. The middle button pans. Holding Alt while pressing acts on the selected object even when something lies on top of it (see Layers); without Alt a press goes to the front-most object (inside the box of a multi-selection, to the selection), and a frame's label or outline wins either way. A locked object is never what a press goes to.
 
 ## Architecture
 

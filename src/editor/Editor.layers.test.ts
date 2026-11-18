@@ -120,11 +120,11 @@ describe('the layer list', () => {
     await init
     const b = helpers(made)
     expect(b.layers()).toEqual<LayerItem[]>([
-      { id: 'i2', kind: 'image', label: 'Image', selected: false, frameName: 'Frame B' },
-      { id: 't1', kind: 'text', label: 't1', selected: false, frameName: null },
-      { id: 'i1', kind: 'image', label: 'cover.png', selected: false, frameName: 'Frame A' },
-      { id: 'B', kind: 'frame', label: 'Frame B', selected: false, frameName: null },
-      { id: 'A', kind: 'frame', label: 'Frame A', selected: false, frameName: null },
+      { id: 'i2', kind: 'image', label: 'Image', selected: false, frameName: 'Frame B', locked: false },
+      { id: 't1', kind: 'text', label: 't1', selected: false, frameName: null, locked: false },
+      { id: 'i1', kind: 'image', label: 'cover.png', selected: false, frameName: 'Frame A', locked: false },
+      { id: 'B', kind: 'frame', label: 'Frame B', selected: false, frameName: null, locked: false },
+      { id: 'A', kind: 'frame', label: 'Frame A', selected: false, frameName: null, locked: false },
     ])
   })
 

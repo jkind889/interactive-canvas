@@ -50,10 +50,12 @@ import {
   hasResidualScale,
   idOf,
   isFrame,
+  isLocked,
   newId,
   normalizeTextScale,
   ownerOf,
   setFrameName,
+  setLocked,
   setOwner,
   toFrameRecord,
   toRecord,
@@ -74,6 +76,12 @@ export interface SelectionInfo {
    * "what sits inside": an object the frame was moved over or drawn round is not owned.
    */
   memberCount: number | null
+  /**
+   * The selection is one locked object or frame (selected from the layer list). A selection
+   * that contains a locked item contains nothing else. Nothing edits it: every `layer` flag
+   * is false, and delete, font size, rename and "Select with contents" do nothing.
+   */
+  locked: boolean
   layer: Record<LayerOp, boolean>
 }
 
@@ -210,7 +218,9 @@ export class Editor {
       altActionKey: null,
       // A press with Alt held goes to the selected object when it is under the pointer, even if
       // something lies on top of it (a covered object selected from the layer list). Without
-      // Alt a press goes to the front-most object. Frames are still hit only by label or outline.
+      // Alt a press goes to the front-most object (inside a multi-selection's box, to the
+      // selection). Frames are still hit only by label or outline, and a locked object is
+      // never the target of a press.
       altSelectionKey: 'altKey',
       selectionColor: 'rgba(108, 123, 242, 0.08)',
       selectionBorderColor: ACCENT,
@@ -416,7 +426,14 @@ export class Editor {
     this.canvas.requestRenderAll()
   }
 
+  /**
+   * Selects exactly these objects. A selection that contains a locked item contains nothing
+   * else: locked items are left out of a multi-selection (a single locked item stays
+   * selected). Every selection the editor forms goes through here, including the one
+   * restored by id after undo and redo.
+   */
   private selectByIds(objs: FabricObject[]) {
+    if (objs.length > 1) objs = objs.filter((o) => !isLocked(o))
     if (objs.length === 0) return
     if (objs.length === 1) this.canvas.setActiveObject(objs[0] as FabricObject)
     else this.canvas.setActiveObject(new ActiveSelection(objs, { canvas: this.canvas }))
@@ -463,17 +480,19 @@ export class Editor {
     const single = objs.length === 1 ? first : undefined
     const frame = single && isFrame(single) ? single : undefined
     const frameId = frame ? idOf(frame) : undefined
+    const locked = single !== undefined && isLocked(single)
     return {
       kind: objs.length > 1 ? 'multiple' : frame ? 'frame' : single instanceof Textbox ? 'text' : 'image',
       count: objs.length,
       fontSize: single instanceof Textbox ? Math.max(MIN_SELECTION_FONT, Math.round(single.fontSize * 10) / 10) : null,
       frameName: frame ? (frameNameOf(frame) ?? '') : null,
       memberCount: frame ? this.canvas.getObjects().filter((o) => ownerOf(o) === frameId).length : null,
+      locked,
       layer: {
-        front: canReorderLayered(order, ids, 'front'),
-        forward: canReorderLayered(order, ids, 'forward'),
-        backward: canReorderLayered(order, ids, 'backward'),
-        back: canReorderLayered(order, ids, 'back'),
+        front: !locked && canReorderLayered(order, ids, 'front'),
+        forward: !locked && canReorderLayered(order, ids, 'forward'),
+        backward: !locked && canReorderLayered(order, ids, 'backward'),
+        back: !locked && canReorderLayered(order, ids, 'back'),
       },
     }
   }
@@ -517,6 +536,19 @@ export class Editor {
       // its turned box, with rotation now locked. Re-form it upright; nothing on the board
       // moves, the members keep their own angles. After Fabric's own handling has returned.
       if (active instanceof ActiveSelection && active.angle !== 0 && active.getObjects().some(isFrame)) {
+        queueMicrotask(() => {
+          if (this.disposed || this.gesture || c.getActiveObject() !== active || c._currentTransform) return
+          const members = active.getObjects().slice()
+          c.discardActiveObject()
+          this.selectByIds(members)
+          c.requestRenderAll()
+        })
+      }
+      // A selection that contains a locked item contains nothing else. Fabric's own paths never
+      // add one (a locked item is not selectable, and FrameCanvas refuses Shift-click on a
+      // locked selection) and the editor's go through selectByIds, so this only guards against
+      // a path missed: such a selection is formed again without its locked members.
+      if (active instanceof ActiveSelection && active.getObjects().some(isLocked)) {
         queueMicrotask(() => {
           if (this.disposed || this.gesture || c.getActiveObject() !== active || c._currentTransform) return
           const members = active.getObjects().slice()
@@ -1172,6 +1204,8 @@ export class Editor {
         return this.arrange('front')
       case 'layer-back':
         return this.arrange('back')
+      case 'toggle-lock':
+        return this.toggleSelectionLock()
       case 'escape':
         if (this.busy) return
         if (this.state.tool !== 'select') this.setTool('select')
@@ -1371,7 +1405,7 @@ export class Editor {
   renameFrame(raw: string): string | null {
     if (!this.editable || this.busy) return null
     const active = this.canvas.getActiveObject()
-    if (!active || active instanceof ActiveSelection || !isFrame(active)) return null
+    if (!active || active instanceof ActiveSelection || !isFrame(active) || isLocked(active)) return null
     const name = normalizeFrameName(raw)
     if (name === frameNameOf(active)) return name
     setFrameName(active, name)
@@ -1381,17 +1415,19 @@ export class Editor {
   }
 
   /**
-   * Replaces the selection by the selected frames plus everything they own, so that
-   * frame and contents can be moved or scaled together as one multi-selection. Changes
-   * nothing on the board and records no history.
+   * Replaces the selection by the selected frames plus the unlocked things they own, so
+   * that frame and contents can be moved or scaled together as one multi-selection. A
+   * locked member is left out: it follows a move as an unselected member, and a scale
+   * leaves it where it is. Nothing for a locked frame. Changes nothing on the board and
+   * records no history.
    */
   selectFrameContents() {
-    if (!this.editable || this.busy) return
+    if (!this.editable || this.busy || this.selectionLocked()) return
     const frames = new Set<string>()
     for (const o of this.canvas.getActiveObjects()) if (isFrame(o)) frames.add(idOf(o) ?? '')
     if (frames.size === 0) return
     this.finishEditing()
-    const objs = this.canvas.getObjects().filter((o) => frames.has(idOf(o) ?? '') || frames.has(ownerOf(o) ?? '\u0000'))
+    const objs = this.canvas.getObjects().filter((o) => !isLocked(o) && (frames.has(idOf(o) ?? '') || frames.has(ownerOf(o) ?? '\u0000')))
     this.canvas.discardActiveObject()
     this.selectByIds(objs)
     this.canvas.requestRenderAll()
@@ -1412,8 +1448,12 @@ export class Editor {
     if (!target) return
     this.finishEditing() // commits typed text as its own step; a blank text is discarded
     if (this.state.tool === 'text' || this.state.tool === 'frame') this.switchTool('select')
-    const current = this.canvas.getActiveObjects().filter(listed)
-    const wanted = new Set(opts.toggle ? (current.includes(target) ? current.filter((o) => o !== target) : [...current, target]) : [target])
+    // A selection that contains a locked item contains nothing else: a locked row is always
+    // selected alone (a toggle click acts as a plain one), and toggling an unlocked row while
+    // a locked item is selected replaces the selection.
+    const toggle = opts.toggle === true && !isLocked(target)
+    const current = this.canvas.getActiveObjects().filter((o) => listed(o) && !isLocked(o))
+    const wanted = new Set(toggle ? (current.includes(target) ? current.filter((o) => o !== target) : [...current, target]) : [target])
     const next = this.canvas.getObjects().filter((o) => wanted.has(o)) // members in canvas z-order
     const active = this.canvas.getActiveObject()
     if (!(next.length === 1 && active === next[0])) {
@@ -1426,7 +1466,7 @@ export class Editor {
   }
 
   deleteSelection() {
-    if (!this.editable || this.busy) return
+    if (!this.editable || this.busy || this.selectionLocked()) return
     this.finishEditing()
     const objs = this.canvas.getActiveObjects()
     if (objs.length === 0) return
@@ -1446,9 +1486,10 @@ export class Editor {
     this.commit()
   }
 
+  /** Selects everything that is not locked. */
   selectAll() {
     if (!this.editable || this.busy) return
-    const objs = this.canvas.getObjects()
+    const objs = this.canvas.getObjects().filter((o) => !isLocked(o))
     this.finishEditing()
     this.canvas.discardActiveObject()
     this.selectByIds(objs)
@@ -1458,7 +1499,7 @@ export class Editor {
   setFontSize(size: number) {
     if (!this.editable || this.busy) return
     const active = this.canvas.getActiveObject()
-    if (!(active instanceof Textbox) || !Number.isFinite(size)) return
+    if (!(active instanceof Textbox) || isLocked(active) || !Number.isFinite(size)) return
     active.set({ fontSize: clamp(size, MIN_FONT_SIZE, MAX_FONT_SIZE) })
     active.setCoords()
     this.canvas.requestRenderAll()
@@ -1469,7 +1510,7 @@ export class Editor {
   }
 
   arrange(op: LayerOp) {
-    if (!this.editable || this.busy) return
+    if (!this.editable || this.busy || this.selectionLocked()) return
     this.finishEditing()
     const objs = this.canvas.getActiveObjects()
     if (objs.length === 0) return
@@ -1483,6 +1524,66 @@ export class Editor {
       if (o) this.canvas.moveObjectTo(o, index)
     })
     this.selectByIds(objs.filter((o) => this.canvas.getObjects().includes(o)))
+    this.canvas.requestRenderAll()
+    this.commit()
+  }
+
+  /** The selection holds a locked item (and so, by the selection rule, only that item). */
+  private selectionLocked(): boolean {
+    return this.canvas.getActiveObjects().some(isLocked)
+  }
+
+  /**
+   * Locks (or unlocks) every selected item. Leaving a text edit comes first and commits typed
+   * text as its own step (a blank text is discarded, and then there may be nothing left to
+   * lock). One history step when something changes; none, and no save, when nothing does.
+   * A single item stays selected (its handles go or come back); a locked multi-selection is
+   * cleared, because a selection that contains a locked item contains nothing else. Never
+   * changes position, size, stacking or ownership.
+   */
+  setSelectionLocked(locked: boolean) {
+    if (!this.editable || this.busy) return
+    this.finishEditing()
+    const objs = this.canvas.getActiveObjects().filter((o) => !(o instanceof Textbox && o.text.trim() === ''))
+    const changing = objs.filter((o) => isLocked(o) !== locked)
+    if (changing.length === 0) return
+    for (const o of changing) setLocked(o, locked)
+    if (locked && this.canvas.getActiveObject() instanceof ActiveSelection) {
+      this.canvas.discardActiveObject()
+      if (objs.length === 1) this.selectByIds(objs)
+    }
+    this.canvas.requestRenderAll()
+    this.commit()
+  }
+
+  /** `Ctrl/Cmd+Shift+L`: a single locked selection is unlocked; any other selection is locked. */
+  private toggleSelectionLock() {
+    const objs = this.canvas.getActiveObjects()
+    if (objs.length === 0) return
+    this.setSelectionLocked(!(objs.length === 1 && isLocked(objs[0] as FabricObject)))
+  }
+
+  /**
+   * The padlock on a layer row: locks or unlocks that one item, whether or not it is selected.
+   * Locked while part of a multi-selection, it leaves the selection and the rest stays
+   * selected; as the single selection it stays selected. Unlocking never changes the
+   * selection. Ends a text edit first, like every command. One history step.
+   */
+  toggleLayerLock(id: string) {
+    if (!this.editable || this.busy) return
+    // A blank text is not part of the scene and is not listed, so it has no padlock.
+    const listed = (o: FabricObject) => !(o instanceof Textbox && o.text.trim() === '')
+    const target = this.canvas.getObjects().find((o) => idOf(o) === id && listed(o))
+    if (!target) return
+    this.finishEditing() // commits typed text as its own step
+    const locked = !isLocked(target)
+    setLocked(target, locked)
+    const active = this.canvas.getActiveObject()
+    if (locked && active instanceof ActiveSelection && active.getObjects().includes(target)) {
+      const rest = active.getObjects().filter((o) => o !== target && listed(o))
+      this.canvas.discardActiveObject()
+      this.selectByIds(rest)
+    }
     this.canvas.requestRenderAll()
     this.commit()
   }

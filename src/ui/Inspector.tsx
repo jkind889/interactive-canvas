@@ -3,10 +3,11 @@ import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { Editor, SelectionInfo } from '../editor/Editor.ts'
 import { MAX_FONT_SIZE, MIN_FONT_SIZE } from '../model/doc.ts'
 import { IconButton } from './IconButton.tsx'
-import { BackwardIcon, ForwardIcon, SelectContentsIcon, ToBackIcon, ToFrontIcon, TrashIcon } from './icons.tsx'
+import { BackwardIcon, ForwardIcon, LockIcon, SelectContentsIcon, ToBackIcon, ToFrontIcon, TrashIcon, UnlockIcon } from './icons.tsx'
 
-const heading = (s: SelectionInfo) =>
+const kindHeading = (s: SelectionInfo) =>
   s.kind === 'multiple' ? `${s.count} objects` : s.kind === 'text' ? 'Text' : s.kind === 'frame' ? 'Frame' : 'Image'
+const heading = (s: SelectionInfo) => (s.locked ? `${kindHeading(s)} · Locked` : kindHeading(s))
 
 const itemCount = (n: number) => (n === 0 ? 'Nothing yet' : n === 1 ? '1 item' : `${n} items`)
 
@@ -65,6 +66,7 @@ function FramePanel({ editor, selection }: { editor: Editor; selection: Selectio
           ref={nameInput}
           className="text-input"
           defaultValue={name}
+          disabled={selection.locked}
           maxLength={80}
           spellCheck={false}
           onBlur={(e) => commit(e.currentTarget)}
@@ -80,7 +82,7 @@ function FramePanel({ editor, selection }: { editor: Editor; selection: Selectio
       <button
         type="button"
         className="secondary-btn inspector-btn"
-        disabled={members === 0}
+        disabled={members === 0 || selection.locked}
         title="Select this frame together with everything it owns, to move or scale them as one"
         onClick={() => editor.selectFrameContents()}
       >
@@ -114,6 +116,7 @@ export function Inspector({ editor, selection }: { editor: Editor; selection: Se
             min={MIN_FONT_SIZE}
             max={MAX_FONT_SIZE}
             step={1}
+            disabled={selection.locked}
             value={Math.round(selection.fontSize)}
             onChange={(e) => {
               const n = e.currentTarget.valueAsNumber
@@ -141,11 +144,33 @@ export function Inspector({ editor, selection }: { editor: Editor; selection: Se
         </div>
       </div>
 
-      <button type="button" className="danger-btn" aria-keyshortcuts="Delete Backspace" onClick={() => editor.deleteSelection()}>
+      <button
+        type="button"
+        className="secondary-btn inspector-btn"
+        aria-keyshortcuts="Control+Shift+L Meta+Shift+L"
+        title={selection.locked ? 'Unlock, so that it can be moved and changed again (Ctrl+Shift+L)' : 'Lock against moving and changing by accident (Ctrl+Shift+L)'}
+        onClick={() => editor.setSelectionLocked(!selection.locked)}
+      >
+        {selection.locked ? <UnlockIcon /> : <LockIcon />}
+        <span>{selection.locked ? 'Unlock' : 'Lock'}</span>
+      </button>
+      {selection.locked && (
+        <p className="inspector-note" data-testid="locked-note">
+          Locked: it cannot be moved or changed. Unlock it here or with its padlock in the layer list.
+        </p>
+      )}
+
+      <button
+        type="button"
+        className="danger-btn"
+        aria-keyshortcuts="Delete Backspace"
+        disabled={selection.locked}
+        onClick={() => editor.deleteSelection()}
+      >
         <TrashIcon />
         <span>{isFrame ? 'Delete frame' : 'Delete'}</span>
       </button>
-      {isFrame && <p className="inspector-note">Deleting a frame keeps its contents on the board.</p>}
+      {isFrame && !selection.locked && <p className="inspector-note">Deleting a frame keeps its contents on the board.</p>}
     </aside>
   )
 }

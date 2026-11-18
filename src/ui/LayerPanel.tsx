@@ -1,7 +1,7 @@
 import { memo, useId } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { Editor, LayerItem } from '../editor/Editor.ts'
-import { ChevronIcon, FrameIcon, ImageIcon, TextIcon } from './icons.tsx'
+import { ChevronIcon, FrameIcon, ImageIcon, LockIcon, TextIcon, UnlockIcon } from './icons.tsx'
 
 const KindIcon = ({ kind }: { kind: LayerItem['kind'] }) => (kind === 'frame' ? <FrameIcon /> : kind === 'text' ? <TextIcon /> : <ImageIcon />)
 
@@ -22,6 +22,8 @@ function focusedChromeField(): HTMLElement | null {
  * Everything on the board in stacking order, front-most first, with frames at the bottom
  * (they always sit behind content). Clicking a row selects that object, even one that is
  * completely covered; Ctrl/Cmd- or Shift-click adds it to or removes it from the selection.
+ * Each row's padlock locks or unlocks its item without selecting it; a locked item can be
+ * selected only here, and only on its own.
  */
 export const LayerPanel = memo(function LayerPanel({
   editor,
@@ -81,7 +83,8 @@ export const LayerPanel = memo(function LayerPanel({
               aria-disabled={readOnly || undefined}
               data-layer-id={item.id}
               data-layer-kind={item.kind}
-              className={`layer-row${item.selected ? ' is-selected' : ''}`}
+              data-layer-locked={item.locked || undefined}
+              className={`layer-row${item.selected ? ' is-selected' : ''}${item.locked ? ' is-locked' : ''}`}
               tabIndex={readOnly ? undefined : 0}
               title={item.frameName ? `${item.label} (in ${item.frameName})` : item.label}
               onMouseDown={(e) => {
@@ -102,6 +105,33 @@ export const LayerPanel = memo(function LayerPanel({
               </span>
               <span className="layer-label">{item.label}</span>
               {item.frameName !== null && <span className="layer-frame">{item.frameName}</span>}
+              <button
+                type="button"
+                className="layer-lock"
+                data-testid="layer-lock"
+                aria-label={item.locked ? 'Unlock' : 'Lock'}
+                aria-pressed={item.locked}
+                title={`${item.locked ? 'Unlock' : 'Lock'} ${item.label}`}
+                disabled={readOnly}
+                onMouseDown={(e) => {
+                  // As for the row: let a focused field go (its blur commits it), but do not take
+                  // focus, so that Space and the letter shortcuts keep acting on the board.
+                  if (!readOnly && e.button === 0) focusedChromeField()?.blur()
+                  e.preventDefault()
+                  e.stopPropagation()
+                }}
+                onClick={(e) => {
+                  e.stopPropagation() // locking is not selecting: the row is left alone
+                  if (readOnly || e.button !== 0) return
+                  editor.toggleLayerLock(item.id)
+                }}
+                onKeyDown={(e) => {
+                  // Enter and Space press this button; they must not reach the row, which would select it.
+                  if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
+                }}
+              >
+                {item.locked ? <LockIcon /> : <UnlockIcon />}
+              </button>
             </li>
           ))}
         </ul>

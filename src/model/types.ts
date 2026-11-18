@@ -15,6 +15,11 @@ export interface RecordBase {
    * an owner need not contain the object, and an object inside a frame need not be owned by it.
    */
   frameId?: string
+  /**
+   * Locked: it cannot be grabbed, selected on the canvas or changed until it is unlocked
+   * (from the layer list or the inspector). Only ever `true`; absent means unlocked.
+   */
+  locked?: true
 }
 
 export interface ImageRecord extends RecordBase {
@@ -43,6 +48,8 @@ export interface FrameRecord {
   top: number
   width: number
   height: number
+  /** As on content: only ever `true`; absent means unlocked. */
+  locked?: true
 }
 
 export interface Viewport {

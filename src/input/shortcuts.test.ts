@@ -149,3 +149,20 @@ describe('isPanHoldKey', () => {
     expect(isPanHoldKey(key('a'), idle)).toBe(false)
   })
 })
+
+describe('resolveShortcut: lock', () => {
+  it('Ctrl/Cmd+Shift+L toggles the lock; L alone, Ctrl+L and Ctrl+Alt+Shift+L do not', () => {
+    expect(resolveShortcut(key('L', { ctrlKey: true, shiftKey: true }), idle)).toBe('toggle-lock')
+    expect(resolveShortcut(key('L', { metaKey: true, shiftKey: true }), idle)).toBe('toggle-lock')
+    expect(resolveShortcut(key('l', { ctrlKey: true, shiftKey: true }), idle)).toBe('toggle-lock') // Caps Lock
+    expect(resolveShortcut(key('l', { ctrlKey: true }), idle)).toBeNull() // the browser's address bar stays the browser's
+    expect(resolveShortcut(key('L', { shiftKey: true }), idle)).toBeNull()
+    expect(resolveShortcut(key('l'), idle)).toBeNull()
+    expect(resolveShortcut(key('L', { ctrlKey: true, shiftKey: true, altKey: true }), idle)).toBeNull()
+  })
+
+  it('never fires while typing in a field or editing text', () => {
+    expect(resolveShortcut(key('L', { ctrlKey: true, shiftKey: true }), { editingText: true })).toBeNull()
+    expect(resolveShortcut(key('L', { ctrlKey: true, shiftKey: true, target: el('input') }), idle)).toBeNull()
+  })
+})

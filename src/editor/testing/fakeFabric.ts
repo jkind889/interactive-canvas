@@ -100,6 +100,8 @@ export class FakeObject {
 export class Textbox extends FakeObject {
   text: string
   fontSize = 24
+  /** Like Fabric: a text that is not editable never enters editing. */
+  editable = true
   constructor(text: string, opts: Record<string, unknown> = {}) {
     super(opts)
     Object.assign(this, opts) // field initializers above ran after super(): apply the options again
@@ -108,7 +110,7 @@ export class Textbox extends FakeObject {
   }
   private textBeforeEdit = ''
   enterEditing() {
-    if (this.isEditing) return
+    if (this.isEditing || !this.editable) return
     this.isEditing = true
     this.textBeforeEdit = this.text
     this.canvas?.fire('text:editing:entered', { target: this })

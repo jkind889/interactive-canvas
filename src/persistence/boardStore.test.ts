@@ -664,3 +664,30 @@ describe('asset presence', () => {
     expect(Object.keys(before.assets).sort()).toEqual(['a1', 'a2'])
   })
 })
+
+describe('locked items', () => {
+  const lockedFirst = (doc: BoardDoc): BoardDoc => ({ ...doc, objects: doc.objects.map((o, i) => (i === 0 ? { ...o, locked: true as const } : o)) })
+
+  it('a frameless board with a locked object stays wire version 1 in a version 1 database, and round-trips the lock', async () => {
+    const { factory, store } = newStore()
+    await store.save(lockedFirst(docWith('a1')), ABSENT, having(asset('a1', 1)))
+    const raw = await readRaw(factory)
+    expect(raw.version).toBe(1)
+    expect(raw.row!.doc.version).toBe(1)
+    const objects = raw.row!.doc.objects as Array<Record<string, unknown>>
+    expect(objects[0]!.locked).toBe(true)
+    expect(Object.keys(objects[1]!)).not.toContain('locked')
+    expect((await store.load())?.doc).toEqual(lockedFirst(docWith('a1')))
+  })
+
+  it('a framed board stores locks on a frame and on content without any further upgrade', async () => {
+    const { factory, store } = newStore()
+    const framedDoc = withFrame(docWith('a1'))
+    const doc: BoardDoc = { ...lockedFirst(framedDoc), frames: framedDoc.frames.map((f) => ({ ...f, locked: true as const })) }
+    await store.save(doc, ABSENT, having(asset('a1', 1)))
+    const raw = await readRaw(factory)
+    expect(raw.version).toBe(2)
+    expect((raw.row!.doc.frames as Array<Record<string, unknown>>)[0]!.locked).toBe(true)
+    expect((await store.load())?.doc).toEqual(doc)
+  })
+})

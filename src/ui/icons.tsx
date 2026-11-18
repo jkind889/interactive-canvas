@@ -118,3 +118,15 @@ export const CloseIcon = () => (
     <path d="M6 6l12 12M18 6L6 18" />
   </Svg>
 )
+export const LockIcon = () => (
+  <Svg>
+    <rect x="5.5" y="10.5" width="13" height="9.5" rx="2" />
+    <path d="M8.5 10.5V7.5a3.5 3.5 0 017 0v3" />
+  </Svg>
+)
+export const UnlockIcon = () => (
+  <Svg>
+    <rect x="5.5" y="10.5" width="13" height="9.5" rx="2" />
+    <path d="M8.5 10.5V7.5a3.5 3.5 0 016.8-1.2" />
+  </Svg>
+)

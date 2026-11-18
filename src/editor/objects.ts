@@ -17,6 +17,8 @@ interface Meta {
   frameId?: string
   /** Frames only. */
   name?: string
+  /** Locked (content and frames). Absent means unlocked. */
+  locked?: true
 }
 
 /** Fabric objects are plain; our identity lives beside them, not on them. */
@@ -40,6 +42,41 @@ export function setFrameName(obj: FabricObject, name: string) {
   if (m?.kind === 'frame') m.name = name
 }
 
+export const isLocked = (obj: FabricObject): boolean => meta.get(obj)?.locked === true
+
+/**
+ * The Fabric flags of a locked or an unlocked object of the given kind: the only place
+ * they are decided, used when an object is created and when it is locked or unlocked, so
+ * that unlocking restores exactly what creation set (a frame keeps `lockRotation`).
+ *
+ * A locked object is not a target (`evented`: presses, hovering, Alt-presses and
+ * double-clicks fall through to what is beneath), is not taken by a marquee or Shift-click
+ * (`selectable`), shows no handles, and cannot be moved, scaled, rotated or text-edited.
+ */
+function applyLockFlags(obj: FabricObject, kind: Meta['kind'], locked: boolean) {
+  obj.set({
+    evented: !locked,
+    selectable: !locked,
+    hasControls: !locked,
+    lockMovementX: locked,
+    lockMovementY: locked,
+    lockScalingX: locked,
+    lockScalingY: locked,
+    lockRotation: locked || kind === 'frame',
+  })
+  if (obj instanceof Textbox) obj.set({ editable: !locked })
+}
+
+/** Locks or unlocks an object or frame (identity and flags). Changes nothing else: not its place, size, order or owner. */
+export function setLocked(obj: FabricObject, locked: boolean) {
+  const m = meta.get(obj)
+  if (!m) return
+  if (locked) m.locked = true
+  else delete m.locked
+  applyLockFlags(obj, m.kind, locked)
+  obj.setCoords()
+}
+
 export { newId } from '../model/id.ts'
 
 const SELECTION_STYLE = {
@@ -59,6 +96,9 @@ const SELECTION_STYLE = {
   strokeWidth: 0,
 } as const
 
+/** `{ locked: true }` when set, else nothing: never an explicit `false` or `undefined`. */
+const lockMeta = (rec: { locked?: true }): { locked?: true } => (rec.locked === true ? { locked: true } : {})
+
 export function createObject(rec: ObjectRecord, getImage: (assetId: string) => HTMLImageElement | undefined): FabricObject | null {
   if (rec.type === 'image') {
     const el = getImage(rec.assetId)
@@ -73,7 +113,8 @@ export function createObject(rec: ObjectRecord, getImage: (assetId: string) => H
     })
     // Images keep their aspect ratio: corner handles only.
     img.setControlsVisibility({ ml: false, mr: false, mt: false, mb: false })
-    meta.set(img, { id: rec.id, kind: 'image', assetId: rec.assetId, ...(rec.frameId !== undefined && { frameId: rec.frameId }) })
+    meta.set(img, { id: rec.id, kind: 'image', assetId: rec.assetId, ...(rec.frameId !== undefined && { frameId: rec.frameId }), ...lockMeta(rec) })
+    applyLockFlags(img, 'image', rec.locked === true)
     return img
   }
   const tb = new Textbox(rec.text, {
@@ -88,7 +129,8 @@ export function createObject(rec: ObjectRecord, getImage: (assetId: string) => H
     lineHeight: 1.25,
   })
   tb.setControlsVisibility({ mt: false, mb: false })
-  meta.set(tb, { id: rec.id, kind: 'text', ...(rec.frameId !== undefined && { frameId: rec.frameId }) })
+  meta.set(tb, { id: rec.id, kind: 'text', ...(rec.frameId !== undefined && { frameId: rec.frameId }), ...lockMeta(rec) })
+  applyLockFlags(tb, 'text', rec.locked === true)
   return tb
 }
 
@@ -112,7 +154,8 @@ export function createFrame(rec: FrameRecord): FabricObject {
     objectCaching: false,
   })
   rect.setControlsVisibility({ mtr: false })
-  meta.set(rect, { id: rec.id, kind: 'frame', name: rec.name })
+  meta.set(rect, { id: rec.id, kind: 'frame', name: rec.name, ...lockMeta(rec) })
+  applyLockFlags(rect, 'frame', rec.locked === true)
   return rect
 }
 
@@ -151,7 +194,7 @@ export function toRecord(obj: FabricObject): ObjectRecord | null {
   // translateX/Y is the object's centre; convert to its (unrotated) top-left.
   const [ox, oy] = rotate((obj.width * sx) / 2, (obj.height * sy) / 2, d.angle)
   const base = { id: m.id, left: round(d.translateX - ox), top: round(d.translateY - oy), angle: round(d.angle) }
-  const owner = m.frameId !== undefined ? { frameId: m.frameId } : {}
+  const owner = { ...(m.frameId !== undefined && { frameId: m.frameId }), ...lockMeta(m) }
   if (obj instanceof Textbox) {
     const s = (sx + sy) / 2
     const rec: TextRecord = {
@@ -183,6 +226,7 @@ export function toFrameRecord(obj: FabricObject): FrameRecord | null {
     top: round(d.translateY - height / 2),
     width: roundPositive(width),
     height: roundPositive(height),
+    ...lockMeta(m),
   }
 }
 
