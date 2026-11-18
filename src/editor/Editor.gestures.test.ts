@@ -545,6 +545,8 @@ describe('pointer buttons: only the primary button edits', () => {
       expect(panX()).toBe(30)
       down(canvas, 2)
       up(2)
+      down(canvas, 0) // a primary press and release in the middle must not end the pan
+      up(0)
       moveTo(60, 10)
       expect(panX()).toBe(50) // still panning
       up(1)
@@ -742,6 +744,58 @@ describe('a text that is emptied after having been saved', () => {
     await flush()
     expect(store.saves.at(-1)!.doc.objects).toHaveLength(0)
     expect(editor.getState().canUndo).toBe(false)
+  })
+})
+
+describe('a new text that is abandoned untouched', () => {
+  it('writes nothing: no save attempt on a stored board, and a new board stays "not saved yet"', async () => {
+    const stored = await setup()
+    stored.editor.addText()
+    ;(stored.canvas.objects[2] as Textbox).exitEditing() // clicked away without typing
+    await flush()
+    expect(stored.canvas.objects).toHaveLength(2)
+    expect(stored.store.attempts).toHaveLength(0)
+
+    const fresh = await setup(null)
+    fresh.editor.addText()
+    ;(fresh.canvas.objects[0] as Textbox).exitEditing()
+    await flush()
+    expect(fresh.store.attempts).toHaveLength(0)
+    expect(fresh.editor.getState().save).toEqual({ kind: 'new' })
+  })
+
+  it('the typed-something memory does not leak from one edit into the next', async () => {
+    const { editor, store, canvas } = await setup(null)
+    editor.addText()
+    const first = canvas.objects[0] as Textbox
+    first.type('kept')
+    first.exitEditing()
+    await flush()
+    const saves = store.attempts.length
+    editor.addText()
+    ;(canvas.objects[1] as Textbox).exitEditing() // untouched
+    await flush()
+    expect(store.attempts).toHaveLength(saves)
+  })
+})
+
+describe('folding text scale in a multi-selection', () => {
+  it('folds a member that is still scaled even when the selection itself ends at scale 1', async () => {
+    const { canvas } = await setup({ ...createEmptyDoc(), objects: [text({ fontSize: 40, width: 400 })] })
+    const tb = canvas.objects[0] as Textbox
+    // A text that joined a selection scaled 1.6 carries the inverse scale itself; the
+    // selection is then dragged back to exactly 1.
+    const { ActiveSelection } = await import('./testing/fakeFabric.ts')
+    const selection = new ActiveSelection([tb])
+    Object.assign(selection, { scaleX: 1.6, scaleY: 1.6, width: 400, height: 50 })
+    canvas.setActiveObject(selection)
+    const t = press(canvas, selection, { action: 'scale', corner: 'br' })
+    Object.assign(tb, { scaleX: 0.625, scaleY: 0.625 }) // absolute scale after the drag back
+    Object.assign(selection, { scaleX: 1, scaleY: 1 })
+    t.actionPerformed = true
+    release(canvas, t)
+    await tick()
+    expect(tb).toMatchObject({ fontSize: 25, width: 250, scaleX: 1, scaleY: 1 })
   })
 })
 

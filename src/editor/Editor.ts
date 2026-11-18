@@ -108,6 +108,8 @@ export class Editor {
   private noticeTimer: ReturnType<typeof setTimeout> | null = null
   private noticeSeq = 0
   private gesture: Gesture | null = null
+  /** Something was typed since the current text edit began (typing is saved as it happens). */
+  private typedThisEdit = false
   private gestureSeq = 0
   /** Image batches that finished decoding while a gesture was in progress. */
   private stagedImports: ImageRecord[][] = []
@@ -448,9 +450,14 @@ export class Editor {
       this.commit()
     })
 
-    c.on('text:editing:entered', () => this.syncState())
+    c.on('text:editing:entered', () => {
+      this.typedThisEdit = false
+      this.syncState()
+    })
     c.on('text:changed', () => {
-      if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
+      if (this.applying || !this.editable) return
+      this.typedThisEdit = true
+      this.autosaver.markDirty() // keep typing durable; history commits on exit
     })
     c.on('text:editing:exited', ({ target }) => {
       // A press inside the text may still be held (it started no gesture, and the text could
@@ -461,9 +468,10 @@ export class Editor {
       if (target instanceof Textbox && target.text.trim() === '') {
         c.remove(target)
         c.requestRenderAll()
-        // Typing is saved as it happens, so the emptied text may already be stored. History
-        // never held it (nothing to commit), so say explicitly that the stored board is stale.
-        this.autosaver.markDirty()
+        // Typing is saved as it happens, so a text that was typed and then emptied may
+        // already be stored. History never held it (nothing to commit), so say explicitly
+        // that the stored board is stale. A text nobody typed into was never saved: no write.
+        if (this.typedThisEdit) this.autosaver.markDirty()
       }
       this.commit()
     })
