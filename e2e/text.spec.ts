@@ -358,50 +358,437 @@ test.describe('typing into a formatted text', () => {
 })
 
 /**
- * Fabric's own habits while typing, tidied into canonical form. Recorded as known limits in
- * the README: these tests pin today's behaviour, not a settled rule.
+ * A heading is a property of a line: each line's level is carried across an edit from the
+ * levels the lines had before it and how the text changed (see `textAfterEdit`), and the
+ * bold of a heading never becomes a mark of its own.
  */
-test.describe('typing habits around headings (known limits)', () => {
-  test('Enter at the end of a heading continues the heading on the new line', async ({ page }) => {
+test.describe('editing around headings', () => {
+  test('Enter at the end of a heading starts a normal line; what is typed there is plain', async ({ page }) => {
     const rec = textRec('t', 100, 100, 'Title\nbody', { headings: [1] })
     const { errors, at } = await open(page, [rec])
     await caretAt(page, at(130, 112), 5)
     await page.keyboard.press('Enter')
     await page.keyboard.type('Next')
     const done = await storedWhen(page, (d) => byId(d, 't').text === 'Title\nNext\nbody')
-    expect(byId(done, 't')).toEqual({ ...rec, text: 'Title\nNext\nbody', headings: [1, 1] })
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'Title\nNext\nbody' })
     await page.keyboard.press('Escape')
     expect(errors).toEqual([])
   })
 
-  test('deleting every character of a heading line turns it back into a normal line', async ({ page }) => {
+  test('Enter in the middle of a heading leaves both halves headings', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'Title\nbody', { headings: [1] })
+    const { errors, at } = await open(page, [rec])
+    await caretAt(page, at(130, 112), 2)
+    await page.keyboard.press('Enter')
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'Ti\ntle\nbody')
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'Ti\ntle\nbody', headings: [1, 1] })
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+
+  test('a heading line emptied by Backspace stays a heading, and what is typed there is a heading; one undo restores it', async ({ page }) => {
     const rec = textRec('t', 100, 100, 'Title\nbody', { headings: [1] })
     const { errors, at } = await open(page, [rec])
     await caretAt(page, at(130, 112), 5)
     for (let i = 0; i < 5; i++) await page.keyboard.press('Backspace')
-    const done = await storedWhen(page, (d) => byId(d, 't').text === '\nbody')
-    const rest = { ...rec, headings: undefined }
-    expect(byId(done, 't')).toEqual({ ...rest, text: '\nbody' })
+    const emptied = await storedWhen(page, (d) => byId(d, 't').text === '\nbody') // the typing save, mid-edit
+    expect(byId(emptied, 't')).toEqual({ ...rec, text: '\nbody' })
+    await page.keyboard.type('New')
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'New\nbody')
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'New\nbody' })
     await page.keyboard.press('Escape')
+    await undoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 't').text === 'Title\nbody')
+    expect(byId(await storedDoc(page), 't')).toEqual(rec)
+    await expect(undoButton(page)).toBeDisabled()
     expect(errors).toEqual([])
   })
 
-  test('joining a heading onto the end of a normal line keeps its characters bold at the normal size', async ({ page }) => {
+  test('Backspace at the start of a heading under a line with text joins it into that normal line, drawn plain', async ({ page }) => {
     const rec = textRec('t', 100, 100, 'body\nTitle', { headings: [0, 1] })
-    const reference = textRec('ref', 600, 100, 'bodyTitle', { spans: [{ start: 4, end: 9, bold: true }] })
-    const { errors, at } = await open(page, [rec, reference])
+    const reference = textRec('ref', 600, 100, 'bodyTitle')
+    const boldRef = textRec('bref', 600, 300, 'bodyTitle', { spans: [{ start: 4, end: 9, bold: true }] })
+    const { errors, at } = await open(page, [rec, reference, boldRef])
     await caretAt(page, at(130, 112), 5) // the start of "Title"
     await page.keyboard.press('Backspace')
     const done = await storedWhen(page, (d) => byId(d, 't').text === 'bodyTitle')
     const rest = { ...rec, headings: undefined }
-    expect(byId(done, 't')).toEqual({ ...rest, text: 'bodyTitle', spans: [{ start: 4, end: 9, bold: true }] })
+    expect(byId(done, 't')).toEqual({ ...rest, text: 'bodyTitle' }) // no heading, and no bold left behind by it
     await page.keyboard.press('Escape')
     await page.keyboard.press('Escape')
     await waitSaved(page)
     const a = await inkIn(page, 95, 90, 400, 80)
     const b = await inkIn(page, 595, 90, 400, 80)
     expect(Math.abs(a.bottom - a.top - (b.bottom - b.top))).toBeLessThanOrEqual(2) // drawn at the normal size
-    expect(Math.abs(a.right - a.left - (b.right - b.left))).toBeLessThanOrEqual(2)
+    expect(Math.abs(a.right - a.left - (b.right - b.left))).toBeLessThanOrEqual(1) // and not bold
+    const bold = await inkIn(page, 595, 290, 400, 80)
+    expect(bold.right - bold.left).toBeGreaterThan(b.right - b.left + 3) // what a bold "Title" would look like
+    expect(errors).toEqual([])
+  })
+
+  test('Backspace at the start of a heading under an EMPTY line keeps the heading', async ({ page }) => {
+    const rec = textRec('t', 100, 100, '\nTitle', { headings: [0, 1] })
+    const { errors, at } = await open(page, [rec])
+    await caretAt(page, at(130, 150), 1)
+    await page.keyboard.press('Backspace')
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'Title')
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'Title', headings: [1] })
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+})
+
+/** Fabric's own clipboard path (its copy and paste handlers on the hidden textarea), inside the page. */
+test.describe('pasting into a formatted text', () => {
+  async function openWithClipboard(page: Page, objects: unknown[]) {
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'])
+    return open(page, objects)
+  }
+  /** Copies the whole of the text under `p` with Fabric's copy, and leaves it. */
+  async function copyAllOf(page: Page, p: { x: number; y: number }) {
+    await page.mouse.dblclick(p.x, p.y)
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('Control+c')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+  }
+
+  test('P1: plain text copied from a 48 px text and pasted at the start of a line adds no heading and no size; Esc, undo, redo', async ({ page }) => {
+    const big = textRec('big', 100, 400, 'BIG', { fontSize: 48 })
+    const rec = textRec('b', 100, 100, 'Title\nbody')
+    const reference = textRec('ref', 600, 100, 'Title\nBIGbody')
+    const { errors, at } = await openWithClipboard(page, [big, rec, reference])
+    await copyAllOf(page, at(130, 425))
+    await caretAt(page, at(130, 112), 6)
+    await page.keyboard.press('Control+v')
+    const pasted = await storedWhen(page, (d) => byId(d, 'b').text !== 'Title\nbody') // the typing save, mid-edit
+    expect(byId(pasted, 'b')).toEqual({ ...rec, text: 'Title\nBIGbody' })
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    expect(byId(await storedDoc(page), 'b')).toEqual(byId(pasted, 'b'))
+    const a = await inkIn(page, 95, 90, 400, 90)
+    const b = await inkIn(page, 595, 90, 400, 90)
+    expect(Math.abs(a.bottom - a.top - (b.bottom - b.top))).toBeLessThanOrEqual(2) // "BIG" is drawn at this text's size
+    expect(Math.abs(a.count - b.count)).toBeLessThan(b.count * 0.05)
+
+    await undoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text === 'Title\nbody')
+    expect(byId(await storedDoc(page), 'b')).toEqual(rec)
+    await redoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text !== 'Title\nbody')
+    expect(byId(await storedDoc(page), 'b')).toEqual(byId(pasted, 'b'))
+    expect(errors).toEqual([])
+  })
+
+  test('P1b: text copied from a 30 px text (a level 3 heading size here) pasted at the start stays plain (left by clicking elsewhere)', async ({ page }) => {
+    const mid = textRec('mid', 100, 400, 'MID', { fontSize: 30 })
+    const rec = textRec('b', 100, 100, 'body')
+    const { errors, at } = await openWithClipboard(page, [mid, rec])
+    await copyAllOf(page, at(130, 420))
+    await caretAt(page, at(130, 112), 0)
+    await page.keyboard.press('Control+v')
+    await page.mouse.click(at(900, 650).x, at(900, 650).y) // empty canvas
+    const done = await storedWhen(page, (d) => byId(d, 'b').text === 'MIDbody')
+    expect(byId(done, 'b')).toEqual({ ...rec, text: 'MIDbody' })
+    expect(errors).toEqual([])
+  })
+
+  test('Q2: a normal line copied and pasted at the start of the heading keeps one heading and adds no bold (left by clicking another object); undo, redo', async ({ page }) => {
+    const rec = textRec('b', 100, 100, 'Title\nbody', { headings: [1] })
+    const other = textRec('other', 100, 450, 'other')
+    const { errors, at } = await openWithClipboard(page, [rec, other])
+    await caretAt(page, at(130, 112), 6)
+    for (let i = 0; i < 4; i++) await page.keyboard.press('Shift+ArrowRight')
+    await page.keyboard.press('Control+c')
+    await page.keyboard.press('ArrowLeft')
+    for (let i = 0; i < 6; i++) await page.keyboard.press('ArrowLeft')
+    await page.keyboard.press('Control+v')
+    const pasted = await storedWhen(page, (d) => byId(d, 'b').text === 'bodyTitle\nbody')
+    expect(byId(pasted, 'b')).toEqual({ ...rec, text: 'bodyTitle\nbody' })
+    await page.mouse.click(at(120, 462).x, at(120, 462).y) // the other text
+    await expect(page.locator('.inspector-title')).toHaveText('Text')
+    await waitSaved(page)
+    expect(byId(await storedDoc(page), 'b')).toEqual(byId(pasted, 'b'))
+    await undoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text === 'Title\nbody')
+    expect(byId(await storedDoc(page), 'b')).toEqual(rec)
+    await redoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 'b').text === 'bodyTitle\nbody')
+    expect(byId(await storedDoc(page), 'b')).toEqual(byId(pasted, 'b'))
+    expect(errors).toEqual([])
+  })
+
+  test('pasted text keeps its bold: a bold word stays bold, and heading text arrives bold at the normal size', async ({ page }) => {
+    const marked = textRec('marked', 100, 300, 'bold here', { spans: [{ start: 0, end: 4, bold: true }] })
+    const heading = textRec('heading', 100, 450, 'Big\nx', { headings: [1] })
+    const rec = textRec('b', 100, 100, 'ab')
+    const { errors, at } = await openWithClipboard(page, [marked, heading, rec])
+    await caretAt(page, at(110, 312), 0)
+    for (let i = 0; i < 4; i++) await page.keyboard.press('Shift+ArrowRight')
+    await page.keyboard.press('Control+c')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await caretAt(page, at(110, 112), 1)
+    await page.keyboard.press('Control+v')
+    await storedWhen(page, (d) => byId(d, 'b').text === 'aboldb')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await caretAt(page, at(115, 470), 0)
+    for (let i = 0; i < 3; i++) await page.keyboard.press('Shift+ArrowRight')
+    await page.keyboard.press('Control+c')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await caretAt(page, at(110, 112), 6)
+    await page.keyboard.press('Control+v')
+    const done = await storedWhen(page, (d) => byId(d, 'b').text === 'aboldbBig')
+    expect(byId(done, 'b')).toEqual({ ...rec, text: 'aboldbBig', spans: [{ start: 1, end: 5, bold: true }, { start: 6, end: 9, bold: true }] })
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+
+  test('a multi-line paste into the middle of a heading: the first line joins it, the last carries the rest of the heading', async ({ page }) => {
+    const source = textRec('src', 100, 400, 'A\nB')
+    const rec = textRec('b', 100, 100, 'Title\nbody', { headings: [1] })
+    const { errors, at } = await openWithClipboard(page, [source, rec])
+    await copyAllOf(page, at(110, 412))
+    await caretAt(page, at(130, 112), 2)
+    await page.keyboard.press('Control+v')
+    const done = await storedWhen(page, (d) => byId(d, 'b').text === 'TiA\nBtle\nbody')
+    expect(byId(done, 'b')).toEqual({ ...rec, text: 'TiA\nBtle\nbody', headings: [1, 1] })
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+
+  test('two lines from another application pasted at the end of a heading: the new line is normal and not bold', async ({ page }) => {
+    const rec = textRec('b', 100, 100, 'Title\nbody', { headings: [1] })
+    const { errors, at } = await openWithClipboard(page, [rec])
+    await page.evaluate(() => navigator.clipboard.writeText('A\nB')) // not copied by Fabric: it copies the neighbouring style onto it
+    await caretAt(page, at(130, 112), 5)
+    await page.keyboard.press('Control+v')
+    const done = await storedWhen(page, (d) => byId(d, 'b').text === 'TitleA\nB\nbody')
+    expect(byId(done, 'b')).toEqual({ ...rec, text: 'TitleA\nB\nbody' })
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+})
+
+test.describe('dropping text into a formatted text', () => {
+  test('a word dragged from a 48 px text onto the normal line of a heading text brings no heading and no size, in every undo step', async ({ page }) => {
+    const source = textRec('src', 100, 400, 'one BIG', { fontSize: 48 })
+    const rec = textRec('b', 100, 100, 'Title\nbody', { headings: [1] })
+    const { errors, at } = await open(page, [source, rec])
+    await caretAt(page, at(130, 425), 4)
+    for (let i = 0; i < 3; i++) await page.keyboard.press('Shift+ArrowRight') // "BIG"
+    // Fabric's own drag and drop of the selection (DraggableTextDelegate.mjs): a native drag session.
+    const from = at(240, 430)
+    const to = at(102, 178) // the start of the body line (the heading line is 60 tall)
+    await page.mouse.move(from.x, from.y)
+    await page.mouse.down()
+    await page.mouse.move(from.x + 10, from.y - 10, { steps: 3 })
+    await page.mouse.move(to.x, to.y, { steps: 10 })
+    await page.mouse.up()
+    const dropped = await storedWhen(page, (d) => byId(d, 'b').text === 'Title\nBIGbody' && byId(d, 'src').text === 'one ')
+    expect(byId(dropped, 'b')).toEqual({ ...rec, text: 'Title\nBIGbody' })
+    expect(byId(dropped, 'src')).toEqual({ ...source, text: 'one ' })
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    // However many steps the drop left in history, none of them gives the body line a heading.
+    for (let step = 0; step < 4 && (await undoButton(page).isEnabled()); step++) {
+      const before = JSON.stringify(await storedDoc(page))
+      await undoButton(page).click()
+      await storedWhen(page, (d) => JSON.stringify(d) !== before)
+      expect(byId(await storedDoc(page), 'b').headings).toEqual([1])
+    }
+    const back = await storedDoc(page)
+    expect(byId(back, 'b')).toEqual(rec)
+    expect(byId(back, 'src')).toEqual(source)
+    expect(errors).toEqual([])
+  })
+})
+
+test.describe('the box after a style rewrite', () => {
+  // "WWW" fits a 160 wide box as a heading; "abcWWW" laid out with the heading's size on
+  // "WWW" does not, so Fabric widens the box before the styles are tidied. Once tidied,
+  // "abcXYWWW" at the normal size fits the original width again.
+  const seed = (align: 'center' | 'right' | undefined, angle = 0) => textRec('t', 300, 200, 'abc\nWWW', { headings: [0, 1], width: 160, angle, ...(align && { align }) })
+
+  for (const align of [undefined, 'center', 'right'] as const) {
+    test(`joining a heading onto a normal line and typing keeps the width and position (${align ?? 'left'} aligned)`, async ({ page }) => {
+      const rec = seed(align)
+      const { errors, at } = await open(page, [rec])
+      await caretAt(page, at(380, 212), 4) // the start of "WWW"
+      await page.keyboard.press('Backspace')
+      await page.keyboard.type('XY')
+      const done = await storedWhen(page, (d) => byId(d, 't').text === 'abcXYWWW')
+      const rest = { ...rec, headings: undefined }
+      expect(byId(done, 't')).toEqual({ ...rest, text: 'abcXYWWW' })
+      await page.keyboard.press('Escape')
+      expect(errors).toEqual([])
+    })
+  }
+
+  test('the same for a rotated, centred text', async ({ page }) => {
+    const rec = seed('center', 30)
+    const { errors, at } = await open(page, [rec])
+    // A point 40 right of and 15 below the box's top-left corner, turned with the box about that corner.
+    const r = (30 * Math.PI) / 180
+    const inside = at(300 + 40 * Math.cos(r) - 15 * Math.sin(r), 200 + 40 * Math.sin(r) + 15 * Math.cos(r))
+    await caretAt(page, inside, 4)
+    await page.keyboard.press('Backspace')
+    await page.keyboard.type('XY')
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'abcXYWWW')
+    const t = byId(done, 't')
+    expect(t.width).toBe(160)
+    expect(t.left).toBeCloseTo(300, 0)
+    expect(t.top).toBeCloseTo(200, 0)
+    expect(t.headings).toBeUndefined()
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+
+  test('a width set with a side handle just before is the width kept', async ({ page }) => {
+    const rec = seed(undefined)
+    const { errors, at } = await open(page, [rec])
+    await page.mouse.click(at(320, 212).x, at(320, 212).y)
+    await expect(page.locator('.inspector-title')).toHaveText('Text')
+    // Find the right-hand side handle by the cursor Fabric shows over it.
+    const upper = page.locator('.canvas-container canvas.upper-canvas')
+    const x = at(300 + 160 + 2, 0).x
+    let handle: { x: number; y: number } | undefined
+    for (let y = 210; y < 320 && !handle; y += 2) {
+      const p = at(0, y)
+      await page.mouse.move(x, p.y)
+      if ((await upper.evaluate((el) => (el as HTMLElement).style.cursor)) === 'e-resize') handle = { x, y: p.y + 4 }
+    }
+    if (!handle) throw new Error('side handle not found')
+    await drag(page, handle, { x: handle.x + 60, y: handle.y }, { steps: 6 })
+    const widened = await storedWhen(page, (d) => byId(d, 't').width !== 160)
+    const width = byId(widened, 't').width!
+    expect(width).toBeGreaterThan(200)
+    await caretAt(page, at(320, 212), 4)
+    await page.keyboard.press('Backspace')
+    await page.keyboard.type('XY')
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'abcXYWWW')
+    expect(byId(done, 't').width).toBe(width) // not back to 160
+    expect(byId(done, 't').left).toBe(300)
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+
+  test('a word that really is too long still widens the box, exactly as far as it needs, about the centre', async ({ page }) => {
+    const rec = seed('center')
+    const reference = textRec('ref', 300, 500, 'abcXYZXYZXYZXYZWWW', { width: 160, align: 'center' })
+    const { errors, at } = await open(page, [rec, reference])
+    await caretAt(page, at(380, 212), 4)
+    await page.keyboard.press('Backspace')
+    await page.keyboard.type('XYZXYZXYZXYZ')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    // Move the reference so that its stored width is the one Fabric gives that text.
+    await drag(page, at(380, 512), at(380, 552))
+    const done = await storedWhen(page, (d) => byId(d, 't').text === 'abcXYZXYZXYZXYZWWW' && byId(d, 'ref').top !== 500)
+    const t = byId(done, 't')
+    const ref = byId(done, 'ref')
+    expect(ref.width).toBeGreaterThan(160)
+    expect(t.width).toBe(ref.width)
+    expect(t.left + t.width! / 2).toBeCloseTo(300 + 160 / 2, 0)
+    expect(errors).toEqual([])
+  })
+})
+
+test.describe('changing the size of a formatted text', () => {
+  test('"Select with contents" (a frame and a formatted text) scaled from a corner scales the text once and keeps its formatting', async ({ page }) => {
+    const errors: string[] = []
+    page.on('pageerror', (e) => errors.push(e.message))
+    const frame = { id: 'F', name: 'Spread', left: 50, top: 50, width: 700, height: 500 }
+    const rec = { ...textRec('t', 100, 100, 'Title\nbody text', { headings: [1], spans: [{ start: 6, end: 10, italic: true }], width: 300 }), frameId: 'F' }
+    await openBlank(page)
+    await seedRaw(page, 2, { version: 2, title: 'Framed', frames: [frame], objects: [rec], viewport: UNIT })
+    await openApp(page)
+    const at = await sceneToPage(page, UNIT)
+    await page.mouse.click(at(60, 36).x, at(60, 36).y) // the frame's label
+    await page.getByRole('button', { name: 'Select with contents' }).click()
+    await expect(page.locator('.inspector-title')).toHaveText('2 objects')
+    await drag(page, at(750, 550), at(575, 425), { steps: 10 }) // the bottom-right corner, inwards
+    const scaled = await storedWhen(page, (d) => d.frames![0]!.width !== 700)
+    const k = scaled.frames![0]!.width / 700
+    expect(k).toBeGreaterThan(0.7)
+    expect(k).toBeLessThan(0.8)
+    const t = byId(scaled, 't')
+    expect(t.fontSize).toBeCloseTo(24 * k, 1) // once, not k squared
+    expect(t.width).toBeCloseTo(300 * k, 1)
+    expect({ ...t, fontSize: 0, width: 0, left: 0, top: 0 }).toEqual({ ...rec, fontSize: 0, width: 0, left: 0, top: 0 })
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await storedDoc(page)).toEqual(scaled)
+    await undoButton(page).click()
+    await storedWhen(page, (d) => d.frames![0]!.width === 700)
+    expect(byId(await storedDoc(page), 't')).toEqual(rec)
+    expect(errors).toEqual([])
+  })
+
+  test('the font size field redraws headings at their ratio; one undo restores it', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'Title\nbody', { headings: [1], spans: [{ start: 6, end: 10, italic: true }], width: 500 })
+    const { errors, at } = await open(page, [rec])
+    const ink0 = await inkIn(page, 90, 90, 800, 500)
+    await page.mouse.click(at(130, 120).x, at(130, 120).y)
+    await page.getByLabel('Font size').fill('40')
+    const sized = await storedWhen(page, (d) => byId(d, 't').fontSize === 40)
+    expect(byId(sized, 't')).toEqual({ ...rec, fontSize: 40 })
+    await page.keyboard.press('Escape')
+    await page.mouse.click(at(900, 650).x, at(900, 650).y)
+    await expect(page.locator('.inspector-title')).toHaveCount(0)
+    await waitSaved(page)
+    const ink1 = await inkIn(page, 90, 90, 800, 500)
+    expect((ink1.bottom - ink1.top) / (ink0.bottom - ink0.top)).toBeCloseTo(40 / 24, 1) // the heading line too
+    await undoButton(page).click()
+    await storedWhen(page, (d) => byId(d, 't').fontSize === 24)
+    expect(byId(await storedDoc(page), 't')).toEqual(rec)
+    expect(errors).toEqual([])
+  })
+})
+
+test.describe('a stored text with "\\r\\n" line breaks (the app never writes one)', () => {
+  test('a move keeps it exactly; typing turns its break into "\\n" and keeps its heading and marks', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'Title\r\nbody bold', { headings: [1], spans: [{ start: 12, end: 16, bold: true }] })
+    const { errors, at } = await open(page, [rec])
+    await drag(page, at(130, 120), at(140, 130))
+    const moved = await storedWhen(page, (d) => byId(d, 't').left !== 100)
+    expect(byId(moved, 't')).toEqual({ ...rec, left: 110, top: 110 })
+    await page.keyboard.press('Escape')
+    await page.mouse.dblclick(at(150, 140).x, at(150, 140).y)
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.type('!')
+    const typed = await storedWhen(page, (d) => byId(d, 't').text?.endsWith('!') === true)
+    expect(byId(typed, 't')).toEqual({ ...rec, left: 110, top: 110, text: 'Title\nbody bold!', spans: [{ start: 11, end: 16, bold: true }] })
+    await page.keyboard.press('Escape')
+    expect(errors).toEqual([])
+  })
+})
+
+test.describe('IME composition', () => {
+  test('composing on an empty heading line and inside a bold run gives a heading and a bold run', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'Title\n\nplain bold', { headings: [1, 2], spans: [{ start: 13, end: 17, bold: true }] })
+    const { errors, at } = await open(page, [rec])
+    const cdp = await page.context().newCDPSession(page)
+    await caretAt(page, at(130, 112), 6) // the empty heading line
+    await cdp.send('Input.imeSetComposition', { text: 'k', selectionStart: 1, selectionEnd: 1 })
+    await cdp.send('Input.imeSetComposition', { text: 'ka', selectionStart: 2, selectionEnd: 2 })
+    await cdp.send('Input.insertText', { text: 'カ' })
+    await page.keyboard.type('Z')
+    await storedWhen(page, (d) => byId(d, 't').text === 'Title\nカZ\nplain bold')
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('ArrowRight')
+    await page.keyboard.press('ArrowLeft')
+    await page.keyboard.press('ArrowLeft') // between "bo" and "ld"
+    await cdp.send('Input.imeSetComposition', { text: 'n', selectionStart: 1, selectionEnd: 1 })
+    await cdp.send('Input.insertText', { text: 'ン' })
+    await page.keyboard.type('Q')
+    const done = await storedWhen(page, (d) => byId(d, 't').text?.includes('Q') === true)
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'Title\nカZ\nplain boンQld', spans: [{ start: 15, end: 21, bold: true }] })
+    await page.keyboard.press('Escape')
     expect(errors).toEqual([])
   })
 })

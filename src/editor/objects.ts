@@ -1,7 +1,7 @@
 import { FabricImage, Rect, Textbox, util } from 'fabric'
 import type { FabricObject, TextStyle, TextStyleDeclaration } from 'fabric'
 import { round, roundPositive } from '../model/doc.ts'
-import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharMasks } from '../model/richText.ts'
+import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharMasks, textAfterEdit } from '../model/richText.ts'
 import type { TextFormatting } from '../model/richText.ts'
 import type { FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 import type { Point } from '../model/viewport.ts'
@@ -110,7 +110,12 @@ interface Line {
   graphemes: string[]
 }
 
-/** The text's paragraphs exactly as Fabric splits them for styles (on /\r?\n/). */
+/**
+ * The text's paragraphs exactly as Fabric splits them for styles (on /\r?\n/). Known limit
+ * (see `paragraphsOf`): a lone "\r" is a character here, but the editing textarea turns it
+ * into a line break on the first keystroke, so the marks after it move down a line. Only a
+ * hand-made stored board can hold one.
+ */
 function linesOf(tb: Textbox): Line[] {
   const text = tb.text
   const lines: Line[] = []
@@ -160,30 +165,116 @@ function stylesFor(tb: Textbox, fmt: TextFormatting, base: number): TextStyle {
 
 const hasStyles = (tb: Textbox): boolean => Object.values(tb.styles ?? {}).some((row) => Object.keys(row).length > 0)
 
-/** A paragraph's heading level from the font size of its first character (or placeholder). */
+/**
+ * A paragraph's heading level from the font size of its first character (or placeholder).
+ * Exact: every heading size on the canvas was written by `stylesFor` as
+ * `headingFontSize(tb.fontSize, level)` from the same base it is read against (anything that
+ * changes the base goes through `setTextFontSize`, which redraws the headings), and sizes
+ * that arrive with a paste or a drop are never read here: they are judged by the carried
+ * levels instead (see `readTextFormatting`).
+ */
 function levelOf(size: unknown, base: number): number {
-  if (typeof size !== 'number') return 0
-  for (const level of [1, 2, 3] as const) {
-    const want = headingFontSize(base, level)
-    if (Math.abs(size - want) <= Math.max(0.01, want * 1e-3)) return level
-  }
+  for (const level of [1, 2, 3] as const) if (size === headingFontSize(base, level)) return level
   return 0 // a size that matches no heading is not a heading
 }
 
+const BOLD = markMask({ bold: true })
+const marksOf = (st: TextStyleDeclaration): number =>
+  markMask({ bold: st.fontWeight === 'bold' || st.fontWeight === 700, italic: st.fontStyle === 'italic', underline: st.underline === true, strike: st.linethrough === true })
+
 /**
- * The text's formatting read back from the canvas object alone (Fabric is the live source
- * of truth while a text is being edited), already in canonical form.
+ * The last canonical state of each text: what the editor last wrote onto the canvas object,
+ * or read back from it while its text was unchanged. A text change is judged against it
+ * (the levels of the lines are carried over from it, see `readTextFormatting`), and the
+ * rewrite after a change restores the wrap width it records (see `reconcileTextFormatting`).
+ *
+ * Refreshed by every write (`createObject` through `writeTextFormatting`, `setTextFontSize`
+ * and so scale folding and the font size field, `reconcileTextFormatting` after every text
+ * change) and by every `toRecord` of a text whose text has not changed since. The last one
+ * is how a width set with a side handle is picked up: every transform ends in a commit that
+ * reads the whole scene, and a cancelled one rebuilds the objects from records.
  */
-export function readTextFormatting(tb: Textbox): TextFormatting {
+interface TextState {
+  text: string
+  headings: readonly number[] | undefined
+  width: number
+  fontSize: number
+}
+const lastCanonical = new WeakMap<Textbox, TextState>()
+function remember(tb: Textbox, headings: readonly number[] | undefined) {
+  lastCanonical.set(tb, { text: tb.text, headings, width: tb.width, fontSize: tb.fontSize })
+}
+
+/**
+ * The caret (the end of the selection) as a UTF-16 offset into the text, or undefined when
+ * the object has none. Fabric counts graphemes, with one per line break (ITextBehavior.mjs
+ * `fromStringToGraphemeSelection`; Text.mjs `_splitTextIntoLines` joins the lines' graphemes
+ * with one "\n").
+ */
+function caretOffset(tb: Textbox): number | undefined {
+  const g: unknown = tb.selectionEnd
+  if (typeof g !== 'number' || !Number.isInteger(g) || g < 0) return undefined
+  let left = g
+  for (const line of linesOf(tb)) {
+    if (left <= line.graphemes.length) return line.start + line.graphemes.slice(0, left).join('').length
+    left -= line.graphemes.length + 1
+  }
+  return undefined
+}
+
+/**
+ * The text's formatting, already in canonical form, read from the canvas object.
+ *
+ * While its text is the one last made canonical, everything comes from the Fabric object
+ * alone (Fabric is the live source of truth while a text is edited): marks from the
+ * characters' styles, a line's level from the size of its first character or placeholder.
+ *
+ * When the text has changed since and its styles have not been rewritten yet (inside
+ * `text:changed`, or a scene read that Fabric triggers in the middle of a drop), the
+ * character styles may be whatever the change brought: a paste or a drop carries the
+ * source's complete styles, sizes included. Then only the marks are read from the styles,
+ * and each line's level is carried over from the last canonical state (`textAfterEdit`).
+ * The bold of a heading is never a mark of its own: it is dropped from a character that
+ * was on a heading line and is now on a normal one, and from an inserted character on a
+ * normal line whose style is a copy of a heading character's (Fabric copies the
+ * neighbouring character's style onto what is typed or pasted without styles of its own;
+ * styles brought by a paste or drop are complete declarations, with a font family).
+ * `caret` (UTF-16, after the change) picks the alignment among repeated characters.
+ */
+export function readTextFormatting(tb: Textbox, caret?: number): TextFormatting {
   const raw: Record<string, unknown> = {
     font: fontIdOf(tb.fontFamily),
     align: tb.textAlign,
     color: typeof tb.fill === 'string' ? tb.fill : undefined,
   }
-  if (hasStyles(tb)) {
-    const text = tb.text
-    const headings: number[] = []
+  const text = tb.text
+  const known = lastCanonical.get(tb)
+  if (known && known.text !== text) {
+    const edit = textAfterEdit(known.text, known.headings, text, caret)
+    const headings = edit.headings
     const marks = new Map<number, number>() // UTF-16 start of a marked character -> its marks
+    for (const [li, line] of linesOf(tb).entries()) {
+      const row = tb.styles[li]
+      if (!row) continue
+      let start = line.start
+      line.graphemes.forEach((g, k) => {
+        const end = start + g.length
+        const st = row[k]
+        let mask = st ? marksOf(st) : 0
+        if (st && mask & BOLD && (headings?.[li] ?? 0) === 0) {
+          const before = edit.levelBefore(start, end)
+          const headingBold = before !== undefined ? before > 0 : st.fontSize !== undefined && st.fontFamily === undefined
+          if (headingBold) mask &= ~BOLD
+        }
+        if (mask) marks.set(start, mask)
+        start = end
+      })
+    }
+    raw.headings = headings
+    raw.spans = spansFromCharMasks(text, headings, (a) => marks.get(a) ?? 0)
+  } else if (hasStyles(tb)) {
+    const headings: number[] = []
+    const marks = new Map<number, number>()
     for (const [li, line] of linesOf(tb).entries()) {
       const row = tb.styles[li]
       headings.push(levelOf(row?.[0]?.fontSize, tb.fontSize))
@@ -191,17 +282,15 @@ export function readTextFormatting(tb: Textbox): TextFormatting {
       let start = line.start
       line.graphemes.forEach((g, k) => {
         const st = row[k]
-        if (st) {
-          const mask = markMask({ bold: st.fontWeight === 'bold' || st.fontWeight === 700, italic: st.fontStyle === 'italic', underline: st.underline === true, strike: st.linethrough === true })
-          if (mask) marks.set(start, mask)
-        }
+        const mask = st ? marksOf(st) : 0
+        if (mask) marks.set(start, mask)
         start += g.length
       })
     }
     raw.headings = canonicalHeadings(text, headings)
     raw.spans = spansFromCharMasks(text, raw.headings as number[] | undefined, (a) => marks.get(a) ?? 0)
   }
-  return canonicalTextFormatting(tb.text, raw)
+  return canonicalTextFormatting(text, raw)
 }
 
 /** Writes a text's formatting (font, alignment, colour, marks, headings) onto its canvas object. */
@@ -212,12 +301,14 @@ export function writeTextFormatting(tb: Textbox, fmt: TextFormatting) {
     fill: fmt.color ?? TEXT_COLOR,
     styles: stylesFor(tb, fmt, tb.fontSize),
   })
+  remember(tb, canonicalHeadings(tb.text, fmt.headings))
 }
 
 /** Changes a text's base size; its headings keep their ratio to it. No limit of its own. */
 export function setTextFontSize(tb: Textbox, fontSize: number, patch: { width?: number; scaleX?: number; scaleY?: number } = {}) {
-  const fmt = hasStyles(tb) ? readTextFormatting(tb) : {}
+  const fmt = readTextFormatting(tb)
   tb.set({ ...patch, fontSize, styles: stylesFor(tb, fmt, fontSize) })
+  remember(tb, fmt.headings)
 }
 
 /** Plain value equality of two style tables, ignoring empty rows and entries. */
@@ -238,21 +329,36 @@ function sameStyles(a: TextStyle | undefined, b: TextStyle): boolean {
 /**
  * After the text changed while being edited, Fabric has shifted and copied character styles
  * itself (typing after a bold character stays bold; Enter copies the style onto the new
- * line; Backspace over a line break can leave one paragraph with two sizes). This redraws
- * the text from its canonical formatting whenever the two differ, so what the canvas shows
- * is always what its record says. The text and the caret are not touched; like Fabric's own
- * typing, the box keeps its alignment edge in place if its size changes.
+ * line; Backspace over a line break can leave one paragraph with two sizes; a paste brings
+ * the source's sizes, colour and font). This works out the canonical formatting (marks from
+ * the styles, levels carried over from before the change, see `readTextFormatting`) and
+ * redraws the text from it whenever the two differ, so what the canvas shows is always what
+ * its record says, and remembers the result as the text's canonical state. The text and
+ * the caret are not touched; like Fabric's own typing, the box keeps its alignment edge in
+ * place if its size changes.
  */
 export function reconcileTextFormatting(tb: Textbox): boolean {
-  if (!hasStyles(tb)) return false
-  const want = stylesFor(tb, readTextFormatting(tb), tb.fontSize)
-  if (sameStyles(tb.styles, want)) return false
-  const anchorX = tb.textAlign === 'center' ? 'center' : tb.textAlign === 'right' ? 'right' : 'left'
-  const pos = tb.getPositionByOrigin(anchorX, 'top')
-  tb.set({ styles: want })
-  tb.setPositionByOrigin(pos, anchorX, 'top')
-  tb.setCoords()
-  return true
+  const known = lastCanonical.get(tb)
+  const fmt = readTextFormatting(tb, caretOffset(tb))
+  const want = stylesFor(tb, fmt, tb.fontSize)
+  let changed = false
+  if (!sameStyles(tb.styles, want)) {
+    const anchorX = tb.textAlign === 'center' ? 'center' : tb.textAlign === 'right' ? 'right' : 'left'
+    const pos = tb.getPositionByOrigin(anchorX, 'top')
+    // Fabric laid the changed text out with the styles it had before this rewrite (heading
+    // characters joined onto a normal line, a pasted 48 px word) and widened the box if a
+    // word did not fit; a text box never narrows by itself (Textbox.mjs `initDimensions`).
+    // Start again from the width the text had before the change and let Fabric widen it
+    // only as far as the canonical text needs. A remembered width that is larger than the
+    // box, or taken at another base size, is not from before this change: it is not used.
+    const width = known && known.fontSize === tb.fontSize && known.width < tb.width ? known.width : tb.width
+    tb.set({ styles: want, width })
+    tb.setPositionByOrigin(pos, anchorX, 'top')
+    tb.setCoords()
+    changed = true
+  }
+  remember(tb, fmt.headings)
+  return changed
 }
 
 /**
@@ -317,13 +423,16 @@ export function toRecord(obj: FabricObject): ObjectRecord | null {
   const owner = m.frameId !== undefined ? { frameId: m.frameId } : {}
   if (obj instanceof Textbox) {
     const s = (sx + sy) / 2
+    const fmt = readTextFormatting(obj)
+    // Observed while its text is unchanged: picks up a width set by a side handle since the last write.
+    if (lastCanonical.get(obj)?.text === obj.text) remember(obj, fmt.headings)
     const rec: TextRecord = {
       ...base,
       type: 'text',
       text: obj.text,
       fontSize: roundPositive(obj.fontSize * s, 2),
       width: roundPositive(obj.width * sx),
-      ...readTextFormatting(obj),
+      ...fmt,
       ...owner,
     }
     return rec

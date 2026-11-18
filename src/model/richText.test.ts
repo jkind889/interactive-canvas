@@ -6,9 +6,12 @@ import {
   canonicalHeadings,
   canonicalSpans,
   canonicalTextFormatting,
+  diffText,
   headingFontSize,
+  headingsAfterEdit,
   paragraphsOf,
   splitGraphemes,
+  textAfterEdit,
 } from './richText.ts'
 
 const spans = (text: string, raw: unknown, headings?: number[]) => canonicalSpans(text, raw, headings)
@@ -170,5 +173,172 @@ describe('tables', () => {
   it('every font id has a label', () => {
     expect(FONT_IDS).toEqual(['sans', 'serif', 'mono', 'hand', 'display'])
     for (const id of FONT_IDS) expect(FONT_LABELS[id]).toBeTruthy()
+  })
+})
+
+describe('lenient parsing stays bounded on hostile input', () => {
+  it('a huge sparse span list is dropped at once, not walked hole by hole', () => {
+    const sparse: unknown[] = []
+    sparse.length = 2 ** 32 - 1
+    sparse[0] = { start: 0, end: 1, bold: true }
+    const t0 = performance.now()
+    expect(spans('abc', sparse)).toBeUndefined()
+    expect(canonicalTextFormatting('abc', { spans: sparse })).toStrictEqual({})
+    expect(performance.now() - t0).toBeLessThan(50)
+  })
+
+  it('any span list longer than the text is dropped: a canonical one never is', () => {
+    const many = Array.from({ length: 4 }, () => ({ start: 0, end: 1, bold: true }))
+    expect(spans('abc', many)).toBeUndefined()
+    expect(spans('abcd', many)).toStrictEqual([{ start: 0, end: 1, bold: true }])
+  })
+
+  it('a huge sparse heading list is read only as far as the text has lines', () => {
+    const sparse: unknown[] = []
+    sparse.length = 2 ** 32 - 1
+    sparse[1] = 2
+    const t0 = performance.now()
+    expect(canonicalHeadings('a\nb', sparse)).toStrictEqual([0, 2])
+    expect(performance.now() - t0).toBeLessThan(50)
+  })
+})
+
+describe('the changed region of an edit', () => {
+  it('is the longest common prefix, then the longest common suffix, without a caret', () => {
+    expect(diffText('abc', 'abXc')).toEqual({ start: 2, prevEnd: 2, nextEnd: 3 })
+    expect(diffText('abc', 'ac')).toEqual({ start: 1, prevEnd: 2, nextEnd: 1 })
+    expect(diffText('', 'ab')).toEqual({ start: 0, prevEnd: 0, nextEnd: 2 })
+    expect(diffText('ab', '')).toEqual({ start: 0, prevEnd: 2, nextEnd: 0 })
+    expect(diffText('ab', 'ab')).toEqual({ start: 2, prevEnd: 2, nextEnd: 2 })
+  })
+
+  it('ends at the caret when the caret fits, among repeated characters', () => {
+    // "aa" -> "aaa": the new "a" is the first, second or third depending on the caret.
+    expect(diffText('aa', 'aaa', 1)).toEqual({ start: 0, prevEnd: 0, nextEnd: 1 })
+    expect(diffText('aa', 'aaa', 2)).toEqual({ start: 1, prevEnd: 1, nextEnd: 2 })
+    expect(diffText('aa', 'aaa', 3)).toEqual({ start: 2, prevEnd: 2, nextEnd: 3 })
+    expect(diffText('aa', 'aaa')).toEqual({ start: 2, prevEnd: 2, nextEnd: 3 })
+    // Backspace and forward Delete leave the caret where the deletion was.
+    expect(diffText('abba', 'aba', 1)).toEqual({ start: 1, prevEnd: 2, nextEnd: 1 })
+    expect(diffText('abba', 'aba', 2)).toEqual({ start: 2, prevEnd: 3, nextEnd: 2 })
+  })
+
+  it('ignores a caret that does not fit the change', () => {
+    expect(diffText('aa', 'aaa', 9)).toEqual(diffText('aa', 'aaa'))
+    expect(diffText('abc', 'abXc', 0)).toEqual({ start: 2, prevEnd: 2, nextEnd: 3 })
+    expect(diffText('abc', 'abXc', 1.5)).toEqual({ start: 2, prevEnd: 2, nextEnd: 3 })
+  })
+
+  it('never splits a surrogate pair or a "\\r\\n" line break', () => {
+    // 😀 and 😁 share their first code unit.
+    expect(diffText('x😀y', 'x😁y')).toEqual({ start: 1, prevEnd: 3, nextEnd: 3 })
+    expect(diffText('a\r\nb', 'a\nb')).toEqual({ start: 1, prevEnd: 3, nextEnd: 2 })
+  })
+})
+
+describe('heading levels carried across an edit', () => {
+  const H = headingsAfterEdit
+
+  it('typing in a line keeps every level; lines below shift when lines are added or removed above', () => {
+    expect(H('Title\nbody', [1], 'Tixtle\nbody', 3)).toStrictEqual([1])
+    expect(H('Title\nbody', [1], 'Title\nbodyx', 11)).toStrictEqual([1])
+    expect(H('a\nTitle', [0, 1], 'a\n\nTitle', 2)).toStrictEqual([0, 0, 1])
+    expect(H('a\n\nTitle', [0, 0, 1], 'a\nTitle', 2)).toStrictEqual([0, 1])
+  })
+
+  it('pasting text copied from a heading into a normal line leaves it normal, and normal text into a heading leaves it a heading', () => {
+    expect(H('Title\nbody', [1], 'Title\nTitlebody', 11)).toStrictEqual([1])
+    expect(H('Title\nbody', [1], 'bodyTitle\nbody', 4)).toStrictEqual([1])
+  })
+
+  it('Enter at the end of a heading starts a normal line; in the middle it leaves two headings', () => {
+    expect(H('Title\nbody', [1], 'Title\n\nbody', 6)).toStrictEqual([1])
+    expect(H('Title', [2], 'Title\n', 6)).toStrictEqual([2])
+    expect(H('Title', [1], 'Ti\ntle', 3)).toStrictEqual([1, 1])
+  })
+
+  it('Enter at the start of a heading leaves an empty heading line above it (the line it started in keeps its level)', () => {
+    expect(H('body\nTitle', [0, 1], 'body\n\nTitle', 6)).toStrictEqual([0, 1, 1])
+  })
+
+  it('the caret decides which of two identical results was meant', () => {
+    // The same new text, from Enter at the end of "body" or at the start of "Title".
+    expect(H('body\nTitle', [0, 1], 'body\n\nTitle', 5)).toStrictEqual([0, 0, 1])
+    expect(H('body\nTitle', [0, 1], 'body\n\nTitle', 6)).toStrictEqual([0, 1, 1])
+    // Enter on an empty heading line, or at the end of the normal line above it.
+    expect(H('a\n\nb', [0, 2], 'a\n\n\nb', 3)).toStrictEqual([0, 2])
+    expect(H('a\n\nb', [0, 2], 'a\n\n\nb', 2)).toStrictEqual([0, 0, 2])
+    // Without a caret (or with one that does not fit): the longest common prefix wins.
+    expect(H('body\nTitle', [0, 1], 'body\n\nTitle')).toStrictEqual([0, 1, 1])
+    expect(H('body\nTitle', [0, 1], 'body\n\nTitle', 99)).toStrictEqual([0, 1, 1])
+  })
+
+  it('a multi-line paste: the first line joins the line pasted into, lines in between are normal, the last follows its remaining text', () => {
+    expect(H('Title\nbody', [1], 'TiA\nB\nCtle\nbody', 7)).toStrictEqual([1, 0, 1])
+    expect(H('Title\nbody', [1], 'TitleA\nB\nbody', 8)).toStrictEqual([1])
+    expect(H('Title\nbody', [1], 'Title\nbA\nBody', 10)).toStrictEqual([1])
+    expect(H('Title\nbody', [0, 1], 'TitlA\nBe\nbody', 7)).toStrictEqual([0, 0, 1])
+  })
+
+  it('joining lines keeps the level of the line the change starts in', () => {
+    expect(H('Title\nbody', [1], 'Titlebody', 5)).toStrictEqual([1]) // Backspace at the start of a normal line under a heading
+    expect(H('body\nTitle', [0, 1], 'bodyTitle', 4)).toBeUndefined() // Backspace at the start of a heading under a normal line
+    expect(H('ab\nTitle', [0, 1], 'abTitle', 2)).toBeUndefined() // forward Delete at the end of the normal line
+    expect(H('Title\nbody', [0, 1], 'Tidy', 2)).toBeUndefined() // a selection from the middle of a line across the break
+    expect(H('Title\n\nbody', [1], 'Title\nbody', 5)).toStrictEqual([1]) // Delete at the end of a heading, over an empty line
+    expect(H('Title\n\nbody', [0, 1], 'Title\nbody', 5)).toBeUndefined() // Backspace on an empty heading line
+  })
+
+  it('unless nothing of that line is left before the change and text of a later line follows it', () => {
+    expect(H('\nTitle', [0, 1], 'Title', 0)).toStrictEqual([1]) // Backspace at the start of a heading under an empty line
+    expect(H('ab\nTitle', [0, 1], 'tle', 0)).toStrictEqual([1]) // "ab\nTi" selected and deleted
+    expect(H('Title\nbody', [1], 'body', 0)).toBeUndefined() // a whole heading line deleted with its break
+    expect(H('Title\nbody', [1], 'x', 1)).toStrictEqual([1]) // everything selected and typed over: nothing follows
+  })
+
+  it('emptying a heading line keeps it a heading', () => {
+    expect(H('Title\nbody', [1], '\nbody', 0)).toStrictEqual([1])
+    expect(H('Title', [1], 'x', 1)).toStrictEqual([1])
+    expect(H('Title', [3], '', 0)).toStrictEqual([3])
+  })
+
+  it('a move within the text that keeps the number of lines keeps every level by position', () => {
+    // " two" dragged from line 1 to the end of "Title" on line 3: one change, from line 1 to line 3.
+    expect(H('one two\nb\nTitle end', [0, 0, 1], 'one\nb\nTitle two end', 15)).toStrictEqual([0, 0, 1])
+    expect(H('Title one\nb\nend', [1], 'Title\nb\nend one', 15)).toStrictEqual([1])
+  })
+
+  it('from or to an empty text', () => {
+    expect(H('', undefined, 'a\nb', 3)).toBeUndefined()
+    expect(H('', [1], 'Title', 5)).toStrictEqual([1])
+    expect(H('a\nb', [1, 1], '', 0)).toStrictEqual([1])
+  })
+
+  it('a stored "\\r\\n" text compares line for line with the "\\n" text typing leaves of it', () => {
+    expect(H('Title\r\nbody', [1], 'Title\nbody!', 11)).toStrictEqual([1])
+    expect(H('Title\r\nbody', [1], '!Title\nbody', 1)).toStrictEqual([1])
+    expect(H('a\r\nTitle', [0, 1], 'aTitle', 1)).toBeUndefined()
+    expect(H('a\r\nb\r\nTitle', [0, 0, 1], 'a\nb\n\nTitle', 4)).toStrictEqual([0, 0, 0, 1])
+    // The characters after the "\r\n" are recognised as already there, on their own line.
+    const typed = textAfterEdit('T\r\nHead', [0, 1], 'xT\nHead', 1)
+    expect(typed.levelBefore(3, 4)).toBe(1)
+    expect(typed.levelBefore(1, 2)).toBe(0)
+  })
+
+  it('an unchanged text keeps its levels, in canonical form', () => {
+    expect(H('a\nb', [0, 1, 0, 5], 'a\nb')).toStrictEqual([0, 1])
+    expect(H('a\nb', undefined, 'a\nb')).toBeUndefined()
+  })
+
+  it('tells which characters were already there, and on what level of line', () => {
+    const join = textAfterEdit('body\nTitle', [0, 1], 'bodyTitle', 4)
+    expect(join.levelBefore(0, 1)).toBe(0)
+    expect(join.levelBefore(4, 5)).toBe(1) // "T" came from the heading
+    const typed = textAfterEdit('Title\nab', [1], 'Title\naXb', 8)
+    expect(typed.levelBefore(7, 8)).toBeUndefined() // inserted
+    expect(typed.levelBefore(0, 1)).toBe(1)
+    expect(typed.levelBefore(8, 9)).toBe(0)
+    // A character that the change altered (an emoji whose second unit changed) was not there before.
+    expect(textAfterEdit('😀', [1], '😁').levelBefore(0, 2)).toBeUndefined()
   })
 })

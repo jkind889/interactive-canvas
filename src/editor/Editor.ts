@@ -581,9 +581,12 @@ export class Editor {
     c.on('text:changed', ({ target }) => {
       // Fabric fires this after it has changed the text, shifted its character styles and
       // placed the caret, and does nothing to the text afterwards (fabric 7.4.0,
-      // ITextKeyBehavior.mjs onInput, DraggableTextDelegate.mjs drop/dragend). So the styles
-      // are made canonical right here, before the typing save is scheduled: a save can never
-      // store formatting that the canvas does not show.
+      // ITextKeyBehavior.mjs onInput, DraggableTextDelegate.mjs drop/dragend; a drag also
+      // fires it on its source text, which may no longer be the one being edited). So the
+      // styles are made canonical right here, before the typing save is scheduled: each
+      // line keeps the level it had before the change (never one guessed from the sizes a
+      // paste brought), marks come from the styles, and a save can never store formatting
+      // that the canvas does not show.
       if (target instanceof Textbox) reconcileTextFormatting(target)
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
     })

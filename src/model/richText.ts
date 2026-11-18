@@ -80,6 +80,11 @@ export interface Paragraph {
 /**
  * The paragraphs of a text (`text.split('\n')`) with their characters. Like Fabric, a
  * "\r" directly before a "\n" belongs to the line break, not to the line.
+ *
+ * Known limit: a lone "\r" (not followed by "\n") is an ordinary character here and on the
+ * canvas, but the editing textarea turns it into a line break on the first keystroke, so
+ * the marks after it shift by a line. The app never writes such a text; only a hand-made
+ * stored board can hold one.
  */
 export function paragraphsOf(text: string): Paragraph[] {
   const out: Paragraph[] = []
@@ -121,10 +126,14 @@ export function canonicalHeadings(text: string, raw: unknown): number[] | undefi
  */
 export function canonicalSpans(text: string, raw: unknown, headings?: readonly number[]): TextSpan[] | undefined {
   if (!Array.isArray(raw) || raw.length === 0 || text === '') return undefined
+  // A canonical list has at most one span per code unit. A longer one was not written by
+  // the app, and could be a huge sparse array that would take minutes to walk: drop it.
+  if (raw.length > text.length) return undefined
   // How many valid spans cover each code unit, per mark (a difference array, summed below).
   const cover = MARKS.map(() => new Int32Array(text.length + 1))
   let any = false
-  for (const s of raw) {
+  for (let i = 0; i < raw.length; i++) {
+    const s: unknown = raw[i]
     if (!isObj(s) || !Number.isInteger(s.start) || !Number.isInteger(s.end)) continue
     const a = Math.max(0, s.start as number)
     const b = Math.min(text.length, s.end as number)
@@ -231,4 +240,155 @@ export function canonicalTextFormatting(text: string, raw: Record<string, unknow
   if (spans) out.spans = spans
   if (headings) out.headings = headings
   return out
+}
+
+// ---- carrying headings across an edit -------------------------------------------------------
+//
+// A heading is a property of a line. When the text changes while it is edited (typing, a
+// paste, a drop, Backspace across a line break), each line's level is carried over from the
+// levels the lines had before and how the text changed, never guessed from the font size of
+// whatever characters the canvas inserted (a paste brings the source's sizes with it).
+
+/** Where two versions of a text differ: old = A + X + C and new = A + Y + C (UTF-16 offsets). */
+export interface TextChange {
+  /** Length of A: where the two versions start to differ. */
+  start: number
+  /** End of X in the old text. */
+  prevEnd: number
+  /** End of Y in the new text. */
+  nextEnd: number
+}
+
+const isHigh = (c: number) => c >= 0xd800 && c <= 0xdbff
+const isLow = (c: number) => c >= 0xdc00 && c <= 0xdfff
+/** True when offset `i` falls inside a surrogate pair or between the "\r" and "\n" of a line break. */
+function splitsUnit(s: string, i: number): boolean {
+  if (i <= 0 || i >= s.length) return false
+  const a = s.charCodeAt(i - 1)
+  const b = s.charCodeAt(i)
+  return (isHigh(a) && isLow(b)) || (a === 13 && b === 10)
+}
+
+/**
+ * The changed region between two versions of a text. Among repeated characters (several
+ * empty lines in a row, a doubled letter) more than one region explains the change; when the
+ * caret position after the change is given and fits, the region that ends at the caret is
+ * chosen (typing, pasting and dropping leave the caret after what they inserted, deleting
+ * leaves it where the deletion was). Otherwise: the longest common prefix, then the longest
+ * common suffix of what is left. Never splits a surrogate pair or a "\r\n".
+ */
+export function diffText(prev: string, next: string, caret?: number): TextChange {
+  let p = 0
+  let s = 0
+  const fits = caret !== undefined && Number.isInteger(caret) && caret >= 0 && caret <= next.length && next.length - caret <= prev.length && prev.endsWith(next.slice(caret))
+  if (fits) {
+    s = next.length - caret
+    const limit = Math.min(caret, prev.length - s)
+    while (p < limit && prev.charCodeAt(p) === next.charCodeAt(p)) p++
+  } else {
+    const common = Math.min(prev.length, next.length)
+    while (p < common && prev.charCodeAt(p) === next.charCodeAt(p)) p++
+    while (s < common - p && prev.charCodeAt(prev.length - 1 - s) === next.charCodeAt(next.length - 1 - s)) s++
+  }
+  while (p > 0 && (splitsUnit(prev, p) || splitsUnit(next, p))) p--
+  while (s > 0 && (splitsUnit(prev, prev.length - s) || splitsUnit(next, next.length - s))) s--
+  return { start: p, prevEnd: prev.length - s, nextEnd: next.length - s }
+}
+
+interface LineBounds {
+  start: number
+  /** Just past its last character, before its line break ("\r\n" counts as the break). */
+  end: number
+}
+function lineBounds(text: string): LineBounds[] {
+  const out: LineBounds[] = []
+  let start = 0
+  for (const part of text.split('\n')) {
+    const len = part.endsWith('\r') && start + part.length < text.length ? part.length - 1 : part.length
+    out.push({ start, end: start + len })
+    start += part.length + 1
+  }
+  return out
+}
+/** Index of the line an offset falls in; an offset at a line's end (before its break) is on that line. */
+function lineAt(lines: readonly LineBounds[], offset: number): number {
+  let lo = 0
+  let hi = lines.length - 1
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1
+    if ((lines[mid] as LineBounds).start <= offset) lo = mid
+    else hi = mid - 1
+  }
+  return lo
+}
+
+export interface EditOutcome {
+  /** The new text's heading levels, in canonical form. */
+  headings: number[] | undefined
+  /**
+   * The level of the line that the character at [start, end) of the new text was on before
+   * the edit, or undefined when the edit inserted (or replaced) that character.
+   */
+  levelBefore(start: number, end: number): number | undefined
+}
+
+/**
+ * The heading levels of `nextText` after an edit turned `prevText` (with `prevHeadings`)
+ * into it. In terms of the person typing:
+ * - lines the change did not touch keep their level (shifted when lines are added or
+ *   removed above them);
+ * - when the change leaves the number of lines of the block it touches unchanged (typing in
+ *   a line, replacing a line's text, moving a word within the text), each line of the block
+ *   keeps its level by position; so an emptied heading line stays a heading;
+ * - otherwise the line the change starts in keeps its level, lines the change creates are
+ *   normal, and the last line keeps the level of the line its remaining text came from
+ *   (Enter at the end of a heading starts a normal line; Enter in the middle leaves two
+ *   headings; a multi-line paste joins its first line to the line it was pasted into);
+ * - joining lines: the joined line keeps the level of the line the change starts in, unless
+ *   nothing of that line is left before the change and text of a later line follows it,
+ *   in which case it takes that later line's level.
+ * `caret` is the caret's UTF-16 offset in `nextText` after the change, when known.
+ */
+export function textAfterEdit(prevText: string, prevHeadings: readonly number[] | undefined, nextText: string, caret?: number): EditOutcome {
+  // The editing textarea turns "\r\n" into "\n". Line by line the two are the same, so a
+  // stored "\r\n" text compares line for line with what typing leaves of it.
+  const prev = nextText.includes('\r') ? prevText : prevText.replace(/\r\n/g, '\n')
+  const level = (i: number): number => {
+    const v = prevHeadings?.[i]
+    return isHeadingLevel(v) ? v : 0
+  }
+  const prevLines = lineBounds(prev)
+  const nextLines = lineBounds(nextText)
+  const { start, prevEnd, nextEnd } = prev === nextText ? { start: nextText.length, prevEnd: nextText.length, nextEnd: nextText.length } : diffText(prev, nextText, caret)
+  const ls = lineAt(prevLines, start)
+  const le = lineAt(prevLines, prevEnd)
+  const ne = lineAt(nextLines, nextEnd)
+  const out = new Array<number>(nextLines.length).fill(0)
+  for (let i = 0; i < ls; i++) out[i] = level(i)
+  if (le - ls === ne - ls) {
+    for (let i = ls; i <= le; i++) out[i] = level(i)
+  } else {
+    const restOfLast = (prevLines[le] as LineBounds).end > prevEnd // text of line `le` follows the change
+    if (ne === ls) {
+      const fromStart = start === (prevLines[ls] as LineBounds).start
+      out[ls] = fromStart && le > ls && restOfLast ? level(le) : level(ls)
+    } else {
+      out[ls] = level(ls)
+      out[ne] = restOfLast ? level(le) : 0 // lines strictly between are new: normal
+    }
+  }
+  for (let i = le + 1; i < prevLines.length; i++) out[ne + i - le] = level(i)
+  return {
+    headings: canonicalHeadings(nextText, out),
+    levelBefore(a, b) {
+      if (b <= start) return level(lineAt(prevLines, a))
+      if (a >= nextEnd) return level(lineAt(prevLines, a - nextEnd + prevEnd))
+      return undefined
+    },
+  }
+}
+
+/** The heading levels of `nextText` after an edit; see `textAfterEdit`. */
+export function headingsAfterEdit(prevText: string, prevHeadings: readonly number[] | undefined, nextText: string, caret?: number): number[] | undefined {
+  return textAfterEdit(prevText, prevHeadings, nextText, caret).headings
 }

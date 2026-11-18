@@ -134,9 +134,13 @@ export class Textbox extends FakeObject {
     this.canvas?.fire('text:editing:exited', { target: this })
     if (changed) this.canvas?.fire('object:modified', { target: this })
   }
-  /** Test helper: what typing does. */
-  type(text: string) {
+  /** Fabric's caret, in graphemes with one per line break; absent unless a test sets it. */
+  selectionStart?: number
+  selectionEnd?: number
+  /** Test helper: what typing does (optionally leaving the caret at grapheme `caret`). */
+  type(text: string, caret?: number) {
     this.text = text
+    if (caret !== undefined) this.selectionStart = this.selectionEnd = caret
     this.canvas?.fire('text:changed', { target: this })
   }
 }

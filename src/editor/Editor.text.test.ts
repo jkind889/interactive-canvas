@@ -151,6 +151,51 @@ describe('editing a formatted text', () => {
     tb.exitEditing()
   })
 
+  it('a paste that brings a larger size: the typing save stores the carried levels, and one undo restores the text exactly', async () => {
+    const { editor, store, canvas, tb, scene } = await setup()
+    canvas.setActiveObject(tb)
+    tb.enterEditing()
+    // "BIG" copied from a 40 px text and pasted at the start of the body line: Fabric gives
+    // it the source's complete style, whose size is this text's heading 1 size.
+    const big = { fontSize: 40, fontWeight: 'normal', fontFamily: 'Arial', fill: '#000000' }
+    const t = tb as unknown as { styles: Styles }
+    const h1 = { fontSize: 40, fontWeight: 'bold' }
+    t.styles = { 0: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1 }, 1: { 0: big, 1: big, 2: big, 8: { fontWeight: 'bold' }, 9: { fontWeight: 'bold' }, 10: { fontWeight: 'bold' }, 11: { fontWeight: 'bold' } } }
+    tb.type('Title\nBIGsome bold words', 9)
+    await flush() // the typing save, mid-edit
+    const pasted = rich({ text: 'Title\nBIGsome bold words', spans: [{ start: 14, end: 18, bold: true }] })
+    expect(store.saves.at(-1)!.doc.objects[0]).toStrictEqual(pasted)
+    expect(t.styles[1]![0]).toBeUndefined() // the pasted size is gone from the canvas too
+    tb.exitEditing()
+    await tick()
+    await flush()
+    expect(scene()[0]).toStrictEqual(pasted)
+    editor.undo()
+    await flush()
+    expect(scene()[0]).toStrictEqual(rich())
+    expect(editor.getState().canUndo).toBe(false)
+    editor.redo()
+    await flush()
+    expect(scene()[0]).toStrictEqual(pasted)
+  })
+
+  it('a text changed while it is not being edited (the source of a dragged selection) is made canonical too', async () => {
+    const { store, canvas, tb } = await setup()
+    // Fabric removes the dragged characters from the source after the drop (DraggableTextDelegate.mjs
+    // dragEndHandler), when the source may already have left its edit.
+    const t = tb as unknown as { styles: Styles; text: string; selectionEnd?: number }
+    const b = { fontWeight: 'bold' }
+    t.text = 'some bold words' // the heading line "Title\n" was dragged away, with its line break
+    t.styles = { 0: { 5: b, 6: b, 7: b, 8: b } } // Fabric moved the body line's styles up (removeStyleFromTo)
+    t.selectionEnd = 0
+    canvas.fire('text:changed', { target: tb })
+    await flush()
+    const want = rich({ text: 'some bold words', spans: [{ start: 5, end: 9, bold: true }] })
+    delete want.headings
+    expect(store.saves.at(-1)!.doc.objects[0]).toStrictEqual(want)
+    expect(t.styles).toEqual({ 0: { 5: b, 6: b, 7: b, 8: b } })
+  })
+
   it('a formatted text that ends blank is still discarded, with its removal as one undo step', async () => {
     const { editor, store, canvas, tb, scene } = await setup()
     canvas.setActiveObject(tb)

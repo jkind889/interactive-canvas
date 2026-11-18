@@ -214,6 +214,12 @@ describe('formatted text on the canvas', () => {
     }
   })
 
+  it('a line is a heading only at exactly its heading size (the app writes no other), not at a size a hair off it', () => {
+    const tb = tbOf(make(text({ text: 'ab\ncd' })))
+    tb.styles = { 0: { 0: { fontSize: 48.01, fontWeight: 'bold' } }, 1: { 0: { fontSize: 29.99, fontWeight: 'bold' } } }
+    expect(toRecord(tb as never)).toEqual(text({ text: 'ab\ncd', spans: [{ start: 0, end: 1, bold: true }, { start: 3, end: 4, bold: true }] }))
+  })
+
   it('a font-size style that matches no heading level is not a heading; bold in a heading line is implied', () => {
     const tb = tbOf(make(text({ text: 'ab\ncd' })))
     const h1 = { fontSize: 48, fontWeight: 'bold' }
@@ -249,5 +255,195 @@ describe('formatted text on the canvas', () => {
     expect({ left: tb.left, top: tb.top, text: tb.text }).toEqual(before)
     expect(reconcileTextFormatting(tb as never)).toBe(false) // canonical now: nothing to do
     expect(reconcileTextFormatting(make(text()) as never)).toBe(false)
+  })
+})
+
+describe('a text change: levels carried over, marks from the canvas', () => {
+  type Styles = Record<number, Record<number, Record<string, unknown>>>
+  type Tb = Loose & { styles: Styles; text: string; textAlign: string; selectionStart?: number; selectionEnd?: number }
+  const h1 = { fontSize: 48, fontWeight: 'bold' }
+  /** A complete style declaration, as Fabric's copy and drag store it (the source's size, font and colour). */
+  const pasted = (patch: Record<string, unknown> = {}) => ({ fontSize: 48, fontWeight: 'normal', fontStyle: 'normal', underline: false, linethrough: false, fontFamily: 'Arial', fill: '#ff0000', ...patch })
+  /** What Fabric leaves after a change: the new text, its styles as Fabric shifted them, the caret (graphemes). */
+  function change(tb: Tb, next: string, styles: Styles, caret?: number) {
+    tb.text = next
+    tb.styles = styles
+    tb.selectionStart = tb.selectionEnd = caret
+  }
+  const mk = (patch: Partial<TextRecord>) => make(text(patch)) as unknown as Tb
+
+  it('P1: plain text pasted from a larger text into a normal line brings neither a heading nor its size', () => {
+    const tb = mk({ text: 'Title\nbody' })
+    change(tb, 'Title\nBIGbody', { 1: { 0: pasted(), 1: pasted(), 2: pasted() } }, 9)
+    expect(reconcileTextFormatting(tb as never)).toBe(true)
+    expect(tb.styles).toEqual({})
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Title\nBIGbody' }))
+  })
+
+  it('P1b: the same from a 30 px text (the size of a level 3 heading here) at the start of a one-line text', () => {
+    const tb = mk({ text: 'body' })
+    change(tb, 'MIDbody', { 0: { 0: pasted({ fontSize: 30 }), 1: pasted({ fontSize: 30 }), 2: pasted({ fontSize: 30 }) } }, 3)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'MIDbody' }))
+  })
+
+  it('Q2: normal text pasted at the start of a heading line leaves one heading, and no bold mark anywhere', () => {
+    const tb = mk({ text: 'Title\nbody', headings: [1] })
+    const row: Styles[number] = { 0: pasted({ fontSize: 24 }), 1: pasted({ fontSize: 24 }), 2: pasted({ fontSize: 24 }), 3: pasted({ fontSize: 24 }) }
+    for (let i = 4; i < 9; i++) row[i] = h1
+    change(tb, 'bodyTitle\nbody', { 0: row }, 4)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'bodyTitle\nbody', headings: [1] }))
+    expect(Object.values(tb.styles[0]!)).toEqual(Array.from({ length: 9 }, () => h1))
+    expect(tb.styles[1]).toBeUndefined()
+  })
+
+  it('pasted marks stay: a bold word stays bold, heading text arrives bold at the normal size; nothing else of the source stays', () => {
+    const tb = mk({ text: 'ab' })
+    change(tb, 'aXYb', { 0: { 1: pasted({ fontWeight: 'bold', fontSize: 24 }), 2: pasted({ fontStyle: 'italic', underline: true, linethrough: true }) } }, 3)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'aXYb', spans: [{ start: 1, end: 2, bold: true }, { start: 2, end: 3, italic: true, underline: true, strike: true }] }))
+    expect(tb.styles).toEqual({ 0: { 1: { fontWeight: 'bold' }, 2: { fontStyle: 'italic', underline: true, linethrough: true } } })
+    const h = mk({ text: 'ab' })
+    change(h, 'aHb', { 0: { 1: pasted({ fontWeight: 'bold' }) } }, 2)
+    reconcileTextFormatting(h as never)
+    expect(toRecord(h as never)).toEqual(text({ text: 'aHb', spans: [{ start: 1, end: 2, bold: true }] }))
+  })
+
+  it('the bold of a heading does not become a mark when its characters join a normal line', () => {
+    const tb = mk({ text: 'body\nTitle', headings: [0, 1] })
+    // Fabric moves the heading characters' styles onto line 0 (ITextBehavior.mjs removeStyleFromTo).
+    change(tb, 'bodyTitle', { 0: { 4: h1, 5: h1, 6: h1, 7: h1, 8: h1 } }, 4)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'bodyTitle' }))
+    expect(tb.styles).toEqual({})
+  })
+
+  it('nor when Fabric copies the style of a heading character onto text pasted or typed on a new normal line', () => {
+    const tb = mk({ text: 'Title', headings: [1] })
+    // "A\nB" pasted at the end: Fabric copies the last heading character's style onto "A",
+    // onto the new line, and from there onto "B" (insertNewlineStyleObject, insertCharStyleObject).
+    change(tb, 'TitleA\nB', { 0: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1, 5: h1 }, 1: { 0: h1 } }, 8)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'TitleA\nB', headings: [1] }))
+    expect(tb.styles[1]).toBeUndefined()
+  })
+
+  it('a real bold mark that moves onto a heading is implied there, and stays a mark on a normal line', () => {
+    const tb = mk({ text: 'Title\nbold', headings: [1], spans: [{ start: 6, end: 10, bold: true }] })
+    const b = { fontWeight: 'bold' }
+    change(tb, 'Titlebold', { 0: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1, 5: b, 6: b, 7: b, 8: b } }, 5)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Titlebold', headings: [1] }))
+    const keep = mk({ text: 'ab\nbold', spans: [{ start: 3, end: 7, bold: true }] })
+    change(keep, 'abbold', { 0: { 2: b, 3: b, 4: b, 5: b } }, 2)
+    reconcileTextFormatting(keep as never)
+    expect(toRecord(keep as never)).toEqual(text({ text: 'abbold', spans: [{ start: 2, end: 6, bold: true }] }))
+  })
+
+  it('an emptied heading line gets its placeholder back, even when Fabric cleared every style', () => {
+    const tb = mk({ text: 'Title\nbody', headings: [1] })
+    change(tb, '\nbody', {}, 0)
+    expect(reconcileTextFormatting(tb as never)).toBe(true)
+    expect(tb.styles).toEqual({ 0: { 0: h1 } })
+    expect(toRecord(tb as never)).toEqual(text({ text: '\nbody', headings: [1] }))
+    const all = mk({ text: 'Title', headings: [1] })
+    change(all, '', {}, 0) // the textarea emptied: Fabric sets styles to {} (ITextKeyBehavior.mjs onInput)
+    reconcileTextFormatting(all as never)
+    expect(all.styles).toEqual({ 0: { 0: h1 } })
+  })
+
+  it('the caret picks the line Enter was pressed on', () => {
+    // The same new text from Enter at the end of "body" (caret 5) or at the start of "Title" (caret 6).
+    for (const [caret, headings] of [
+      [5, [0, 0, 1]],
+      [6, [0, 1, 1]],
+    ] as const) {
+      const tb = mk({ text: 'body\nTitle', headings: [0, 1] })
+      change(tb, 'body\n\nTitle', { 1: { 0: h1 }, 2: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1 } }, caret)
+      reconcileTextFormatting(tb as never)
+      expect(toRecord(tb as never)).toEqual(text({ text: 'body\n\nTitle', headings: [...headings] }))
+    }
+  })
+
+  it('the record read in the middle of a change (before its rewrite) already carries the levels, not the pasted sizes', () => {
+    const tb = mk({ text: 'Title\nbody' })
+    change(tb, 'Title\nBIGbody', { 1: { 0: pasted(), 1: pasted(), 2: pasted() } })
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Title\nBIGbody' }))
+  })
+
+  it('a stored "\\r\\n" text keeps its marks and levels, and keeps them when typing turns its break into "\\n"', () => {
+    const tb = mk({ text: 'Title\r\nbody bold', headings: [1], spans: [{ start: 12, end: 16, bold: true }] })
+    const b = { fontWeight: 'bold' }
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Title\r\nbody bold', headings: [1], spans: [{ start: 12, end: 16, bold: true }] }))
+    change(tb, 'Title\nbody bold!', { 0: { 0: h1, 1: h1, 2: h1, 3: h1, 4: h1 }, 1: { 5: b, 6: b, 7: b, 8: b, 9: b } }, 16)
+    reconcileTextFormatting(tb as never)
+    expect(toRecord(tb as never)).toEqual(text({ text: 'Title\nbody bold!', headings: [1], spans: [{ start: 11, end: 16, bold: true }] }))
+  })
+})
+
+describe('the wrap width after a rewrite', () => {
+  type Tb = Loose & { styles: Record<number, Record<number, Record<string, unknown>>>; text: string; selectionEnd?: number }
+  const h1 = { fontSize: 48, fontWeight: 'bold' }
+  const joined = (tb: Tb, grownTo: number) => {
+    // Backspace at the start of "WWW": Fabric laid "abWWW" out with the heading's size on
+    // "WWW" and widened the box to fit, keeping its alignment edge (updateFromTextArea).
+    const cx = tb.left + tb.width / 2
+    tb.text = 'abWWW'
+    tb.styles = { 0: { 2: h1, 3: h1, 4: h1 } }
+    tb.selectionEnd = 2
+    tb.width = grownTo
+    tb.left = cx - grownTo / 2
+  }
+
+  it('goes back to the width from before the change, keeping a centred box centred', () => {
+    const tb = make(text({ text: 'ab\nWWW', headings: [0, 1], align: 'center', width: 150 })) as unknown as Tb
+    const centre = tb.left + tb.width / 2
+    joined(tb, 161)
+    reconcileTextFormatting(tb as never)
+    expect(tb.width).toBe(150)
+    expect(tb.left + tb.width / 2).toBe(centre)
+    expect(toRecord(tb as never)).toMatchObject({ width: 150, left: 1, text: 'abWWW' })
+  })
+
+  it('keeps a width set by a side handle since the last write (picked up by the commit that reads the scene)', () => {
+    const tb = make(text({ text: 'ab\nWWW', headings: [0, 1], width: 150 })) as unknown as Tb
+    tb.width = 300 // a side handle
+    toRecord(tb as never)
+    joined(tb, 400)
+    reconcileTextFormatting(tb as never)
+    expect(tb.width).toBe(300)
+  })
+
+  it('never uses a remembered width that cannot be from before the change', () => {
+    const narrowed = make(text({ text: 'ab\nWWW', headings: [0, 1], width: 150 })) as unknown as Tb
+    narrowed.width = 100 // narrowed without a read in between: the remembered 150 is larger than the box
+    joined(narrowed, 120)
+    reconcileTextFormatting(narrowed as never)
+    expect(narrowed.width).toBe(120)
+    const resized = make(text({ text: 'ab\nWWW', headings: [0, 1], width: 150 })) as unknown as Tb
+    resized.fontSize = 30 // a base size the remembered width was not taken at
+    joined(resized, 200)
+    reconcileTextFormatting(resized as never)
+    expect(resized.width).toBe(200)
+  })
+
+  it('setting the font size and folding a scale refresh the remembered width', () => {
+    const tb = make(text({ text: 'ab\nWWW', headings: [0, 1], width: 150 })) as unknown as Tb
+    Object.assign(tb, { scaleX: 2, scaleY: 2 })
+    normalizeTextScale(tb as never) // width 300, size 48
+    joined(tb, 500)
+    tb.styles = { 0: { 2: { fontSize: 96, fontWeight: 'bold' } } }
+    reconcileTextFormatting(tb as never)
+    expect(tb.width).toBe(300)
+  })
+
+  it('a change whose styles were already canonical keeps the width Fabric gave it (a long word widens the box)', () => {
+    const tb = make(text({ text: 'ab', width: 150 })) as unknown as Tb
+    tb.text = 'abWWWWWWWWWWWW'
+    tb.selectionEnd = 14
+    tb.width = 260
+    expect(reconcileTextFormatting(tb as never)).toBe(false)
+    expect(tb.width).toBe(260)
   })
 })
