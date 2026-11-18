@@ -156,6 +156,10 @@ test.describe('replace image', () => {
     const p = obj(stored, 'P')
     expect(p).toMatchObject({ left: 200, top: 150, angle: 0, scaleX: 0.5, scaleY: 0.5 })
     expect(Object.keys(p)).not.toContain('crop')
+    // The one file input is back in Add mode once a replace pick has been handled.
+    const input = page.locator('input[type=file]')
+    expect(await input.evaluate((el) => (el as HTMLInputElement).multiple)).toBe(true)
+    await expect(input).not.toHaveAttribute('data-replace-for')
   })
 
   test('a rotated, cropped image owned by a frame: box, angle and owner unchanged; a reload shows the same, stores the new bytes and prunes the old ones', async ({ page }) => {

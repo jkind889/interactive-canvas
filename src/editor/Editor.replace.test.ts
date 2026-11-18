@@ -424,7 +424,7 @@ describe('when the decode finishes (P3)', () => {
     expect(b.activeIds()).toEqual([])
   })
 
-  it('two replacements of one target in flight: applied in the order they finish, each its own step', async () => {
+  it('the last pick wins: a slow first pick that finishes after a faster second one is dropped silently', async () => {
     const b = await board([], [img('P', 100, 50)])
     b.editor.selectLayer('P')
     const target = b.editor.replaceTarget()!
@@ -434,16 +434,101 @@ describe('when the decode finishes (P3)', () => {
     const p2 = b.editor.replaceImageFile(target, file('big-400x200.png'))
     second.resolve()
     await p2
+    await flush()
+    const attempts = b.store.attempts.length
     expect(b.rec('P')).toMatchObject({ scaleX: 0.5 })
     first.resolve()
     await p1
-    expect(b.rec('P').crop).toEqual({ x: 100, y: 0, width: 200, height: 100 })
-    expect(b.editor.getState().layers[0]?.label).toBe('wide-400x100.png')
-    expect(b.undoDepth()).toBe(2)
-    b.editor.undo()
-    expect(b.rec('P')).toMatchObject({ scaleX: 0.5 })
+    await flush()
+    expect(b.rec('P')).toMatchObject({ scaleX: 0.5 }) // still the second pick
+    expect(b.rec('P')).not.toHaveProperty('crop')
+    expect(b.editor.getState().layers[0]?.label).toBe('big-400x200.png')
+    expect(b.notice()).toBeNull() // silently
+    expect(b.store.attempts).toHaveLength(attempts) // nothing saved
+    expect(b.undoDepth()).toBe(1)
+    // Undo does not reset this: the dropped pick stays dropped.
     b.editor.undo()
     expect(b.rec('P')).toEqual(img('P', 100, 50))
+  })
+
+  it('a fast first pick and a slow second one: both applied in order, each its own step, the second showing', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    const target = b.editor.replaceTarget()!
+    const first = b.assets.hold('wide-400x100.png')
+    const second = b.assets.hold('big-400x200.png')
+    const p1 = b.editor.replaceImageFile(target, file('wide-400x100.png'))
+    const p2 = b.editor.replaceImageFile(target, file('big-400x200.png'))
+    first.resolve()
+    await p1
+    expect(b.rec('P').crop).toEqual({ x: 100, y: 0, width: 200, height: 100 })
+    second.resolve()
+    await p2
+    expect(b.rec('P')).toMatchObject({ scaleX: 0.5 })
+    expect(b.undoDepth()).toBe(2)
+    b.editor.undo()
+    expect(b.rec('P').crop).toEqual({ x: 100, y: 0, width: 200, height: 100 })
+    b.editor.undo()
+    expect(b.rec('P')).toEqual(img('P', 100, 50))
+  })
+
+  it('both waiting behind a drag, finished in reverse order: the latest request ends up showing, never followed by the older one', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    const target = b.editor.replaceTarget()!
+    const first = b.assets.hold('wide-400x100.png')
+    const second = b.assets.hold('big-400x200.png')
+    const p1 = b.editor.replaceImageFile(target, file('wide-400x100.png'))
+    const p2 = b.editor.replaceImageFile(target, file('big-400x200.png'))
+    const t = press(b.canvas, b.obj('P'))
+    dragBy(b.canvas, t, 40, 0)
+    second.resolve()
+    await p2
+    first.resolve()
+    await p1
+    release(b.canvas, t)
+    await tick()
+    expect(b.rec('P')).toMatchObject({ left: 140, scaleX: 0.5 }) // the second (latest) pick
+    expect(b.rec('P')).not.toHaveProperty('crop')
+    // History, newest first: second pick, then (applied before it) the first pick, then the move.
+    const steps: Array<ImageRecord['crop'] | 'none'> = []
+    while (b.canUndo()) {
+      b.editor.undo()
+      steps.push(b.rec('P').crop ?? 'none')
+    }
+    expect(steps).toEqual([{ x: 100, y: 0, width: 200, height: 100 }, 'none', 'none'])
+  })
+
+  it('replacements of two different images are independent', async () => {
+    const b = await board([], [img('P', 100, 50), img('Q', 400, 50)])
+    b.editor.selectLayer('P')
+    const p = b.editor.replaceTarget()!
+    b.editor.selectLayer('Q')
+    const q = b.editor.replaceTarget()!
+    const slowP = b.assets.hold('wide-400x100.png')
+    const pp = b.editor.replaceImageFile(p, file('wide-400x100.png'))
+    await b.editor.replaceImageFile(q, file('big-400x200.png')) // requested later, for another image
+    slowP.resolve()
+    await pp
+    expect(b.rec('P').crop).toEqual({ x: 100, y: 0, width: 200, height: 100 })
+    expect(b.rec('Q')).toMatchObject({ scaleX: 0.5 })
+    expect(b.undoDepth()).toBe(2)
+  })
+
+  it('an import and a replacement both waiting when the board goes read-only: one notice states both', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    const target = b.editor.replaceTarget()!
+    const t = press(b.canvas, b.obj('P'))
+    dragBy(b.canvas, t, 40, 0)
+    await b.editor.addImageFiles([file('a.png'), file('b.png')])
+    await b.editor.replaceImageFile(target, file('wide-400x100.png'))
+    b.store.saveError = new BoardConflictError()
+    b.editor.setTitle('conflict')
+    await flush()
+    expect(b.notice()?.message).toBe('2 images were not added and 1 image was not replaced because the board became read-only.')
+    release(b.canvas, t)
+    await tick()
   })
 })
 

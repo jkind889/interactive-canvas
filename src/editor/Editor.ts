@@ -203,6 +203,8 @@ interface ReplaceJob {
   targetId: string
   assetId: string
   size: Size
+  /** The order in which `replaceImageFile` was called (per editor): the latest request for a target wins. */
+  seq: number
 }
 
 /** A Frame-tool press that moves less than this many screen pixels is a click (default-sized frame). */
@@ -250,8 +252,15 @@ export class Editor {
   private gestureSeq = 0
   /** Image batches that finished decoding while a gesture was in progress. */
   private stagedImports: ImageRecord[][] = []
-  /** Replacement pictures that finished decoding while a gesture was in progress, in that order. */
+  /** Replacement pictures that finished decoding while a gesture was in progress (applied in request order). */
   private stagedReplacements: ReplaceJob[] = []
+  /** Numbers each `replaceImageFile` call, in the order they were made. */
+  private replaceSeq = 0
+  /**
+   * Per image id, the request number of the replacement last applied to it. Kept for the
+   * session (ids are never reused, so an entry for an image that is gone is harmless).
+   */
+  private readonly replaceApplied = new Map<string, number>()
   /** A primary-button press has been passed through to Fabric and not yet released. */
   private primaryDown = false
   private pan: { button: number; end: () => void } | null = null
@@ -1047,16 +1056,25 @@ export class Editor {
   private idle() {
     if (this.gesture || !this.editable) return
     for (const batch of this.stagedImports.splice(0)) this.applyImport(batch)
-    for (const job of this.stagedReplacements.splice(0)) this.applyReplace(job) // in the order they finished decoding
+    // In the order they were requested, so the latest request for an image is the one left showing.
+    for (const job of this.stagedReplacements.splice(0).sort((a, b) => a.seq - b.seq)) this.applyReplace(job)
   }
 
   private dropStagedImports() {
     const dropped = this.stagedImports.reduce((n, batch) => n + batch.length, 0)
     this.stagedImports = []
-    if (dropped > 0) this.notify('error', `${dropped} image${dropped === 1 ? ' was' : 's were'} not added because the board became read-only.`)
     const replacements = this.stagedReplacements.length
     this.stagedReplacements = []
-    if (replacements > 0) this.notify('error', `${replacements === 1 ? 'An image was' : `${replacements} images were`} not replaced because the board became read-only.`)
+    // One notice slot: both facts go in one message.
+    const why = 'because the board became read-only.'
+    if (dropped > 0 && replacements > 0) {
+      const images = (n: number) => `${n} image${n === 1 ? '' : 's'}`
+      this.notify('error', `${images(dropped)} ${dropped === 1 ? 'was' : 'were'} not added and ${images(replacements)} ${replacements === 1 ? 'was' : 'were'} not replaced ${why}`)
+    } else if (dropped > 0) {
+      this.notify('error', `${dropped} image${dropped === 1 ? ' was' : 's were'} not added ${why}`)
+    } else if (replacements > 0) {
+      this.notify('error', `${replacements === 1 ? 'An image was' : `${replacements} images were`} not replaced ${why}`)
+    }
   }
 
   private bindDomEvents() {
@@ -1632,12 +1650,13 @@ export class Editor {
       return
     }
     const name = file.name || 'The file'
+    const seq = ++this.replaceSeq // taken before decoding: requests are ordered by when they were made
     let job: ReplaceJob
     try {
       if (!isImageFile(file)) throw new Error('not an image')
       const asset = await readImageFile(file)
       const el = await this.assets.load(asset) // kept for the session; stored by the first save that references it
-      job = { targetId, assetId: asset.id, size: { width: el.naturalWidth, height: el.naturalHeight } }
+      job = { targetId, assetId: asset.id, size: { width: el.naturalWidth, height: el.naturalHeight }, seq }
     } catch {
       if (!this.disposed) this.notify('error', `${name} could not be used to replace the image: it is not an image, or it could not be read.`)
       return
@@ -1658,6 +1677,11 @@ export class Editor {
    */
   private applyReplace(job: ReplaceJob) {
     if (!this.editable || this.busy) return
+    // The last pick wins: a picture that arrives after a newer request for the same image has
+    // already been applied is dropped silently (its decoded image just stays unreferenced). Undo
+    // and redo do not reset this, so an old decode arriving after the newer replacement was
+    // undone is still dropped: the simplest rule that never shows a superseded pick.
+    if ((this.replaceApplied.get(job.targetId) ?? 0) > job.seq) return
     this.finishEditing() // an open crop is applied first, as its own step
     const img = this.canvas.getObjects().find((o) => idOf(o) === job.targetId)
     const el = this.assets.get(job.assetId)
@@ -1676,6 +1700,7 @@ export class Editor {
       setImageCrop(img, next.crop)
       img.set({ left: next.left, top: next.top, scaleX: next.scaleX, scaleY: next.scaleY })
       img.setCoords()
+      this.replaceApplied.set(job.targetId, job.seq)
     }
     if (members) this.selectByIds(members)
     this.canvas.requestRenderAll()

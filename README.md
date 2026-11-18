@@ -115,6 +115,7 @@ Select one image and press **Replace image**, then choose a picture file. The ne
 - To see the whole new picture instead, press **Fit** afterwards: it shrinks the box to the new picture's shape, inside the old box.
 - It is one undo step. Undo brings back the old picture exactly as it was: it is kept for the rest of the session even after it has been replaced.
 - If the image was deleted or locked while you were choosing the file, or the board became read-only, nothing is replaced and a message says why. If you were dragging something when the picture finished loading, it is replaced as soon as the drag ends. If you were cropping, the crop is applied first.
+- If you replace the same image again before the first picture has finished loading, the picture you picked last is the one that stays: an earlier pick that finishes loading later is quietly ignored.
 - The old picture's file stays stored on this device until the board is next opened, which removes the pictures it no longer uses.
 
 A locked image cannot be cropped, fitted, filled or replaced until it is unlocked.
@@ -144,6 +145,7 @@ Everything is stored in this browser's IndexedDB, for this origin (`http://local
 - A crop handle is grabbed within 8 screen pixels. On a very small crop box the handles cover the whole box, so it can be resized but not moved; zoom in to move it.
 - Replace image leaves whatever you were doing first, like every other command: a crop that is open, or a text being typed, is finished as its own undo step when the new picture arrives, even if the image then turns out to be gone or locked and is not replaced.
 - The file dialog cannot be dismissed by the app: if the image you pressed Replace image for is deleted while the dialog is open, choosing a file afterwards only shows a message.
+- Choosing the very same file again replaces the picture with an identical copy: it is stored as a new picture and is an undo step of its own, as when the same file is added twice.
 - Zoom to fit (`Shift+1` or the button) while cropping fits the whole original as it is shown during the crop; only the view changes.
 - A saved crop that reaches outside its image (only possible if the stored board was edited by hand or damaged) is trimmed to the image when the board opens. Opening writes nothing, but the next save stores the trimmed crop.
 - Pressing on the board while cropping does not take the keyboard focus away from a field you were typing in, such as the board title (as with the Hand tool). Enter and Esc then go to that field, not to the crop; use Done or Cancel instead.
