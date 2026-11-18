@@ -358,3 +358,49 @@ describe('Autosaver: revision token and asset bytes', () => {
     expect(a.saver.state).toEqual({ kind: 'unavailable', message: 'read-only now' })
   })
 })
+
+describe('Autosaver after dispose', () => {
+  it('a save in flight, a change, dispose, then completion: exactly one write, no timer left, no status, getDoc not asked again', async () => {
+    const s = setup()
+    let release!: () => void
+    s.gate.hold = new Promise<void>((r) => (release = r))
+    s.saver.markDirty()
+    for (const t of s.timers.filter((x) => x.live)) {
+      t.live = false
+      t.fn() // the debounce fires: the save starts and waits
+    }
+    expect(s.gate.attempts).toBe(1)
+    s.saver.markDirty() // something changed while it was saving
+    s.saver.dispose()
+    const statusesAtDispose = s.statuses.length
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    await s.saver.flush()
+    await s.saver.retry()
+    s.saver.markDirty()
+    s.saver.markLoaded(ABSENT)
+    expect(s.saves).toHaveLength(1) // the in-flight one, with the document taken before dispose
+    expect(s.saves[0]!.doc.title).toBe('v1')
+    expect(s.gate.attempts).toBe(1)
+    expect(s.timers.filter((t) => t.live)).toHaveLength(0)
+    expect(s.statuses.length).toBe(statusesAtDispose)
+  })
+
+  it('an in-flight save that fails after dispose reports nothing', async () => {
+    const s = setup()
+    let release!: () => void
+    s.gate.hold = new Promise<void>((r) => (release = r))
+    s.gate.fail = new BoardConflictError()
+    s.saver.markDirty()
+    for (const t of s.timers.filter((x) => x.live)) {
+      t.live = false
+      t.fn()
+    }
+    s.saver.dispose()
+    const before = s.statuses.length
+    release()
+    await new Promise((r) => setTimeout(r, 0))
+    expect(s.conflicts).toEqual([])
+    expect(s.statuses.length).toBe(before)
+  })
+})

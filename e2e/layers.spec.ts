@@ -457,3 +457,30 @@ test.describe('the layer list, collapsed', () => {
     expect(o.errors).toEqual([])
   })
 })
+
+test.describe('focus after a mouse press on a row', () => {
+  test('a row focused from the keyboard lets go when another row is clicked: Space then pans and the clicked row stays selected', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('A', 100, 100), image('B', 500, 100)])
+    await row(page, 'A').focus()
+    await page.keyboard.press('Enter') // keyboard activation still works
+    await expect.poll(() => selectedRows(page)).toEqual(['A'])
+    await row(page, 'B').click()
+    await expect.poll(() => selectedRows(page)).toEqual(['B'])
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+
+    // Space now holds the hand: a drag pans the board, and nothing selects A again.
+    const from = o.at(900, 500)
+    await page.keyboard.down('Space')
+    await drag(page, from, { x: from.x + 60, y: from.y + 30 })
+    await page.keyboard.up('Space')
+    await expect.poll(async () => (await storedDoc(page)).viewport.panX).toBe(60)
+    await expect.poll(() => selectedRows(page)).toEqual(['B'])
+  })
+
+  test('the same for a padlock pressed after a row was focused from the keyboard', async ({ page }) => {
+    await openSeeded(page, [], [image('A', 100, 100), image('B', 500, 100)])
+    await row(page, 'A').focus()
+    await row(page, 'B').getByTestId('layer-lock').click()
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(true)
+  })
+})

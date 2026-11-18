@@ -58,6 +58,17 @@ async function storedWhen(page: Page, check: (doc: StoredBoard) => boolean): Pro
   return storedDoc(page)
 }
 
+/**
+ * Renames the board and waits for that save: it re-serializes every record from the canvas, so
+ * what it writes shows what the loaded canvas really holds (a reload alone never rewrites the row).
+ */
+async function resaveFromCanvas(page: Page, title: string): Promise<StoredBoard> {
+  const input = page.getByRole('textbox', { name: 'Board title', exact: true })
+  await input.fill(title)
+  await input.press('Enter')
+  return storedWhen(page, (d) => d.title === title)
+}
+
 /** Centre and displayed size of a stored image, given its picture's size in source pixels. */
 function box(rec: { left: number; top: number; angle: number; scaleX?: number; scaleY?: number; crop?: Crop }, size: { width: number; height: number }) {
   const w = (rec.crop?.width ?? size.width) * (rec.scaleX ?? 1)
@@ -184,6 +195,7 @@ test.describe('replace image', () => {
     await expect(page.locator('.save-status')).toContainText('Saved on this device')
     await expect.poll(async () => differing(await sample(), shown)).toBe(0)
     expect(obj(await storedDoc(page), 'P')).toEqual(p)
+    expect(obj(await resaveFromCanvas(page, 'Re-saved'), 'P')).toEqual(p) // what the reloaded canvas holds
     await expect.poll(async () => Object.keys((await snapshotIdb(page)).assets)).toEqual([p.assetId])
     idb = await snapshotIdb(page)
     expect(idb.assets[p.assetId]!.len).toBe(picture('new.png', 300, 300).buffer.length)
@@ -198,7 +210,7 @@ test.describe('replace image', () => {
     await storedWhen(page, (d) => d.objects.length === 1)
     let snapshot = await snapshotIdb(page)
     await chooser.setFiles(picture('late.png', 400, 100))
-    await expect(toast(page)).toContainText('could not be replaced')
+    await expect(toast(page)).toContainText('could not be replaced: it is no longer on the board.')
     await page.waitForTimeout(AUTOSAVE_QUIET_MS)
     expect(await snapshotIdb(page)).toEqual(snapshot)
 
@@ -208,7 +220,7 @@ test.describe('replace image', () => {
     await storedWhen(page, (d) => obj(d, 'Q').locked === true)
     snapshot = await snapshotIdb(page)
     await chooser.setFiles(picture('late.png', 400, 100))
-    await expect(toast(page)).toContainText('could not be replaced')
+    await expect(toast(page)).toContainText('could not be replaced: it is locked. Unlock it and try again.')
     await page.waitForTimeout(AUTOSAVE_QUIET_MS)
     expect(await snapshotIdb(page)).toEqual(snapshot)
     expect(obj(await storedDoc(page), 'Q').assetId).toBe('q2')

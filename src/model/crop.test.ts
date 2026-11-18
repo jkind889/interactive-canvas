@@ -14,7 +14,7 @@ import {
   isWholeImage,
   largestCentredCrop,
   minCropSide,
-  roundCrop,
+  storedCrop,
   sceneToSource,
   sourceToScene,
   uncroppedPlacement,
@@ -72,12 +72,46 @@ describe('source pixels and the board', () => {
 })
 
 describe('the whole image, clamping and rounding', () => {
-  it('a crop within the tolerance of every edge is the whole image', () => {
+  it('a crop is the whole image exactly when its edges, rounded to the stored step, are the image edges', () => {
     expect(isWholeImage(undefined, SIZE)).toBe(true)
     expect(isWholeImage({ x: 0, y: 0, width: 400, height: 200 }, SIZE)).toBe(true)
-    expect(isWholeImage({ x: 0.005, y: 0, width: 399.995, height: 200.004 }, SIZE)).toBe(true)
+    expect(isWholeImage({ x: 0.004, y: 0, width: 399.996, height: 200.004 }, SIZE)).toBe(true) // rounds to the image edges
+    expect(isWholeImage({ x: 0.01, y: 0, width: 399.99, height: 200 }, SIZE)).toBe(false) // one stored step in: a crop
+    expect(isWholeImage({ x: 0, y: 0, width: 400, height: 199.99 }, SIZE)).toBe(false)
     expect(isWholeImage({ x: 0.1, y: 0, width: 399.9, height: 200 }, SIZE)).toBe(false)
-    expect(isWholeImage({ x: 0, y: 0, width: 400, height: 199 }, SIZE)).toBe(false)
+  })
+
+  it("Astra's case: one stored step off the whole image is kept (10 x 100 source, x 0.01, width 9.98)", () => {
+    expect(storedCrop({ x: 0.01, y: 0, width: 9.98, height: 100 }, { width: 10, height: 100 })).toEqual({ x: 0.01, y: 0, width: 9.98, height: 100 })
+  })
+
+  it('rounds the edges, not the sides, so a stored crop never reaches outside the image', () => {
+    // A 240 px wide image cropped 0.125 px in from the left: the old rounding stored x 0.13, width 239.88 (right edge 240.01).
+    const c = storedCrop({ x: 0.125, y: 0, width: 239.875, height: 160 }, { width: 240, height: 160 })!
+    expect(c).toEqual({ x: 0.13, y: 0, width: 239.87, height: 160 }) // right edge exactly 240
+    expect(storedCrop({ x: 1.23456, y: 0.004, width: 10.005001, height: 50 }, SIZE)).toEqual({ x: 1.23, y: 0, width: 10.01, height: 50 })
+    // Narrower than the stored step: keeps its own positive side instead of collapsing to zero.
+    expect(storedCrop({ x: 5.001, y: 0, width: 0.003, height: 50 }, SIZE)).toEqual({ x: 5, y: 0, width: 0.003, height: 50 })
+  })
+
+  it('over random rectangles inside an image: the stored crop lies inside it, and storing or clamping it again changes nothing', () => {
+    const r = rng(21)
+    for (let i = 0; i < 5000; i++) {
+      const size = { width: Math.max(1, Math.round(Math.exp(r() * Math.log(9000)))), height: Math.max(1, Math.round(Math.exp(r() * Math.log(9000)))) }
+      const w = r() * size.width
+      const h = r() * size.height
+      const rect = { x: r() * (size.width - w), y: r() * (size.height - h), width: w, height: h }
+      const c = storedCrop(rect, size)
+      if (!c) continue
+      expect(c.x).toBeGreaterThanOrEqual(0)
+      expect(c.y).toBeGreaterThanOrEqual(0)
+      expect(c.width).toBeGreaterThan(0)
+      expect(c.height).toBeGreaterThan(0)
+      expect(c.x + c.width).toBeLessThanOrEqual(size.width + 1e-9)
+      expect(c.y + c.height).toBeLessThanOrEqual(size.height + 1e-9)
+      expect(clampCrop(c, size)).toEqual(c)
+      expect(storedCrop(c, size)).toEqual(c)
+    }
   })
 
   it('clamps a stored crop to the decoded image; nothing left, or the whole image, is no crop', () => {
@@ -89,9 +123,6 @@ describe('the whole image, clamping and rounding', () => {
     expect(clampCrop({ x: 0, y: 0, width: 1000, height: 1000 }, SIZE)).toBeUndefined()
   })
 
-  it('rounds positions to 2 decimals and keeps sizes positive', () => {
-    expect(roundCrop({ x: 1.23456, y: 0.004, width: 10.005001, height: 0.001 })).toEqual({ x: 1.23, y: 0, width: 10.01, height: 0.001 })
-  })
 })
 
 describe('handles', () => {
@@ -333,7 +364,7 @@ describe('Fit and Fill are idempotent and Fill keeps the box (seeded sweep)', ()
         expect(out.crop.y).toBeGreaterThanOrEqual(0)
         expect(out.crop.x + out.crop.width).toBeLessThanOrEqual(size.width + 1e-9)
         expect(out.crop.y + out.crop.height).toBeLessThanOrEqual(size.height + 1e-9)
-        expect(roundCrop(out.crop)).toEqual(out.crop)
+        expect(storedCrop(out.crop, size)).toEqual(out.crop)
         expect(Math.abs(out.crop.x - (size.width - out.crop.width - out.crop.x))).toBeLessThanOrEqual(0.0100001)
         expect(Math.abs(out.crop.y - (size.height - out.crop.height - out.crop.y))).toBeLessThanOrEqual(0.0100001)
       }

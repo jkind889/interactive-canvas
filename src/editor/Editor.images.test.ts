@@ -72,10 +72,12 @@ function helpers(editor: Editor, store: SpyStore, canvas: Canvas) {
   }
   const cropping = () => editor.getState().cropping
   const canUndo = () => editor.getState().canUndo
+  /** Whether history itself holds a step (the Undo button is also enabled for a changed open crop). */
+  const committed = () => (editor as unknown as { history: { canUndo: boolean } }).history.canUndo
   const sel = () => editor.getState().selection
   const activeIds = () => canvas.getActiveObjects().map((o) => idOf(o as never))
   const lastSaved = (id: string) => store.saves.at(-1)?.doc.objects.find((o) => o.id === id) as ImageRecord | undefined
-  return { editor, store, canvas, obj, doc, live, rec, cropping, canUndo, sel, activeIds, lastSaved }
+  return { editor, store, canvas, obj, doc, live, rec, cropping, canUndo, committed, sel, activeIds, lastSaved }
 }
 
 // ---- mouse, as a real browser reports it ------------------------------------------------------
@@ -206,7 +208,7 @@ describe('dragging and applying (M3, M5)', () => {
     b.editor.startCrop()
     dragCrop(b.canvas, [300, 150], [250, 120]) // bottom-right corner: source (200,100) -> (150,70)
     dragCrop(b.canvas, [100, 90], [130, 90]) // left side: x 0 -> 30
-    expect(b.canUndo()).toBe(false)
+    expect(b.committed()).toBe(false) // nothing in history yet (the Undo button is enabled: it would apply the crop first)
     window.dispatchEvent(key('Enter'))
     expect(b.cropping()).toBe(false)
     const after = b.rec('P')
@@ -403,7 +405,7 @@ describe('keys and commands during crop mode (M7, M8)', () => {
     expect(b.editor.getState().handActive).toBe(true)
     window.dispatchEvent(new KeyboardEvent('keyup', { key: ' ', code: 'Space', bubbles: true }))
     expect(b.cropping()).toBe(true)
-    expect(b.canUndo()).toBe(false)
+    expect(b.committed()).toBe(false) // nothing in history yet (the Undo button is enabled: it would apply the crop first)
   })
 
   it('Enter typed in a field or on a button does not apply the crop; Esc in a field does not cancel it', async () => {
@@ -420,7 +422,7 @@ describe('keys and commands during crop mode (M7, M8)', () => {
     input.remove()
     button.remove()
     expect(b.cropping()).toBe(true)
-    expect(b.canUndo()).toBe(false)
+    expect(b.committed()).toBe(false) // nothing in history yet (the Undo button is enabled: it would apply the crop first)
   })
 
   it('undo during crop mode applies the crop first, then undoes it; redo re-applies', async () => {
@@ -943,5 +945,57 @@ describe('re-review fixes', () => {
     expect(b.editor.getState().readOnly).toBe(CONFLICT_MESSAGE)
     expect(b.editor.getState().tool).toBe('hand')
     expect(b.canvas.upperCanvasEl.style.cursor).toBe('grab')
+  })
+})
+
+describe('final review fixes', () => {
+  it('disposed while a save is in flight and something changed: no further save is ever made (pre-existing data-loss path)', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.store.saveGate = deferred<void>()
+    b.editor.setTitle('first')
+    await flush() // the save starts and is held
+    expect(b.store.attempts).toHaveLength(1)
+    b.editor.setTitle('second') // changed while saving
+    b.editor.dispose()
+    const gate = b.store.saveGate
+    b.store.saveGate = null
+    gate.resolve()
+    await flush()
+    await flush()
+    expect(b.store.attempts).toHaveLength(1)
+    expect(b.store.saves[0]!.doc.objects).toHaveLength(1)
+  })
+})
+
+describe('Undo while a crop is open', () => {
+  it('is available as soon as the rectangle differs from where it began (even with no history yet), and goes back when it returns', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    b.editor.startCrop()
+    expect(b.canUndo()).toBe(false)
+    dragCrop(b.canvas, [300, 150], [250, 150]) // the right side in
+    expect(b.canUndo()).toBe(true)
+    expect(b.committed()).toBe(false)
+    dragCrop(b.canvas, [250, 150], [300, 150]) // and back out: unchanged again
+    expect(b.canUndo()).toBe(false)
+    dragCrop(b.canvas, [300, 150], [250, 150])
+    b.editor.undo() // applies the crop, then undoes it
+    expect(b.cropping()).toBe(false)
+    expect(b.rec('P')).toEqual(img('P', 100, 50))
+    expect(b.editor.getState().canRedo).toBe(true)
+    expect(b.canUndo()).toBe(false)
+  })
+})
+
+describe('stored crops never reach outside the original', () => {
+  it('a left side dragged 3 scene units at scale 8 (0.375 source px) stores x 0.38 and width 199.62, not 199.63 (right edge 200.01)', async () => {
+    const b = await board([], [img('W', 100, 50, { scaleX: 8, scaleY: 8 })]) // the fake image is 200 x 100: the same half-step at its right edge
+    b.editor.selectLayer('W')
+    b.editor.startCrop()
+    dragCrop(b.canvas, [100, 300], [103, 300])
+    b.editor.applyCrop()
+    expect(b.rec('W').crop).toEqual({ x: 0.38, y: 0, width: 199.62, height: 100 })
+    const c = b.rec('W').crop!
+    expect(c.x + c.width).toBeLessThanOrEqual(200)
   })
 })

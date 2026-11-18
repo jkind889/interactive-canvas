@@ -379,3 +379,24 @@ describe('crop: an optional image field on both wire versions', () => {
     expect(sceneEqual({ frames: [], objects: [{ ...image, crop: { ...crop, x: Number.NaN } }] }, { frames: [], objects: [{ ...image, crop: { ...crop, x: Number.NaN } }] })).toBe(true)
   })
 })
+
+describe('round never turns a finite value into Infinity', () => {
+  it('huge finite values come back as they are; ordinary values and -0 as before', () => {
+    for (const n of [1e307, -1e307, Number.MAX_VALUE, -Number.MAX_VALUE]) {
+      expect(round(n)).toBe(n)
+      expect(Number.isFinite(round(n, 5))).toBe(true)
+    }
+    expect(roundPositive(Number.MAX_VALUE)).toBe(Number.MAX_VALUE)
+    expect(round(1.235)).toBe(1.24)
+    expect(round(-2.345, 1)).toBe(-2.3)
+    expect(Object.is(round(-0.001), 0)).toBe(true)
+    expect(Object.is(round(-0), 0)).toBe(true)
+    expect(Number.isNaN(round(Number.NaN))).toBe(true)
+  })
+
+  it('a board with a huge coordinate survives a save and a load', () => {
+    const doc: BoardDoc = { ...good(), objects: [{ ...text, left: 1e307, top: -1e307 }] }
+    const saved = JSON.parse(JSON.stringify(serializeDoc({ ...doc, objects: doc.objects.map((o) => ({ ...o, left: round(o.left), top: round(o.top) })) })))
+    expect(parseDoc(saved)?.objects[0]).toMatchObject({ left: 1e307, top: -1e307 })
+  })
+})

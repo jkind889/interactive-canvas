@@ -73,6 +73,17 @@ async function storedWhen(page: Page, check: (doc: StoredBoard) => boolean): Pro
   await expect.poll(async () => check(await storedDoc(page)), { timeout: 5000 }).toBe(true)
   return storedDoc(page)
 }
+
+/**
+ * Renames the board and waits for that save: it re-serializes every record from the canvas, so
+ * what it writes shows what the loaded canvas really holds (a reload alone never rewrites the row).
+ */
+async function resaveFromCanvas(page: Page, title: string): Promise<StoredBoard> {
+  const input = page.getByRole('textbox', { name: 'Board title', exact: true })
+  await input.fill(title)
+  await input.press('Enter')
+  return storedWhen(page, (d) => d.title === title)
+}
 const sameCrop = (a: Crop | undefined, b: Crop | undefined) => JSON.stringify(a) === JSON.stringify(b)
 
 // ---- geometry ------------------------------------------------------------------------------------
@@ -257,6 +268,7 @@ test.describe('cropping', () => {
     await expect(page.locator('.toolbar')).toBeVisible()
     await expect.poll(async () => differing(await kept(), after)).toBe(0)
     expect(obj(await storedDoc(page), 'R')).toEqual(r)
+    expect(obj(await resaveFromCanvas(page, 'Re-saved'), 'R')).toEqual(r) // what the reloaded canvas holds
     expect(o.errors).toEqual([])
   })
 })
@@ -301,6 +313,7 @@ test.describe('what is saved while cropping', () => {
     await expect(cropHelp(page)).toHaveCount(0)
     expect(obj(await storedDoc(page), 'P')).toEqual(cropped())
     await expect(undoButton(page)).toBeDisabled()
+    expect(obj(await resaveFromCanvas(page, 'Re-saved'), 'P')).toEqual(cropped()) // what the reloaded canvas holds
     expect(o.errors).toEqual([])
   })
 })
@@ -480,7 +493,7 @@ test.describe('a multi-selection with a cropped image', () => {
     await page.reload()
     await expect(page.locator('.toolbar')).toBeVisible()
     await page.waitForTimeout(AUTOSAVE_QUIET_MS)
-    const again = await storedDoc(page)
+    const again = await resaveFromCanvas(page, 'Re-saved') // re-serialized from the reloaded canvas, not the untouched row
     expect(obj(again, 'P')).toEqual(p)
     expect(obj(again, 'Q')).toEqual(q)
     expect(o.errors).toEqual([])
@@ -508,5 +521,63 @@ test.describe('review fixes', () => {
     await page.keyboard.press('Control+a')
     expect(await page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('')
     await expect(cropHelp(page)).toBeVisible()
+  })
+})
+
+test.describe('final review fixes', () => {
+  test("Fill keeps a crop that is one stored step off the whole image (Astra's 10 x 100 source at 99.8 x 100), through a reload and a re-save", async ({ page }) => {
+    const THIN: SeedAsset = { id: 't1', name: 'thin.png', width: 10, height: 100, pattern: 'quadrants' }
+    const o = await openSeeded(page, [], [image('T', 100, -3000, { assetId: 't1', scaleX: 99.8, scaleY: 100 })], [THIN])
+    await select(page, o.at(600, 300))
+    await fillButton(page).click()
+    let stored = await storedWhen(page, (d) => obj(d, 'T').crop !== undefined)
+    let t = obj(stored, 'T')
+    expect(t.crop).toEqual({ x: 0.01, y: 0, width: 9.98, height: 100 })
+    expect(t.crop!.width * t.scaleX!).toBeCloseTo(998, 6)
+    await page.reload()
+    await expect(page.locator('.save-status')).toContainText('Saved on this device')
+    stored = await resaveFromCanvas(page, 'Re-saved')
+    t = obj(stored, 'T')
+    expect(t.crop).toEqual({ x: 0.01, y: 0, width: 9.98, height: 100 })
+    expect(Math.abs(t.crop!.width * t.scaleX! - 998)).toBeLessThanOrEqual(0.05)
+    expect(o.errors).toEqual([])
+  })
+
+  test("a crop dragged three screen pixels in at scale 8 stays inside the original, and a reload plus a re-save leaves it unchanged (Astra's case)", async ({ page }) => {
+    const o = await openSeeded(page, [], [image('W', 100, 100, { scaleX: 8, scaleY: 8 })]) // 240 x 160 shown 1920 x 1280
+    await select(page, o.at(600, 400))
+    await openCrop(page)
+    // The left side, 3 screen pixels = 0.375 source pixels. (Whether the browser's pointer maths lands
+    // exactly on the half-step that the old rounding got wrong depends on the layout; the editor unit
+    // test pins that case exactly. Here: the invariants, and that a reload plus a re-save keeps it.)
+    await drag(page, o.at(100, 400), o.at(103, 400), { steps: 3 })
+    await page.keyboard.press('Enter')
+    const stored = await storedWhen(page, (d) => obj(d, 'W').crop !== undefined)
+    const w = obj(stored, 'W')
+    expect(w.crop!.x).toBeGreaterThan(0)
+    expect(w.crop!.x + w.crop!.width).toBeLessThanOrEqual(240 + 1e-9)
+    expect(w.crop!.width).toBe(Math.round((240 - w.crop!.x) * 100) / 100)
+    await page.reload()
+    await expect(page.locator('.save-status')).toContainText('Saved on this device')
+    expect(obj(await resaveFromCanvas(page, 'Title only'), 'W')).toEqual(w)
+    expect(o.errors).toEqual([])
+  })
+
+  test('straight after loading, a changed open crop enables Undo; pressing it applies and undoes the crop', async ({ page }) => {
+    const o = await openSeeded(page, [], [image('P', 200, 150)])
+    await select(page, o.at(320, 230))
+    const before = await region(page, o.at(180, 130), 280, 200)
+    await openCrop(page)
+    await expect(undoButton(page)).toBeDisabled()
+    await drag(page, o.at(440, 310), o.at(360, 260))
+    await expect(undoButton(page)).toBeEnabled()
+    await undoButton(page).click()
+    await expect(cropHelp(page)).toBeHidden()
+    await expect(redoButton(page)).toBeEnabled()
+    await expect(undoButton(page)).toBeDisabled()
+    expect(differing(await region(page, o.at(180, 130), 280, 200), before)).toBe(0)
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(obj(await storedDoc(page), 'P')).toEqual(image('P', 200, 150))
+    expect(o.errors).toEqual([])
   })
 })

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { fillRecord, fitRecord, replaceRecord, storedCrop } from '../model/crop.ts'
 import { parseDoc, serializeDoc, createEmptyDoc } from '../model/doc.ts'
 import type { FrameRecord, ImageRecord, TextRecord } from '../model/types.ts'
 import { centerOf, createFrame, createObject, frameNameOf, idOf, imageSizeOf, isFrame, isLocked, normalizeTextScale, ownerOf, setFrameName, setImageCrop, setLocked, setOwner, toFrameRecord, toRecord } from './objects.ts'
@@ -221,10 +222,11 @@ describe('cropped images', () => {
     expect(toRecord(whole)).toEqual(image())
   })
 
-  it('reads the crop from Fabric, rounded like other stored numbers', () => {
+  it('reads the crop from Fabric with its edges rounded to the stored step (the side follows the rounded edges)', () => {
     const img = make(image())
     Object.assign(img, { cropX: 1.23456, cropY: 0.5, width: 50.004999, height: 20 })
-    expect((toRecord(img) as ImageRecord).crop).toEqual({ x: 1.23, y: 0.5, width: 50, height: 20 })
+    // Edges 1.23456 -> 1.23 and 51.239559 -> 51.24, so the side is 50.01 (not the side rounded on its own).
+    expect((toRecord(img) as ImageRecord).crop).toEqual({ x: 1.23, y: 0.5, width: 50.01, height: 20 })
   })
 
   it('a stored crop reaching outside the decoded image is clamped to it (C5); nothing left shows the image whole', () => {
@@ -249,5 +251,66 @@ describe('cropped images', () => {
     const doc = { ...createEmptyDoc(), objects: [toRecord(make(image({ crop })))!] }
     const loaded = parseDoc(JSON.parse(JSON.stringify(serializeDoc(doc))))
     expect(loaded?.objects).toEqual([image({ crop })])
+  })
+})
+
+describe('record -> Fabric -> record identity for what Fill, Fit and Replace produce', () => {
+  /** Seeded (mulberry32), so a failure can be reproduced. */
+  function rng(seed: number) {
+    let a = seed >>> 0
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0
+      let t = a
+      t = Math.imul(t ^ (t >>> 15), t | 1)
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+  }
+  const TINY = [
+    { width: 10, height: 100 },
+    { width: 3, height: 3850 },
+    { width: 1, height: 1 },
+    { width: 3850, height: 3 },
+  ]
+  const elOf = (s: { width: number; height: number }) => ({ naturalWidth: s.width, naturalHeight: s.height }) as HTMLImageElement
+  // The fake has no rotation, so these records are unrotated; rotated round trips are proven by the e2e reload tests.
+  function cases(seed: number, n: number) {
+    const r = rng(seed)
+    const out: Array<{ rec: ImageRecord; size: { width: number; height: number }; next: { width: number; height: number } }> = []
+    const anySize = () => (r() < 0.3 ? TINY[Math.floor(r() * TINY.length)]! : { width: Math.max(1, Math.round(Math.exp(r() * Math.log(9000)))), height: Math.max(1, Math.round(Math.exp(r() * Math.log(9000)))) })
+    for (let i = 0; i < n; i++) {
+      const size = anySize()
+      const s = Math.max(0.00001, Math.round(Math.exp((r() * 2 - 1) * Math.log(200)) * 1e5) / 1e5)
+      const rec = image({ left: Math.round((r() * 2 - 1) * 5e5) / 100, top: Math.round((r() * 2 - 1) * 5e5) / 100, scaleX: s, scaleY: r() < 0.5 ? s : Math.max(0.00001, Math.round(s * (0.2 + r() * 5) * 1e5) / 1e5) })
+      if (r() < 0.5) {
+        const crop = storedCrop({ x: r() * size.width * 0.5, y: r() * size.height * 0.5, width: r() * size.width * 0.5 + 0.001, height: r() * size.height * 0.5 + 0.001 }, size)
+        if (crop) rec.crop = crop
+      }
+      out.push({ rec, size, next: anySize() })
+    }
+    // Astra's case: a 10 x 100 source at scales 99.8 x 100 (a 998-unit-wide box).
+    out.push({ rec: image({ left: 0, top: 0, scaleX: 99.8, scaleY: 100 }), size: { width: 10, height: 100 }, next: { width: 10, height: 100 } })
+    return out
+  }
+  const roundTrip = (rec: ImageRecord, size: { width: number; height: number }) => toRecord(createObject(rec, () => elOf(size))!)
+
+  it('Fill, Fit and Replace results come back from the canvas exactly as they were computed (3000 records each)', () => {
+    for (const { rec, size, next } of cases(5, 3000)) {
+      const filled = fillRecord(rec, size)
+      expect(roundTrip(filled, size)).toEqual(filled)
+      const fitted = fitRecord(rec, size)
+      expect(roundTrip(fitted, size)).toEqual(fitted)
+      const replaced = replaceRecord(rec, size, 'a1', next)
+      expect(roundTrip(replaced, next)).toEqual(replaced)
+    }
+  })
+
+  it("Astra's case: Fill of a 10 x 100 image at 99.8 x 100 keeps its centred crop through the canvas, and the box stays 998 wide", () => {
+    const size = { width: 10, height: 100 }
+    const filled = fillRecord(image({ left: 0, top: 0, scaleX: 99.8, scaleY: 100 }), size)
+    expect(filled.crop).toEqual({ x: 0.01, y: 0, width: 9.98, height: 100 })
+    const back = roundTrip(filled, size) as ImageRecord
+    expect(back.crop).toEqual({ x: 0.01, y: 0, width: 9.98, height: 100 })
+    expect(back.crop!.width * back.scaleX).toBeCloseTo(998, 6)
   })
 })

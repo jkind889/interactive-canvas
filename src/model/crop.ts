@@ -25,8 +25,6 @@ export interface Placement {
 
 /** Each side of a crop stays at least this many scene units long as displayed. */
 export const MIN_CROP_SCENE = 8
-/** Within this many source pixels of every edge, a crop is the whole image (and is not stored). */
-export const WHOLE_IMAGE_TOLERANCE = 0.01
 
 function rotate(x: number, y: number, deg: number): Point {
   const r = (deg * Math.PI) / 180
@@ -66,35 +64,54 @@ export function croppedPlacement(full: Placement, crop: Pick<CropRect, 'x' | 'y'
 export const wholeRect = (size: Size): CropRect => ({ x: 0, y: 0, width: size.width, height: size.height })
 
 /** The crop shows the whole image (within a small tolerance), so it is not a crop at all. */
-export function isWholeImage(crop: CropRect | undefined, size: Size, tolerance = WHOLE_IMAGE_TOLERANCE): boolean {
-  if (!crop) return true
-  return (
-    Math.abs(crop.x) <= tolerance &&
-    Math.abs(crop.y) <= tolerance &&
-    Math.abs(crop.x + crop.width - size.width) <= tolerance &&
-    Math.abs(crop.y + crop.height - size.height) <= tolerance
-  )
-}
-
-/** Rounded like other stored numbers: positions to 2 decimals, sizes with `roundPositive`. */
-export function roundCrop(crop: CropRect): CropRect {
-  return { x: round(crop.x), y: round(crop.y), width: roundPositive(crop.width), height: roundPositive(crop.height) }
+export function isWholeImage(crop: CropRect | undefined, size: Size): boolean {
+  return storedCrop(crop, size) === undefined
 }
 
 /**
- * A stored crop clamped to the real image (only known once it has been decoded). Returns
- * undefined (the image is shown whole) when there was no crop, when nothing of it lies
- * inside the image, or when what is left is the whole image.
+ * One axis of `storedCrop`: the interval [start, start + side] clamped to [0, full], its edges
+ * rounded to 0.01 source pixels (never past the image), its side taken from the rounded edges.
+ * Null when nothing of it lies inside. An interval narrower than the stored step keeps its own
+ * (positive, `roundPositive`) side rather than collapsing to zero.
+ */
+function storedAxis(start: number, side: number, full: number): { at: number; side: number; whole: boolean } | null {
+  const lo = Math.min(Math.max(start, 0), full)
+  const hi = Math.min(Math.max(start + side, 0), full)
+  if (!(hi - lo > 0)) return null
+  const end = Math.min(round(full), full)
+  const a = Math.min(round(lo), full)
+  const b = Math.min(round(hi), full)
+  if (b - a > 0) return { at: a, side: roundPositive(b - a), whole: a === 0 && b === end }
+  const s = roundPositive(hi - lo)
+  return { at: Math.max(0, Math.min(a, full - s)), side: s, whole: false }
+}
+
+/**
+ * THE crop as it is stored, and the one decision of what counts as the whole image, used by
+ * geometry (Fill, Fit, replace, closing crop mode), by the Fabric conversion (creating an
+ * object, reading it back) and therefore by everything that is saved.
+ *
+ * Edges are clamped to the image and rounded to the stored step (0.01 source pixels); the
+ * sides come from the rounded edges, so a stored crop never reaches outside the image and
+ * clamping it again changes nothing. It is the whole image exactly when its rounded edges are
+ * the image's own edges: a crop that differs from the whole image at stored precision is never
+ * dropped, and one that does not is never stored. Undefined: the whole image (also when
+ * nothing of the crop lies inside the image, which then is shown whole).
+ */
+export function storedCrop(crop: CropRect | undefined, size: Size): CropRect | undefined {
+  if (!crop || !(size.width > 0) || !(size.height > 0)) return undefined
+  const x = storedAxis(crop.x, crop.width, size.width)
+  const y = storedAxis(crop.y, crop.height, size.height)
+  if (!x || !y || (x.whole && y.whole)) return undefined
+  return { x: x.at, y: y.at, width: x.side, height: y.side }
+}
+
+/**
+ * A stored crop checked against the real image (only known once it has been decoded): the
+ * canonical `storedCrop`, which clamps it to the image. A crop the app wrote is unchanged.
  */
 export function clampCrop(crop: CropRect | undefined, size: Size): CropRect | undefined {
-  if (!crop || !(size.width > 0) || !(size.height > 0)) return undefined
-  const x0 = Math.min(Math.max(crop.x, 0), size.width)
-  const y0 = Math.min(Math.max(crop.y, 0), size.height)
-  const x1 = Math.min(Math.max(crop.x + crop.width, 0), size.width)
-  const y1 = Math.min(Math.max(crop.y + crop.height, 0), size.height)
-  if (!(x1 - x0 > 0) || !(y1 - y0 > 0)) return undefined
-  const out = { x: x0, y: y0, width: x1 - x0, height: y1 - y0 }
-  return isWholeImage(out, size) ? undefined : out
+  return storedCrop(crop, size)
 }
 
 // ---- handles ------------------------------------------------------------------------------
@@ -257,14 +274,17 @@ export function coverBox(size: Size, box: Size): { crop: CropRect | undefined; s
     width = floor2(size.width)
     height = Math.min(roundPositive(width / aspect), floor2(size.height))
   }
-  const crop = isWholeImage({ x: 0, y: 0, width, height }, size)
-    ? undefined
-    : {
-        x: Math.max(0, Math.min(round((size.width - width) / 2), size.width - width)),
-        y: Math.max(0, Math.min(round((size.height - height) / 2), size.height - height)),
-        width,
-        height,
-      }
+  // Centred from the rounded sides, then the one stored-crop decision (after centring, never
+  // before: a crop one stored step off the whole image is still a crop).
+  const crop = storedCrop(
+    {
+      x: Math.max(0, Math.min(round((size.width - width) / 2), size.width - width)),
+      y: Math.max(0, Math.min(round((size.height - height) / 2), size.height - height)),
+      width,
+      height,
+    },
+    size,
+  )
   const shown = crop ?? wholeRect(size)
   const drift = (s: number) => Math.max(Math.abs(shown.width * s - box.width), Math.abs(shown.height * s - box.height))
   const byWidth = roundPositive(box.width / shown.width, 5)

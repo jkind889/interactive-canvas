@@ -19,6 +19,18 @@ function focusedChromeField(): HTMLElement | null {
 }
 
 /**
+ * What a primary mouse press on a row or padlock lets go of, without taking focus itself: a
+ * focused chrome field (its blur commits what was typed), or a row or padlock of this list that
+ * still holds focus from the keyboard (otherwise Space, meant to pan, would act on that row).
+ */
+function focusToRelease(): HTMLElement | null {
+  const field = focusedChromeField()
+  if (field) return field
+  const el = document.activeElement
+  return el instanceof HTMLElement && el.closest('.layers-list') ? el : null
+}
+
+/**
  * Everything on the board in stacking order, front-most first, with frames at the bottom
  * (they always sit behind content). Clicking a row selects that object, even one that is
  * completely covered; Ctrl/Cmd- or Shift-click adds it to or removes it from the selection.
@@ -92,7 +104,7 @@ export const LayerPanel = memo(function LayerPanel({
                 // size, frame name, title) focused, and its keys would then act on the newly
                 // selected object. Let it go first, as any other click would; its blur commits
                 // what was typed. A read-only board's rows do nothing, focus included.
-                if (!readOnly && e.button === 0) focusedChromeField()?.blur()
+                if (!readOnly && e.button === 0) focusToRelease()?.blur()
                 // A mouse press must not move focus here: Space (hold to pan) and the letter
                 // shortcuts would then act on the list instead of the board.
                 e.preventDefault()
@@ -116,7 +128,7 @@ export const LayerPanel = memo(function LayerPanel({
                 onMouseDown={(e) => {
                   // As for the row: let a focused field go (its blur commits it), but do not take
                   // focus, so that Space and the letter shortcuts keep acting on the board.
-                  if (!readOnly && e.button === 0) focusedChromeField()?.blur()
+                  if (!readOnly && e.button === 0) focusToRelease()?.blur()
                   e.preventDefault()
                   e.stopPropagation()
                 }}

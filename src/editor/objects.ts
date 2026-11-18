@@ -1,6 +1,6 @@
 import { FabricImage, Rect, Textbox, util } from 'fabric'
 import type { FabricObject } from 'fabric'
-import { clampCrop, isWholeImage, roundCrop } from '../model/crop.ts'
+import { clampCrop, storedCrop } from '../model/crop.ts'
 import { round, roundPositive } from '../model/doc.ts'
 import type { CropRect, FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 import type { Point, Size } from '../model/viewport.ts'
@@ -221,7 +221,7 @@ export function toRecord(obj: FabricObject): ObjectRecord | null {
     assetId: m.assetId,
     scaleX: roundPositive(sx, 5),
     scaleY: roundPositive(sy, 5),
-    ...(crop && { crop: roundCrop(crop) }),
+    ...(crop && { crop }),
     ...owner,
   }
   return rec
@@ -234,10 +234,12 @@ export function imageSizeOf(img: FabricImage): Size {
   return img.getOriginalSize()
 }
 
-/** The visible part of the original, in source pixels; undefined when it is the whole image. A fresh object. */
+/**
+ * The visible part of the original as it is stored (`storedCrop`: rounded, inside the image),
+ * or undefined when that is the whole image. A fresh object.
+ */
 export function imageCropOf(img: FabricImage): CropRect | undefined {
-  const crop = { x: img.cropX, y: img.cropY, width: img.width, height: img.height }
-  return isWholeImage(crop, imageSizeOf(img)) ? undefined : crop
+  return storedCrop({ x: img.cropX, y: img.cropY, width: img.width, height: img.height }, imageSizeOf(img))
 }
 
 /**

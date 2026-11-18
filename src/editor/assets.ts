@@ -39,7 +39,10 @@ export class AssetCache implements AssetSource {
     return this.entries.get(id)?.asset
   }
 
+  private disposed = false
+
   async load(asset: StoredAsset): Promise<HTMLImageElement> {
+    if (this.disposed) throw new Error('The image cache has been disposed.')
     const existing = this.get(asset.id)
     if (existing) return existing
     const url = URL.createObjectURL(new Blob([asset.bytes], { type: asset.type }))
@@ -52,11 +55,18 @@ export class AssetCache implements AssetSource {
       URL.revokeObjectURL(url)
       throw new Error(`${asset.name} could not be decoded as an image.`)
     }
+    if (this.disposed) {
+      // Disposed while decoding: nothing will ever revoke this URL if it is cached now. The
+      // callers check for disposal after awaiting and do nothing more.
+      URL.revokeObjectURL(url)
+      throw new Error('The image cache has been disposed.')
+    }
     this.entries.set(asset.id, { url, element, asset })
     return element
   }
 
   dispose() {
+    this.disposed = true
     for (const { url } of this.entries.values()) URL.revokeObjectURL(url)
     this.entries.clear()
   }

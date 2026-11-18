@@ -31,8 +31,8 @@ import {
   replaceRecord,
   hitCropHandle,
   isWholeImage,
+  storedCrop,
   minCropSide,
-  roundCrop,
   sceneToSource,
   uncroppedPlacement,
 } from '../model/crop.ts'
@@ -469,6 +469,9 @@ export class Editor {
    * crop: while one exists the scene is the one from before it. Title and viewport are always live.
    */
   private getDoc(): BoardDoc {
+    // After dispose the canvas is being cleared: a scene read now would describe an empty board.
+    // The autosaver never asks then; refusing makes sure no save can ever store that.
+    if (this.disposed) throw new Error('The editor has been disposed.')
     const scene = this.gesture ? this.gesture.base : this.crop ? this.crop.base : this.snapshot()
     return { version: DOC_VERSION, title: this.state.title, frames: scene.frames, objects: scene.objects, viewport: this.getViewport() }
   }
@@ -594,7 +597,8 @@ export class Editor {
       selection: this.computeSelection(),
       objectCount: this.canvas.getObjects().length,
       layers: computeLayers(this.canvas.getObjects(), this.canvas.getActiveObjects(), (id) => this.assets.bytes(id)?.name, this.state.layers),
-      canUndo: this.history.canUndo,
+      // An open crop that differs from where it began can be undone too: Undo applies it, then undoes it.
+      canUndo: this.history.canUndo || (this.crop !== null && !sameCrop(storedCrop(this.crop.rect, this.crop.size), storedCrop(this.crop.start, this.crop.size))),
       canRedo: this.history.canRedo,
       editingText: active instanceof Textbox && active.isEditing === true,
       cropping: this.crop !== null,
@@ -1504,9 +1508,9 @@ export class Editor {
     if (s.drag) this.endCropDrag(true)
     this.crop = null
     const img = s.target
-    const rect = roundCrop(s.rect)
-    const whole = isWholeImage(rect, s.size)
-    const unchanged = (whole && isWholeImage(s.start, s.size)) || sameRect(rect, roundCrop(s.start))
+    // The crop as it will be stored (undefined: the whole image), compared with the one it began with.
+    const stored = storedCrop(s.rect, s.size)
+    const unchanged = sameCrop(stored, storedCrop(s.start, s.size))
     img.set({ hasControls: s.before.hasControls, hasBorders: s.before.hasBorders })
     const onCanvas = this.canvas.getObjects().includes(img)
     if (!apply || unchanged || !onCanvas) {
@@ -1514,9 +1518,8 @@ export class Editor {
       img.set({ cropX: b.cropX, cropY: b.cropY, width: b.width, height: b.height, left: b.left, top: b.top, dirty: true })
       img.setCoords()
     } else {
-      const crop = whole ? undefined : rect
-      const at = croppedPlacement(s.full, crop ?? { x: 0, y: 0 })
-      setImageCrop(img, crop)
+      const at = croppedPlacement(s.full, stored ?? { x: 0, y: 0 })
+      setImageCrop(img, stored)
       img.set({ left: at.left, top: at.top })
       img.setCoords()
       // A crop changes the image's box, so it counts as resizing it.
@@ -1586,6 +1589,7 @@ export class Editor {
     if (!keep) s.rect = { ...s.drag.startRect }
     s.drag.end()
     this.canvas.requestRenderAll()
+    this.syncState() // Undo availability follows the rectangle (see syncState)
   }
 
   /**
@@ -1685,8 +1689,12 @@ export class Editor {
     this.finishEditing() // an open crop is applied first, as its own step
     const img = this.canvas.getObjects().find((o) => idOf(o) === job.targetId)
     const el = this.assets.get(job.assetId)
-    if (!isImage(img) || isLocked(img) || !el) {
-      this.notify('error', 'The image could not be replaced: it is no longer on the board, or it is locked.')
+    if (!isImage(img) || !el) {
+      this.notify('error', 'The image could not be replaced: it is no longer on the board.')
+      return
+    }
+    if (isLocked(img)) {
+      this.notify('error', 'The image could not be replaced: it is locked. Unlock it and try again.')
       return
     }
     // A member of a multi-selection has coordinates relative to it: take it out while it changes.
@@ -2134,7 +2142,9 @@ function bakeFrame(frame: FabricObject) {
   frame.setCoords()
 }
 
-const sameRect = (a: CropRect, b: CropRect) => a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height
+/** Two stored crops (undefined: the whole image) are the same. */
+const sameCrop = (a: CropRect | undefined, b: CropRect | undefined) =>
+  a === b || (a !== undefined && b !== undefined && a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height)
 
 /** Corner (and side) scaling, as opposed to moving, rotating or changing a text's wrap width. */
 function isScaleAction(transform: Transform): boolean {

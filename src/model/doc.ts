@@ -193,7 +193,11 @@ export function clamp(n: number, min: number, max: number): number {
 
 export function round(n: number, digits = 2): number {
   const f = 10 ** digits
-  const r = Math.round(n * f) / f
+  const scaled = n * f
+  // A finite value too large to scale (e.g. 1e307) is returned as it is: it has no decimals to
+  // round, and Infinity would make the stored document unreadable.
+  if (!Number.isFinite(scaled)) return n
+  const r = Math.round(scaled) / f
   return Object.is(r, -0) ? 0 : r
 }
 

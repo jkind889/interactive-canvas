@@ -314,7 +314,7 @@ describe('when the decode finishes (P3)', () => {
     let attempts = b.store.attempts.length
     decode.resolve()
     await pending
-    expect(b.notice()?.message).toMatch(/could not be replaced/)
+    expect(b.notice()?.message).toBe('The image could not be replaced: it is no longer on the board.')
     expect(b.ids()).toEqual(['Q'])
     await flush()
     expect(b.store.attempts).toHaveLength(attempts)
@@ -330,7 +330,7 @@ describe('when the decode finishes (P3)', () => {
     b.editor.undo()
     decode.resolve()
     await pending
-    expect(b.notice()?.message).toMatch(/could not be replaced/)
+    expect(b.notice()?.message).toBe('The image could not be replaced: it is no longer on the board.')
     expect(b.ids()).toEqual(['Q'])
     expect(b.editor.getState().canRedo).toBe(true) // the redo of the import is still there
 
@@ -345,7 +345,7 @@ describe('when the decode finishes (P3)', () => {
     attempts = b.store.attempts.length
     decode.resolve()
     await pending
-    expect(b.notice()?.message).toMatch(/locked/)
+    expect(b.notice()?.message).toBe('The image could not be replaced: it is locked. Unlock it and try again.')
     expect(b.rec('P')).toEqual(img('P', 100, 50, { locked: true }))
     await flush()
     expect(b.store.attempts).toHaveLength(attempts)
@@ -449,6 +449,52 @@ describe('when the decode finishes (P3)', () => {
     // Undo does not reset this: the dropped pick stays dropped.
     b.editor.undo()
     expect(b.rec('P')).toEqual(img('P', 100, 50))
+  })
+
+  it('a newer pick that is refused (the image was locked meanwhile) supersedes nothing: the older one still lands once it is unlocked', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    const target = b.editor.replaceTarget()!
+    const first = b.assets.hold('wide-400x100.png')
+    const second = b.assets.hold('big-400x200.png')
+    const p1 = b.editor.replaceImageFile(target, file('wide-400x100.png'))
+    const p2 = b.editor.replaceImageFile(target, file('big-400x200.png'))
+    b.editor.toggleLayerLock('P')
+    second.resolve()
+    await p2
+    expect(b.notice()?.message).toBe('The image could not be replaced: it is locked. Unlock it and try again.')
+    await flush()
+    expect(b.rec('P')).toMatchObject({ assetId: 'a1', locked: true }) // refused: only an applied request supersedes older ones
+    b.editor.toggleLayerLock('P')
+    first.resolve()
+    await p1
+    await flush()
+    expect(b.rec('P')).toMatchObject({ scaleX: 1, crop: { x: 100, y: 0, width: 200, height: 100 } }) // the older pick, applied
+    expect(b.rec('P').assetId).not.toBe('a1')
+    expect(b.editor.getState().layers[0]?.label).toBe('wide-400x100.png')
+  })
+
+  it('a superseded pick that arrives during crop mode is dropped before anything else: the crop stays open, no step, no notice', async () => {
+    const b = await board([], [img('P', 100, 50)])
+    b.editor.selectLayer('P')
+    const target = b.editor.replaceTarget()!
+    const first = b.assets.hold('wide-400x100.png')
+    const second = b.assets.hold('big-400x200.png')
+    const p1 = b.editor.replaceImageFile(target, file('wide-400x100.png'))
+    const p2 = b.editor.replaceImageFile(target, file('big-400x200.png'))
+    second.resolve()
+    await p2
+    await flush()
+    b.editor.startCrop()
+    expect(b.editor.getState().cropping).toBe(true)
+    first.resolve()
+    await p1
+    await flush()
+    expect(b.editor.getState().cropping).toBe(true) // it did not leave the edit
+    expect(b.notice()).toBeNull()
+    b.editor.cancelCrop()
+    expect(b.rec('P')).toMatchObject({ scaleX: 0.5 }) // still the second pick
+    expect(b.undoDepth()).toBe(1)
   })
 
   it('a fast first pick and a slow second one: both applied in order, each its own step, the second showing', async () => {

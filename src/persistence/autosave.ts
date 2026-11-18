@@ -46,6 +46,8 @@ export class Autosaver {
    * never replace a stored board that has not been restored yet.
    */
   private armed = false
+  /** Disposed for good: nothing is ever scheduled, saved or reported again (see `dispose`). */
+  private disposed = false
 
   private readonly debounceMs: number
   private readonly now: () => number
@@ -71,7 +73,7 @@ export class Autosaver {
 
   /** Board finished loading from storage. `token` is what was found there (`ABSENT` for nothing). */
   markLoaded(token: RevisionToken) {
-    if (this.disabled) return
+    if (this.disabled || this.disposed) return
     this.armed = true
     this.token = token
     this.setStatus(token.kind === 'absent' ? { kind: 'new' } : { kind: 'saved', at: this.now() })
@@ -111,7 +113,15 @@ export class Autosaver {
     return this.flush()
   }
 
+  /**
+   * Disarms the saver for good (the editor is going away and its canvas will be cleared, so
+   * `getDoc` would describe an empty board). No timer is scheduled again; marking dirty,
+   * flushing, retrying and saving do nothing; and a save already in flight is left to finish
+   * (its document was taken before now) but neither reschedules nor reports a status.
+   */
   dispose() {
+    this.disposed = true
+    this.armed = false
     this.clearScheduled()
   }
 
@@ -140,7 +150,7 @@ export class Autosaver {
     try {
       this.token = await this.opts.store.save(this.opts.getDoc(), this.token, this.opts.bytes)
     } catch (e) {
-      if (this.disabled) return // switched off while the save was in flight; its reason stays visible
+      if (this.disabled || this.disposed) return // switched off while the save was in flight; its reason stays visible
       if (e instanceof BoardConflictError || e instanceof NewerBoardError) {
         // Never overwrite, never retry: what is stored now is the truth, and it is not ours.
         const message = e instanceof NewerBoardError ? NEWER_BUILD_MESSAGE : CONFLICT_MESSAGE
@@ -154,7 +164,7 @@ export class Autosaver {
       this.setStatus({ kind: 'error', message })
       return
     }
-    if (this.disabled) return
+    if (this.disabled || this.disposed) return // disposed: never reschedule (the next getDoc would be an emptied canvas)
     if (this.changedWhileSaving) {
       this.markDirty()
     } else {
