@@ -108,7 +108,7 @@ then reviewed by a different Opus 5.5 reviewer before the next one starts.
 
 | # | Slice | State |
 | - | ----- | ----- |
-| 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | committed, in review |
+| 1 | Formatted text in the document: record fields, validation, equality, writing to and reading from the canvas, scaling, load/save/undo round trips. No controls yet. | committed (b307275), review fixes committed (2210acc), in re-review |
 | 2 | Formatting commands, panel controls, Ctrl/Cmd+B/I/U, range/caret/whole-box behaviour. | not started |
 | 3 | Typing shortcuts (`#`, `**`, `*`), Backspace to revert, Enter after a heading. | not started |
 | 4 | Text tool: drag out a box. | not started |
@@ -183,6 +183,26 @@ the canvas changes, no history step, no save. The panel should show its formatti
 disabled or not at all. This cannot be implemented or tested on this branch alone, since the
 lock does not exist here; it is an integration task, to be done only when the owner
 authorizes merging the two.
+
+Further points reported by the other branch (2026-11-18), to be preserved when the two meet.
+None of them is built or tested here, and none changes this branch's scope:
+
+- **Alt-drag of a covered selected object.** Their `FrameCanvas.findTarget` lets Alt-drag
+  move a selected object that something else covers, while a frame's label and outline keep
+  their priority. This branch does not touch `FrameCanvas.ts`; the Text tool's drag (slice 4)
+  starts only on empty canvas and must not change what `findTarget` returns.
+- **Esc with Alt held still cancels.** Their shortcut resolver returns `escape` when Alt is
+  down. This branch adds Ctrl/Cmd+B/I/U to `src/input/shortcuts.ts` and a separate handler
+  for keys pressed while a text is edited; at integration, check that Esc (with or without
+  Alt) still cancels a gesture, and that the in-edit key handler never claims Esc or any key
+  with Alt held.
+- **Layer-panel focus.** Their layer panel blurs stale chrome focus when it is used, but
+  must not blur Fabric's hidden editing textarea while a text is being edited. This branch's
+  formatting controls rely on the same thing from the other side: buttons that do not take
+  focus, so an edit keeps its caret and selection. At integration, check both directions:
+  clicking a layer-panel row while a text is edited ends or keeps the edit deliberately (their
+  rule), and clicking a formatting button while a text is edited never ends it or loses the
+  selected range.
 
 ## Open questions for the owner
 
