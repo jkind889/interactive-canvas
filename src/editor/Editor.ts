@@ -583,10 +583,16 @@ export class Editor {
       if (c._currentTransform?.target === target) c.endCurrentTransform()
       if (this.applying || !this.editable) return
       if (target instanceof Textbox && target.text.trim() === '') {
-        // A blank text was never part of the scene (see snapshot), so there is nothing to
-        // un-save: emptying it already saved the board without it.
-        c.remove(target)
-        c.requestRenderAll()
+        // A blank text is discarded. It is already out of the scene (see snapshot), so the
+        // commit below records its removal now. The object itself is taken off the canvas
+        // only after Fabric has finished leaving the edit: Fabric still fires events on the
+        // text after this callback, and they fail on a text that has no canvas any more.
+        queueMicrotask(() => {
+          if (this.disposed || target.isEditing || target.text.trim() !== '' || !c.getObjects().includes(target)) return
+          c.remove(target)
+          c.requestRenderAll()
+          this.syncState()
+        })
       } else if (target instanceof Textbox && !this.history.current.objects.some((o) => o.id === idOf(target))) {
         // A NEW text (history has never held it): its box grew while it was typed, so its
         // owner is decided once more from where it ended up. Re-editing an existing text
@@ -1382,6 +1388,9 @@ export class Editor {
     active.set({ fontSize: clamp(size, MIN_FONT_SIZE, MAX_FONT_SIZE) })
     active.setCoords()
     this.canvas.requestRenderAll()
+    // A text that is blank right now (emptied in the middle of an edit) is not in the scene:
+    // committing would record "text removed" while it is still being typed into.
+    if (active.text.trim() === '') return
     this.commit(`font-size:${idOf(active) ?? ''}`)
   }
 

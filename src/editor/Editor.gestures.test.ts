@@ -740,6 +740,7 @@ describe('a text that is emptied after having been saved', () => {
     tb.type('')
     await flush()
     tb.exitEditing() // the empty text is discarded
+    await tick()
     expect(canvas.objects).toHaveLength(0)
     await flush()
     expect(store.saves.at(-1)!.doc.objects).toHaveLength(0)
@@ -791,6 +792,72 @@ describe('a new text that is abandoned untouched', () => {
     tb.type('back')
     await flush()
     expect(store.saves.at(-1)!.doc.objects).toHaveLength(1)
+  })
+
+  it('is taken off the canvas only after the canvas has finished leaving the edit', async () => {
+    const { editor, canvas } = await setup(null)
+    editor.addText()
+    const tb = canvas.objects[0] as Textbox
+    tb.type('   ')
+    const removedDuring: boolean[] = []
+    canvas.on('object:modified', (() => removedDuring.push(!canvas.objects.includes(tb))) as never) // Fabric fires this right after the exit event
+    tb.exitEditing()
+    expect(removedDuring).toEqual([false]) // still on the canvas while Fabric finishes: no event on a detached text
+    expect(canvas.objects).toHaveLength(1)
+    await tick()
+    expect(canvas.objects).toHaveLength(0)
+    expect(editor.getState()).toMatchObject({ objectCount: 0, canUndo: false })
+  })
+
+  it('an existing text emptied and left is removed as one undoable step, with its owner restored by undo', async () => {
+    const { editor, store, canvas } = await setup()
+    const tb = canvas.objects[1] as Textbox
+    canvas.setActiveObject(tb)
+    tb.enterEditing()
+    tb.type('')
+    tb.exitEditing()
+    await tick()
+    expect(canvas.objects).toHaveLength(1)
+    expect(editor.getState().canUndo).toBe(true)
+    await flush()
+    expect(store.saves.at(-1)!.doc.objects.map((o) => o.id)).toEqual(['img-1'])
+    editor.undo()
+    expect(canvas.objects).toHaveLength(2)
+    expect(canvas.objects[1]).toMatchObject({ text: 'keep me' })
+    expect(editor.getState().canUndo).toBe(false)
+  })
+
+  it('a text emptied and then retyped in the same edit is not removed by the deferred cleanup', async () => {
+    const { editor, canvas } = await setup(null)
+    editor.addText()
+    const tb = canvas.objects[0] as Textbox
+    tb.type('')
+    tb.exitEditing() // blank: cleanup is queued ...
+    tb.enterEditing() // ... but the user is straight back in it
+    tb.type('kept after all')
+    await tick()
+    expect(canvas.objects).toHaveLength(1)
+    tb.exitEditing()
+    await tick()
+    expect(canvas.objects).toHaveLength(1)
+  })
+
+  it('changing the font size while an existing text is blank mid-edit records nothing and keeps it an existing text', async () => {
+    const { editor, canvas } = await setup()
+    const tb = canvas.objects[1] as Textbox
+    canvas.setActiveObject(tb)
+    tb.enterEditing()
+    tb.type('')
+    editor.setFontSize(40)
+    expect(tb.fontSize).toBe(40)
+    expect(editor.getState().canUndo).toBe(false) // not "text removed" while it is still being edited
+    tb.type('back')
+    tb.exitEditing()
+    await tick()
+    expect(canvas.objects).toHaveLength(2)
+    editor.undo()
+    expect(canvas.objects[1]).toMatchObject({ text: 'keep me', fontSize: 24 })
+    expect(editor.getState().canUndo).toBe(false) // one step for the whole edit
   })
 
   it('a blank text left in an old stored board is not shown and is gone after the next save', async () => {

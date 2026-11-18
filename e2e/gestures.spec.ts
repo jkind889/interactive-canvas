@@ -111,6 +111,51 @@ test.describe('cancelling', () => {
   })
 })
 
+test.describe('a text that ends blank', () => {
+  const NOTE = { type: 'text', id: 'note', left: 700, top: 200, angle: 0, text: 'note', fontSize: 24, width: 240 }
+
+  test('emptying an existing text and pressing Esc removes it with no page error, as one undoable step', async ({ page }) => {
+    const { errors, at } = await open(page, [IMAGE, NOTE])
+    const inside = at(712, 212)
+    await page.mouse.dblclick(inside.x, inside.y)
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('Backspace')
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    await expect.poll(async () => (await storedDoc(page)).objects.map((o) => o.id)).toEqual(['img'])
+    expect(errors).toEqual([])
+    await undoButton(page).click()
+    await expect.poll(async () => (await storedDoc(page)).objects.map((o) => o.id)).toEqual(['img', 'note'])
+    await expect(undoButton(page)).toBeDisabled()
+    expect(errors).toEqual([])
+  })
+
+  test('leaving an emptied text by clicking another object selects that object with the same click', async ({ page }) => {
+    const { errors, at } = await open(page, [IMAGE, NOTE])
+    const inside = at(712, 212)
+    await page.mouse.dblclick(inside.x, inside.y)
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('Backspace')
+    await page.mouse.click(at(CENTRE.x, CENTRE.y).x, at(CENTRE.x, CENTRE.y).y) // the image
+    await expect(page.locator('.inspector-title')).toHaveText('Image') // not swallowed by an error
+    await expect.poll(async () => (await storedDoc(page)).objects.map((o) => o.id)).toEqual(['img'])
+    expect(errors).toEqual([])
+  })
+
+  test('a new text holding only spaces is discarded without a page error', async ({ page }) => {
+    const { errors, at } = await open(page)
+    const before = await snapshotIdb(page)
+    await page.keyboard.press('t')
+    await page.mouse.click(at(800, 450).x, at(800, 450).y)
+    await page.keyboard.type('   ')
+    await page.keyboard.press('Escape')
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(JSON.parse((await snapshotIdb(page)).doc).objects).toEqual(JSON.parse(before.doc).objects)
+    await expect(undoButton(page)).toBeDisabled()
+    expect(errors).toEqual([])
+  })
+})
+
 test.describe('pointer buttons', () => {
   for (const button of ['right', 'middle'] as const) {
     test(`a ${button}-button press and release during a primary drag does not end the drag`, async ({ page }) => {
