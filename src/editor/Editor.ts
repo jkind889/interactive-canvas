@@ -17,7 +17,7 @@ import { isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
 import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
 import type { AssetSource } from './assets.ts'
-import { ACCENT, createFrame, createObject, idOf, isFrame, newId, normalizeTextScale, toFrameRecord, toRecord } from './objects.ts'
+import { ACCENT, createFrame, createObject, hasResidualScale, idOf, isFrame, newId, normalizeTextScale, toFrameRecord, toRecord } from './objects.ts'
 
 export type Tool = 'select' | 'hand' | 'text'
 
@@ -74,6 +74,9 @@ const ZOOM_STEP = 1.25
 const MIN_SELECTION_FONT = MIN_FONT_SIZE
 const ZOOM_ACTIONS: ReadonlySet<ShortcutAction> = new Set(['zoom-in', 'zoom-out', 'zoom-fit', 'zoom-reset'])
 const EMPTY_SCENE: Scene = { frames: [], objects: [] }
+
+/** Bit of `MouseEvent.buttons` for a `MouseEvent.button` (the two number the middle and right buttons differently). */
+const buttonMask = (button: number): number => (button === 0 ? 1 : button === 1 ? 4 : button === 2 ? 2 : 0)
 
 /** Mouse events carry a button; touch events do not and count as the primary button. */
 const isPrimary = (e: Event): boolean => {
@@ -435,7 +438,9 @@ export class Editor {
         }
         return
       }
-      // No gesture: a text left its edit with changes, or an editing textbox was resized by a handle.
+      // No gesture: a text left its edit with changes, or an editing textbox was resized by
+      // a handle. (Fabric 7.4 hides an editing textbox's handles, so the second case is not
+      // reachable today; the limit is applied anyway so that it can never bypass it.)
       if (target instanceof Textbox) {
         if (transform && isScaleAction(transform)) this.limitScale(transform, [], [{ fontSize: target.fontSize }])
         normalizeTextScale(target)
@@ -448,10 +453,17 @@ export class Editor {
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
     })
     c.on('text:editing:exited', ({ target }) => {
+      // A press inside the text may still be held (it started no gesture, and the text could
+      // not move while it was being edited). End it, or the text would now be dragged with
+      // no gesture: visible to saves half-way and impossible to cancel.
+      if (c._currentTransform?.target === target) c.endCurrentTransform()
       if (this.applying || !this.editable) return
       if (target instanceof Textbox && target.text.trim() === '') {
         c.remove(target)
         c.requestRenderAll()
+        // Typing is saved as it happens, so the emptied text may already be stored. History
+        // never held it (nothing to commit), so say explicitly that the stored board is stale.
+        this.autosaver.markDirty()
       }
       this.commit()
     })
@@ -486,11 +498,15 @@ export class Editor {
       this.gesture = null
       return
     }
-    this.settleScale(g)
-    this.gesture = null
-    this.canvas.requestRenderAll()
-    this.commit()
-    this.idle()
+    try {
+      this.settleScale(g)
+    } finally {
+      // Whatever happened, the gesture is over: the board must never stay busy.
+      this.gesture = null
+      this.canvas.requestRenderAll()
+      this.commit()
+      this.idle()
+    }
   }
 
   /**
@@ -518,10 +534,11 @@ export class Editor {
     this.limitScale(transform, baseFrames, baseTexts)
 
     if (target instanceof ActiveSelection) {
-      const scaled = Math.abs(target.scaleX - 1) > 0.001 || Math.abs(target.scaleY - 1) > 0.001
-      if (scaled && members.some((o) => o instanceof Textbox)) {
-        // Fold the group's scale into member text (font size/width), which means
-        // dissolving and re-forming the selection.
+      // Judged per member, on its absolute scale: a selection that returns to scale 1 can
+      // still leave a member scaled (one that joined while the selection was scaled).
+      if (members.some((o) => o instanceof Textbox && hasResidualScale(o))) {
+        // Fold the scale into member text (font size/width), which means dissolving and
+        // re-forming the selection.
         const keep = members.slice()
         this.canvas.discardActiveObject()
         for (const o of keep) if (o instanceof Textbox) normalizeTextScale(o)
@@ -608,6 +625,7 @@ export class Editor {
           e.stopPropagation()
           return
         }
+        this.healPrimaryDown(e)
         if (e.button !== 0) {
           // Fabric must never observe a non-primary button: its handlers would drop the
           // document listeners of a primary drag that is still in progress.
@@ -640,12 +658,21 @@ export class Editor {
         return // Fabric finishes its drag with this event
       }
       if (this.pan?.button === e.button) this.pan.end()
+      this.healPrimaryDown(e)
       // A primary drag is in progress: this release is not Fabric's business, and letting
       // it through would end Fabric's tracking of the drag.
       if (this.primaryDown) e.stopPropagation()
     }
+    // A native drag (e.g. dragging selected text) ends with `dragend` and no `mouseup` at all.
+    const onDragEnd = () => {
+      this.primaryDown = false
+    }
     window.addEventListener('mouseup', onMouseUp, { capture: true })
-    this.cleanups.push(() => window.removeEventListener('mouseup', onMouseUp, { capture: true }))
+    window.addEventListener('dragend', onDragEnd, { capture: true })
+    this.cleanups.push(() => {
+      window.removeEventListener('mouseup', onMouseUp, { capture: true })
+      window.removeEventListener('dragend', onDragEnd, { capture: true })
+    })
 
     listen(
       wrapper,
@@ -719,12 +746,29 @@ export class Editor {
     })
   }
 
-  /** Starts a pan owned by the button that started it; only that button's release (or a blur) ends it. */
+  /**
+   * The primary release can be lost (it went to another window, or a native drag ended
+   * without one). Every later mouse event says which buttons are really held, so the flag
+   * corrects itself instead of swallowing non-primary releases indefinitely.
+   */
+  private healPrimaryDown(e: MouseEvent) {
+    if (this.primaryDown && (e.buttons & 1) === 0) this.primaryDown = false
+  }
+
+  /**
+   * Starts a pan owned by the button that started it. That button's release ends it (or a
+   * blur, or a move that shows the button is no longer held, in case the release was lost).
+   */
   private beginPan(start: MouseEvent) {
     this.pan?.end()
     let last = { x: start.clientX, y: start.clientY }
+    const held = buttonMask(start.button)
     this.canvas.upperCanvasEl.style.cursor = 'grabbing'
     const move = (e: MouseEvent) => {
+      if ((e.buttons & held) === 0) {
+        end()
+        return
+      }
       const vp = this.getViewport()
       this.setViewport({ ...vp, panX: vp.panX + (e.clientX - last.x), panY: vp.panY + (e.clientY - last.y) })
       last = { x: e.clientX, y: e.clientY }
@@ -956,6 +1000,7 @@ export class Editor {
   /** Adds one imported batch as its own history step. Never called from a Fabric callback. */
   private applyImport(records: readonly ImageRecord[]) {
     if (!this.editable || this.busy) return
+    this.finishEditing() // first, so that text being typed is committed as its own step
     const added: FabricObject[] = []
     for (const rec of records) {
       const obj = createObject(rec, (id) => this.assets.get(id))
@@ -964,7 +1009,6 @@ export class Editor {
       added.push(obj)
     }
     if (added.length === 0) return
-    this.finishEditing()
     this.canvas.discardActiveObject()
     this.selectByIds(added.slice(-1))
     this.canvas.requestRenderAll()

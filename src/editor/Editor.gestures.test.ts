@@ -144,6 +144,11 @@ describe('clicks and text', () => {
     tb.type('first burst')
     // Clicking inside the text to move the caret: Fabric still fires before:transform and mouse:up.
     const t = press(canvas, tb)
+    // While the press is held the board is not busy: typing goes on being saved live. (With a
+    // gesture, the save would store the scene from before the press instead.)
+    tb.type('first burst!')
+    await flush()
+    expect(store.saves.at(-1)!.doc.objects[0]).toMatchObject({ text: 'first burst!' })
     release(canvas, t)
     await tick()
     expect(editor.getState().editingText).toBe(true)
@@ -319,7 +324,17 @@ describe('busy guard: commands and shortcuts wait for the gesture', () => {
     await flush()
     const saves = store.attempts.length
 
-    canvas.setActiveObject(byId('img-1'))
+    // A second step, undone, so that redo has something to do; and a text selected, so that
+    // setFontSize has something to change.
+    const second = press(canvas, byId('txt-1'))
+    dragBy(canvas, second, 5, 5)
+    release(canvas, second)
+    await tick()
+    editor.undo()
+    await flush()
+    expect(editor.getState().canRedo).toBe(true)
+
+    canvas.setActiveObject(byId('txt-1'))
     const t = press(canvas, byId('img-1'))
     dragBy(canvas, t, 50, 0)
     const picker = vi.fn()
@@ -342,11 +357,12 @@ describe('busy guard: commands and shortcuts wait for the gesture', () => {
 
     expect(canvas.objects).toHaveLength(2)
     expect(canvas.objects[0]).toMatchObject({ left: 60, top: 20 }) // the drag itself is untouched
-    expect(canvas.getActiveObject()).toBe(byId('img-1'))
+    expect(canvas.getActiveObject()).toBe(byId('txt-1'))
+    expect(byId('txt-1')).toMatchObject({ fontSize: 24, left: 305, top: 45 }) // neither resized nor re-done
     expect(editor.getState().tool).toBe('select')
     expect(editor.getState().handActive).toBe(false)
     expect(editor.getState().canUndo).toBe(true)
-    expect(editor.getState().canRedo).toBe(false)
+    expect(editor.getState().canRedo).toBe(true)
     expect(JSON.stringify(scene())).toBe(before)
     expect(picker).not.toHaveBeenCalled()
 
@@ -359,8 +375,13 @@ describe('busy guard: commands and shortcuts wait for the gesture', () => {
     expect(store.attempts.length).toBeGreaterThan(saves)
     editor.handleKeyDown(key('i'))
     expect(picker).toHaveBeenCalledTimes(1)
-    editor.undo()
+    editor.setFontSize(99)
+    expect(canvas.getActiveObject()).toMatchObject({ fontSize: 99 })
+    editor.undo() // the font size
+    editor.undo() // the drag
     expect(canvas.objects[0]).toMatchObject({ left: 10, top: 20 })
+    editor.redo()
+    expect(canvas.objects[0]).toMatchObject({ left: 60, top: 20 })
     editor.handleKeyDown(key('Delete'))
     expect(canvas.objects).toHaveLength(1)
   })
@@ -394,6 +415,15 @@ describe('pointer buttons: only the primary button edits', () => {
     expect(editor.getState().canUndo).toBe(false) // the click itself recorded nothing
   })
 
+  it('an event without a button (touch) counts as primary, so a tap cannot leave the editor busy', async () => {
+    const { editor, canvas, byId } = await setup()
+    press(canvas, byId('img-1'))
+    canvas.fire('mouse:up', { e: { type: 'touchend' }, isClick: true })
+    await tick()
+    editor.addText()
+    expect(canvas.objects).toHaveLength(3)
+  })
+
   it('a mouse:up from another button does not settle or clear a performed drag', async () => {
     const { editor, canvas, byId } = await setup()
     const t = press(canvas, byId('img-1'))
@@ -422,15 +452,27 @@ describe('pointer buttons: only the primary button edits', () => {
       document.addEventListener('mouseup', fn) // where Fabric listens for releases during a drag
       return { seen, off: () => document.removeEventListener('mouseup', fn) }
     }
-    const down = (canvas: Canvas, button: number) =>
-      canvas.upperCanvasEl.dispatchEvent(new MouseEvent('mousedown', { button, bubbles: true, cancelable: true, clientX: 10, clientY: 10 }))
-    const up = (button: number, target: EventTarget = document.body) => target.dispatchEvent(new MouseEvent('mouseup', { button, bubbles: true, cancelable: true }))
-    const moveTo = (x: number, y: number) => window.dispatchEvent(new MouseEvent('mousemove', { clientX: x, clientY: y }))
+    const bit = (button: number) => (button === 0 ? 1 : button === 1 ? 4 : 2)
+    /** Buttons currently held, as a real browser reports them in `MouseEvent.buttons`. */
+    let held = 0
+    beforeEach(() => {
+      held = 0
+    })
+    const down = (canvas: Canvas, button: number) => {
+      held |= bit(button)
+      canvas.upperCanvasEl.dispatchEvent(new MouseEvent('mousedown', { button, buttons: held, bubbles: true, cancelable: true, clientX: 10, clientY: 10 }))
+    }
+    const up = (button: number, target: EventTarget = document.body) => {
+      held &= ~bit(button)
+      target.dispatchEvent(new MouseEvent('mouseup', { button, buttons: held, bubbles: true, cancelable: true }))
+    }
+    const moveTo = (x: number, y: number) => window.dispatchEvent(new MouseEvent('mousemove', { clientX: x, clientY: y, buttons: held }))
 
     it('a non-primary mousedown never reaches the canvas element; a primary one does', async () => {
       const { canvas } = await setup()
       const seen = fabricSees(canvas)
       down(canvas, 2)
+      up(2)
       down(canvas, 1)
       up(1)
       expect(seen).toEqual([])
@@ -443,22 +485,56 @@ describe('pointer buttons: only the primary button edits', () => {
       const { canvas } = await setup()
       const doc = documentSees()
       try {
+        down(canvas, 2)
         up(2)
+        down(canvas, 1)
         up(1)
         expect(doc.seen).toEqual([2, 1]) // nothing held: harmless, Fabric is not listening
 
         down(canvas, 0) // primary press passed through to Fabric
+        down(canvas, 2)
         up(2)
+        down(canvas, 1)
         up(1)
         expect(doc.seen).toEqual([2, 1]) // swallowed, so Fabric keeps tracking the primary drag
         up(0)
         expect(doc.seen).toEqual([2, 1, 0]) // the primary release always gets through
 
+        down(canvas, 2)
         up(2)
         expect(doc.seen).toEqual([2, 1, 0, 2]) // and afterwards nothing is swallowed any more
       } finally {
         doc.off()
       }
+    })
+
+    it('a lost primary release does not leave other buttons swallowed, or panning disabled', async () => {
+      const { editor, canvas } = await setup()
+      const doc = documentSees()
+      try {
+        down(canvas, 0)
+        held = 0 // the release went to another window: no mouseup ever arrives here
+        down(canvas, 1) // the next event shows the primary button is not held
+        moveTo(40, 10)
+        expect(editor.getState().viewport.panX).toBe(30) // so the middle button pans again
+        up(1)
+        down(canvas, 2)
+        up(2)
+        expect(doc.seen).toEqual([1, 2]) // and non-primary releases get through again
+      } finally {
+        doc.off()
+      }
+    })
+
+    it('a native drag that ends without a mouseup clears the outstanding primary press', async () => {
+      const { editor, canvas } = await setup()
+      down(canvas, 0)
+      window.dispatchEvent(new Event('dragend'))
+      held = 4 // (stale state on purpose: only the dragend may have cleared the flag)
+      canvas.upperCanvasEl.dispatchEvent(new MouseEvent('mousedown', { button: 1, buttons: 5, bubbles: true, cancelable: true, clientX: 10, clientY: 10 }))
+      moveTo(40, 10)
+      expect(editor.getState().viewport.panX).toBe(30)
+      up(1)
     })
 
     it('a middle-button pan ends only on the middle release', async () => {
@@ -467,13 +543,28 @@ describe('pointer buttons: only the primary button edits', () => {
       down(canvas, 1)
       moveTo(40, 10)
       expect(panX()).toBe(30)
+      down(canvas, 2)
       up(2)
-      up(0)
       moveTo(60, 10)
       expect(panX()).toBe(50) // still panning
       up(1)
       moveTo(100, 10)
       expect(panX()).toBe(50) // ended by its own button
+    })
+
+    it('a pan whose release was lost ends as soon as a move shows the button is up', async () => {
+      const { editor, canvas } = await setup()
+      down(canvas, 1)
+      moveTo(40, 10)
+      held = 0 // released outside the window
+      moveTo(70, 10)
+      moveTo(120, 10)
+      expect(editor.getState().viewport.panX).toBe(30)
+      // A later primary drag must not pan either.
+      down(canvas, 0)
+      moveTo(200, 10)
+      up(0)
+      expect(editor.getState().viewport.panX).toBe(30)
     })
 
     it('a middle press during a primary drag starts no pan and is swallowed', async () => {
@@ -495,6 +586,7 @@ describe('pointer buttons: only the primary button edits', () => {
       down(canvas, 0)
       moveTo(25, 10)
       expect(editor.getState().viewport.panX).toBe(15)
+      down(canvas, 2)
       up(2)
       moveTo(35, 10)
       expect(editor.getState().viewport.panX).toBe(25)
@@ -566,6 +658,31 @@ describe('imports that finish during a gesture', () => {
     expect(editor.getState().canUndo).toBe(false)
   })
 
+  it('are applied after a gesture cancelled by a window blur', async () => {
+    const { editor, canvas, byId } = await setup()
+    const t = press(canvas, byId('img-1'))
+    dragBy(canvas, t, 100, 0)
+    await editor.addImageFiles([png()])
+    window.dispatchEvent(new Event('blur'))
+    await tick()
+    expect(canvas.objects).toHaveLength(3)
+    expect(canvas.objects[0]).toMatchObject({ left: 10 })
+  })
+
+  it('commit text that was being typed as its own step before adding the images', async () => {
+    const { editor, canvas } = await setup(null)
+    editor.addText()
+    ;(canvas.objects[0] as Textbox).type('typed first')
+    await editor.addImageFiles([png()])
+    expect(canvas.objects).toHaveLength(2)
+    editor.undo() // the import only
+    expect(canvas.objects).toHaveLength(1)
+    expect(canvas.objects[0]).toMatchObject({ text: 'typed first' })
+    editor.undo() // the text
+    expect(canvas.objects).toHaveLength(0)
+    expect(editor.getState().canUndo).toBe(false)
+  })
+
   it('are dropped with a notice when the board became read-only meanwhile', async () => {
     const { editor, store, canvas, byId } = await setup()
     store.saveError = new BoardConflictError()
@@ -592,6 +709,113 @@ describe('imports that finish during a gesture', () => {
     release(canvas, t)
     await tick()
     expect(canvas.objects).toHaveLength(2)
+  })
+})
+
+describe('text left while a press on it is still held', () => {
+  it('ends the transform, so the text cannot be dragged without a gesture', async () => {
+    const { editor, canvas } = await setup(null)
+    editor.addText()
+    const tb = canvas.objects[0] as Textbox
+    tb.type('held')
+    press(canvas, tb) // inside the editing text: no gesture
+    expect(canvas._currentTransform).not.toBeNull()
+    tb.exitEditing() // e.g. Esc in the text, while the button is still down
+    expect(canvas._currentTransform).toBeNull()
+    expect(canvas.calls).toContain('endCurrentTransform')
+    expect(editor.getState().canUndo).toBe(true) // the typed text was committed as usual
+  })
+})
+
+describe('a text that is emptied after having been saved', () => {
+  it('is removed from the stored board too, although history never held it', async () => {
+    const { editor, store, canvas } = await setup(null)
+    editor.addText()
+    const tb = canvas.objects[0] as Textbox
+    tb.type('a')
+    await flush()
+    expect(store.saves.at(-1)!.doc.objects).toHaveLength(1) // typing is saved live
+    tb.type('')
+    await flush()
+    tb.exitEditing() // the empty text is discarded
+    expect(canvas.objects).toHaveLength(0)
+    await flush()
+    expect(store.saves.at(-1)!.doc.objects).toHaveLength(0)
+    expect(editor.getState().canUndo).toBe(false)
+  })
+})
+
+describe('scene plumbing with frames', () => {
+  const frames = [
+    { id: 'f1', name: 'Back', left: 0, top: 0, width: 400, height: 300 },
+    { id: 'f2', name: 'Front', left: 50, top: 50, width: 400, height: 300 },
+  ]
+  type Internals = {
+    applyRecords: (scene: { frames: unknown[]; objects: unknown[] }) => void
+    getDoc: () => BoardDoc
+    commit: () => void
+    history: { reset: (s: unknown) => void }
+    snapshot: () => { frames: unknown[]; objects: unknown[] }
+  }
+  /** An editable editor showing a framed scene (frames are not creatable through the UI yet). */
+  async function framed() {
+    const ctx = await setup()
+    const internals = ctx.editor as unknown as Internals
+    const objects = storedDoc().objects.map((o, i) => (i === 0 ? { ...o, frameId: 'f1' } : o))
+    internals.applyRecords({ frames, objects })
+    internals.history.reset(internals.snapshot())
+    return { ...ctx, internals, objects }
+  }
+
+  it('builds frames behind all content and reads them back, with ownership', async () => {
+    const { canvas, internals, objects } = await framed()
+    expect(canvas.objects).toHaveLength(4)
+    const doc = internals.getDoc()
+    expect(doc.frames).toEqual(frames)
+    expect(doc.objects).toEqual(objects)
+    expect(doc.objects[0]).toMatchObject({ id: 'img-1', frameId: 'f1' })
+    expect(doc.objects[1]).not.toHaveProperty('frameId')
+  })
+
+  it('a save during a gesture stores the frames from before it', async () => {
+    const { canvas, internals } = await framed()
+    const t = press(canvas, canvas.objects[0]!)
+    dragBy(canvas, t, 500, 500)
+    expect(internals.getDoc().frames).toEqual(frames)
+    release(canvas, t)
+    await tick()
+    expect(internals.getDoc().frames[0]).toMatchObject({ id: 'f1', left: 500, top: 500 })
+  })
+
+  it('a change to a frame alone is a history step, and undo restores the frame', async () => {
+    const { editor, canvas, internals } = await framed()
+    const t = press(canvas, canvas.objects[1]!)
+    dragBy(canvas, t, 30, 0)
+    release(canvas, t)
+    await tick()
+    expect(editor.getState().canUndo).toBe(true)
+    editor.undo()
+    expect(internals.getDoc().frames).toEqual(frames)
+    expect(editor.getState().canUndo).toBe(false)
+  })
+
+  it('layer commands move frames among frames and content among content, never across', async () => {
+    const { editor, canvas, internals } = await framed()
+    const ids = () => [...internals.getDoc().frames.map((f) => f.id), ...internals.getDoc().objects.map((o) => o.id)]
+    canvas.setActiveObject(canvas.objects[0]!) // the back frame
+    expect(editor.getState().selection?.layer).toEqual({ front: true, forward: true, backward: false, back: false })
+    editor.arrange('front')
+    expect(ids()).toEqual(['f2', 'f1', 'img-1', 'txt-1']) // front-most frame, still behind all content
+
+    canvas.setActiveObject(canvas.objects[1]!) // f1, now the front-most frame
+    expect(editor.getState().selection?.layer).toEqual({ front: false, forward: false, backward: true, back: true })
+
+    canvas.setActiveObject(canvas.objects[2]!) // the image, the back-most content
+    expect(editor.getState().selection?.layer).toEqual({ front: true, forward: true, backward: false, back: false })
+    editor.arrange('back') // already the back-most content: it must not sink below a frame
+    expect(ids()).toEqual(['f2', 'f1', 'img-1', 'txt-1'])
+    editor.arrange('front')
+    expect(ids()).toEqual(['f2', 'f1', 'txt-1', 'img-1'])
   })
 })
 
@@ -668,8 +892,8 @@ describe('one scale factor per gesture (single text)', () => {
     expect(editor.getState().canUndo).toBe(true) // committed on the spot, as before
   })
 
-  it('changing a text wrap width is not a scale and is not limited', async () => {
-    const { canvas } = await setup(big(500))
+  it('changing the wrap width of an out-of-range text keeps its font size and is recorded', async () => {
+    const { editor, canvas } = await setup(big(500))
     const tb = canvas.objects[0] as Textbox
     const t = press(canvas, tb, { action: 'resizing', corner: 'mr' })
     tb.width = 1400
@@ -677,5 +901,6 @@ describe('one scale factor per gesture (single text)', () => {
     release(canvas, t)
     await tick()
     expect(tb).toMatchObject({ width: 1400, fontSize: 500 })
+    expect(editor.getState().canUndo).toBe(true)
   })
 })

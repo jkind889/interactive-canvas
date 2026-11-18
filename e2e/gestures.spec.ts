@@ -120,6 +120,7 @@ test.describe('pointer buttons', () => {
       await page.mouse.down()
       await page.mouse.move(start.x + 60, start.y + 20, { steps: 4 })
       await page.mouse.down({ button })
+      await page.mouse.move(start.x + 90, start.y + 30, { steps: 4 }) // moving with both held: still the drag, never a pan
       await page.mouse.up({ button })
       await page.mouse.move(start.x + 120, start.y + 40, { steps: 4 }) // the drag must still be live
       await page.mouse.move(start.x + 120, 10, { steps: 4 }) // also outside the canvas (over the header)
@@ -247,6 +248,15 @@ test.describe('scaling', () => {
     await page.keyboard.press('Escape')
     await page.waitForTimeout(AUTOSAVE_QUIET_MS)
     expect((await storedDoc(page)).objects).toEqual(after)
+
+    // The canvas object itself carries the folded size, not a leftover scale: selected on its
+    // own, the text reports 400 in the Inspector.
+    const txt = byId(after, 'txt')
+    const inside = at(txt.left + 60, txt.top + 150)
+    await page.mouse.click(inside.x, inside.y)
+    await expect(page.locator('.inspector-title')).toHaveText('Text')
+    await expect(page.locator('.number-input')).toHaveValue('400')
+    await page.keyboard.press('Escape')
 
     await undoButton(page).click()
     await waitSaved(page)

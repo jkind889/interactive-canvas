@@ -181,6 +181,12 @@ export function toFrameRecord(obj: FabricObject): FrameRecord | null {
   }
 }
 
+/** True when the object's absolute scale (its own times its selection's) is not 1. */
+export function hasResidualScale(obj: FabricObject): boolean {
+  const d = util.qrDecompose(obj.calcTransformMatrix())
+  return Math.abs(Math.abs(d.scaleX) - 1) > 0.001 || Math.abs(Math.abs(d.scaleY) - 1) > 0.001
+}
+
 /**
  * Folds any residual scale on a text object into fontSize/width, with no limit of its
  * own: limits are decided once per gesture, before this runs.
