@@ -27,6 +27,8 @@ import { History } from '../model/history.ts'
 import {
   DEFAULT_TEXT_COLOR,
   applyTypingShortcut,
+  fontAtCaret,
+  fontOfRange,
   formatAtCaret,
   formatOfRange,
   formatOfText,
@@ -35,10 +37,11 @@ import {
   pendingMarksAt,
   setHeading as setHeadingOfRange,
   setHeadingEverywhere,
+  setRangeFont,
   toggleMark as toggleMarkOfRange,
   togglePendingMark,
 } from '../model/richText.ts'
-import type { Mark, MarkState, PendingMarks, RangeFormat, TextAlign, TextFormatting } from '../model/richText.ts'
+import type { Mark, MarkState, PendingTextStyle, RangeFormat, TextAlign, TextFormatting } from '../model/richText.ts'
 import { canReorderLayered, reorderLayered } from '../model/layers.ts'
 import type { LayerOp } from '../model/layers.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from '../model/types.ts'
@@ -105,7 +108,7 @@ export interface SelectionInfo {
  */
 export interface TextFormatInfo {
   editing: boolean
-  font: FontId
+  font: FontId | 'mixed'
   align: TextAlign
   /** `#rrggbb`; the default ink when the text has no colour of its own. */
   color: string
@@ -231,7 +234,7 @@ export class Editor {
    * Marks chosen with only a caret in a text being edited, for what is typed next. Dropped
    * when the caret moves for any other reason than typing, and when the edit ends.
    */
-  private pending: { target: Textbox; marks: PendingMarks } | null = null
+  private pending: { target: Textbox; style: PendingTextStyle } | null = null
   /**
    * The character a key is typing into the text being edited (a space or a `*`, see
    * `typedCharacter`), from its keydown until the text change it causes or its keyup. Only a
@@ -244,7 +247,7 @@ export class Editor {
    * after": dropped by the next text change, any caret or selection move, any formatting
    * command, the end of the edit and any rebuild from records (undo, redo, a cancelled gesture).
    */
-  private shortcutRevert: { target: Textbox; text: string; fmt: TextFormatting; caret: number; pending: PendingMarks | null } | null = null
+  private shortcutRevert: { target: Textbox; text: string; fmt: TextFormatting; caret: number; pending: PendingTextStyle | null } | null = null
   /** A selection-info refresh is queued (see `queueSelectionSync`). */
   private selectionSyncQueued = false
 
@@ -541,14 +544,24 @@ export class Editor {
     const editing = tb.isEditing === true
     const range = editing ? selectedRange(tb) : undefined
     let state: RangeFormat
-    if (range && range.start === range.end) state = formatAtCaret(text, fmt, range.start, this.pendingFor(tb))
-    else if (range) state = formatOfRange(text, fmt, range.start, range.end)
-    else state = formatOfText(text, fmt)
-    return { editing, font: fmt.font ?? 'sans', align: fmt.align ?? 'left', color: fmt.color ?? DEFAULT_TEXT_COLOR, ...state }
+    let font: TextFormatInfo['font']
+    if (range && range.start === range.end) {
+      const pending = this.pendingFor(tb)
+      state = formatAtCaret(text, fmt, range.start, pending)
+      font = pending.font ?? fontAtCaret(text, fmt, range.start)
+    } else {
+      state = range ? formatOfRange(text, fmt, range.start, range.end) : formatOfText(text, fmt)
+      font = fontOfRange(text, fmt, range?.start ?? 0, range?.end ?? text.length)
+    }
+    return { editing, font, align: fmt.align ?? 'left', color: fmt.color ?? DEFAULT_TEXT_COLOR, ...state }
   }
 
-  private pendingFor(tb: Textbox): PendingMarks {
-    return this.pending?.target === tb ? this.pending.marks : {}
+  private pendingFor(tb: Textbox): PendingTextStyle {
+    return this.pending?.target === tb ? this.pending.style : {}
+  }
+
+  private setPending(tb: Textbox, style: PendingTextStyle) {
+    this.pending = Object.keys(style).length > 0 ? { target: tb, style } : null
   }
 
   /**
@@ -563,8 +576,8 @@ export class Editor {
     if (!p || p.target !== tb || !tb.isEditing) return
     const caret = selectedRange(tb)?.end
     if (caret === undefined) return
-    const marks = pendingMarksAt(tb.text, readTextFormatting(tb), caret, p.marks)
-    if (marks !== p.marks) this.pending = Object.keys(marks).length > 0 ? { target: tb, marks } : null
+    const style = pendingMarksAt(tb.text, readTextFormatting(tb), caret, p.style)
+    if (style !== p.style) this.setPending(tb, style)
   }
 
   /**
@@ -721,7 +734,7 @@ export class Editor {
       // line keeps the level it had before the change (never one guessed from the sizes a
       // paste brought), marks come from the styles, and a save can never store formatting
       // that the canvas does not show.
-      // Marks chosen with only a caret go to what was just typed (they last through every
+      // Marks and a font chosen with only a caret go to what was just typed (they last through every
       // step of an IME composition, which fires this without moving the caret otherwise).
       // Then a typed character that completes a typing shortcut converts the text, in the same
       // callback, before the save below is scheduled (see `typingShortcut`).
@@ -1683,8 +1696,7 @@ export class Editor {
     if (!tb) return
     const range = tb.isEditing ? (selectedRange(tb) ?? { start: 0, end: tb.text.length }) : { start: 0, end: tb.text.length }
     if (tb.isEditing && range.start === range.end) {
-      const marks = togglePendingMark(tb.text, readTextFormatting(tb), range.start, this.pendingFor(tb), mark)
-      this.pending = Object.keys(marks).length > 0 ? { target: tb, marks } : null
+      this.setPending(tb, togglePendingMark(tb.text, readTextFormatting(tb), range.start, this.pendingFor(tb), mark))
       this.syncSelection()
       return
     }
@@ -1703,10 +1715,18 @@ export class Editor {
     }
   }
 
-  /** The font of the whole box, also while it is being edited. */
+  /** The font of the selection or whole box, or the next characters typed at a caret. */
   setTextFont(font: FontId) {
     const tb = this.formatTarget()
-    if (tb) this.formatText(tb, 'font', (fmt) => ({ ...fmt, font }))
+    if (!tb) return
+    const range = tb.isEditing ? selectedRange(tb) : undefined
+    if (tb.isEditing && !range) return
+    if (range && range.start === range.end) {
+      this.setPending(tb, { ...this.pendingFor(tb), font })
+      this.syncSelection()
+      return
+    }
+    this.formatText(tb, 'font', (fmt, text) => setRangeFont(text, fmt, font, range))
   }
 
   /** The alignment of the whole box, also while it is being edited. The box keeps its position and width. */
@@ -1748,17 +1768,17 @@ export class Editor {
     const sc = matchTypingShortcut(edit.text, nextEnd, typed)
     if (!sc) return
     const fmt = readTextFormatting(tb) // canonical: the reconcile has just remembered it
-    const pendingBefore = this.pending?.target === tb ? this.pending.marks : null
+    const pendingBefore = this.pending?.target === tb ? this.pending.style : null
     const out = applyTypingShortcut(edit.text, fmt, sc)
     replaceEditedText(tb, out.text, out.fmt, out.caret)
     if (sc.kind !== 'heading') {
       // What is typed next is plain again: a pending "off" (none where typing would not carry
       // the mark anyway, nor for bold on a heading line, where it cannot change).
       const mark = sc.kind
-      const marks: PendingMarks = { ...(pendingBefore ?? {}) }
-      if (marksAtCaret(out.text, out.fmt, out.caret)[mark] && !(mark === 'bold' && formatAtCaret(out.text, out.fmt, out.caret).boldFromHeading)) marks[mark] = false
-      else delete marks[mark]
-      this.pending = Object.keys(marks).length > 0 ? { target: tb, marks } : null
+      const style = { ...pendingBefore }
+      if (marksAtCaret(out.text, out.fmt, out.caret)[mark] && !(mark === 'bold' && formatAtCaret(out.text, out.fmt, out.caret).boldFromHeading)) style[mark] = false
+      else delete style[mark]
+      this.setPending(tb, style)
     }
     this.shortcutRevert = { target: tb, text: edit.text, fmt, caret: nextEnd, pending: pendingBefore }
   }
@@ -1769,7 +1789,7 @@ export class Editor {
     this.shortcutRevert = null
     if (!r || !this.editable || this.busy || !r.target.isEditing || this.canvas.getActiveObject() !== r.target) return
     replaceEditedText(r.target, r.text, r.fmt, r.caret)
-    this.pending = r.pending ? { target: r.target, marks: r.pending } : null
+    this.setPending(r.target, r.pending ?? {})
     this.canvas.requestRenderAll()
     this.autosaver.markDirty() // like typing (a blank text is out of the scene, so a save stores none)
     this.syncSelection()

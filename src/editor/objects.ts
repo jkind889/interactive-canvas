@@ -1,8 +1,8 @@
 import { FabricImage, Rect, Textbox, util } from 'fabric'
 import type { FabricObject, TextStyle, TextStyleDeclaration } from 'fabric'
 import { round, roundPositive } from '../model/doc.ts'
-import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharMasks, textAfterEdit, withPendingMarks } from '../model/richText.ts'
-import type { PendingMarks, TextChange, TextFormatting } from '../model/richText.ts'
+import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, headingFontSize, isHeadingLevel, markMask, spansFromCharStyles, textAfterEdit, withPendingMarks } from '../model/richText.ts'
+import type { CharStyle, PendingTextStyle, TextChange, TextFormatting } from '../model/richText.ts'
 import type { FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 import type { Point } from '../model/viewport.ts'
 import { FONT_STACKS, fontIdOf } from './fonts.ts'
@@ -155,6 +155,7 @@ function stylesFor(tb: Textbox, fmt: TextFormatting, base: number): TextStyle {
       if (on?.italic) style.fontStyle = 'italic'
       if (on?.underline) style.underline = true
       if (on?.strike) style.linethrough = true
+      if (on?.font) style.fontFamily = FONT_STACKS[on.font]
       if (Object.keys(style).length > 0) row[k] = style
     })
     if (line.graphemes.length === 0 && heading.fontSize !== undefined) row[0] = heading
@@ -271,12 +272,12 @@ export function selectedRange(tb: Textbox): { start: number; end: number } | und
  * was on a heading line and is now on a normal one, and from an inserted character on a
  * normal line whose style is a copy of a heading character's (Fabric copies the
  * neighbouring character's style onto what is typed or pasted without styles of its own;
- * styles brought by a paste or drop are complete declarations, with a font family).
- * `change.caret` (UTF-16, after the change) picks the alignment among repeated characters.
- * `change.pending` are marks chosen with only a caret for what is typed next: the characters
- * the change inserted get them (on or off), whatever style Fabric copied onto them.
+ * styles brought by a paste or drop are complete declarations, including fill). Only
+ * local font overrides are read from character styles, so pasted or dropped text still
+ * takes its font from the destination. `change.caret` (UTF-16, after the change) picks the
+ * alignment among repeated characters. Inserted characters get any pending marks and font.
  */
-export function readTextFormatting(tb: Textbox, change?: { caret: number | undefined; pending?: PendingMarks; seen?: (edit: TextEdit) => void }): TextFormatting {
+export function readTextFormatting(tb: Textbox, change?: { caret: number | undefined; pending?: PendingTextStyle; seen?: (edit: TextEdit) => void }): TextFormatting {
   const raw: Record<string, unknown> = {
     font: fontIdOf(tb.fontFamily),
     align: tb.textAlign,
@@ -284,11 +285,11 @@ export function readTextFormatting(tb: Textbox, change?: { caret: number | undef
   }
   const text = tb.text
   const known = lastCanonical.get(tb)
+  const chars = new Map<number, CharStyle>()
   if (known && (change !== undefined || known.text !== text)) {
     const edit = textAfterEdit(known.text, known.headings, text, change?.caret)
     change?.seen?.({ text, change: edit.change })
     const headings = edit.headings
-    const marks = new Map<number, number>() // UTF-16 start of a marked character -> its marks
     const pending = change?.pending && Object.keys(change.pending).length > 0 ? change.pending : undefined
     for (const [li, line] of linesOf(tb).entries()) {
       const row = tb.styles[li]
@@ -298,27 +299,30 @@ export function readTextFormatting(tb: Textbox, change?: { caret: number | undef
         const end = start + g.length
         const st = row?.[k]
         let mask = st ? marksOf(st) : 0
+        const complete = st?.fill !== undefined
+        let font = !complete && st?.fontFamily !== undefined ? fontIdOf(st.fontFamily) : undefined
         if (st && mask & BOLD && (headings?.[li] ?? 0) === 0) {
           // A character that was on a heading line, or one whose style is a copy of a heading
-          // character's (a size and no font family). The second also covers a character the
+          // character's (a size and no fill). The second also covers a character the
           // diff counts as untouched although Fabric replaced its style: the line break after
           // a heading replaced by Enter leaves the same text, with the heading style copied
           // onto the first character of the next line. Safe, because the canonical styles never
           // give a character on a normal line a size of its own.
           const before = edit.levelBefore(start, end)
-          const headingBold = (before !== undefined && before > 0) || (st.fontSize !== undefined && st.fontFamily === undefined)
+          const headingBold = (before !== undefined && before > 0) || (st.fontSize !== undefined && !complete)
           if (headingBold) mask &= ~BOLD
         }
-        if (pending && edit.levelBefore(start, end) === undefined) mask = withPendingMarks(mask, pending)
-        if (mask) marks.set(start, mask)
+        if (pending && edit.levelBefore(start, end) === undefined) {
+          mask = withPendingMarks(mask, pending)
+          font = pending.font ?? font
+        }
+        if (mask || font) chars.set(start, { mask, font })
         start = end
       })
     }
     raw.headings = headings
-    raw.spans = spansFromCharMasks(text, headings, (a) => marks.get(a) ?? 0)
   } else if (hasStyles(tb)) {
     const headings: number[] = []
-    const marks = new Map<number, number>()
     for (const [li, line] of linesOf(tb).entries()) {
       const row = tb.styles[li]
       headings.push(levelOf(row?.[0]?.fontSize, tb.fontSize))
@@ -327,13 +331,14 @@ export function readTextFormatting(tb: Textbox, change?: { caret: number | undef
       line.graphemes.forEach((g, k) => {
         const st = row[k]
         const mask = st ? marksOf(st) : 0
-        if (mask) marks.set(start, mask)
+        const font = st?.fontFamily !== undefined ? fontIdOf(st.fontFamily) : undefined
+        if (mask || font) chars.set(start, { mask, font })
         start += g.length
       })
     }
     raw.headings = canonicalHeadings(text, headings)
-    raw.spans = spansFromCharMasks(text, raw.headings as number[] | undefined, (a) => marks.get(a) ?? 0)
   }
+  if (chars.size > 0) raw.spans = spansFromCharStyles(text, raw.headings as number[] | undefined, (a) => chars.get(a))
   return canonicalTextFormatting(text, raw)
 }
 
@@ -448,7 +453,7 @@ function sameStyles(a: TextStyle | undefined, b: TextStyle): boolean {
  * change inserted (see `readTextFormatting`). `seen` is told how the text changed (the one
  * diff this works out), when there is a remembered state to compare with.
  */
-export function reconcileTextFormatting(tb: Textbox, pending?: PendingMarks, seen?: (edit: TextEdit) => void): boolean {
+export function reconcileTextFormatting(tb: Textbox, pending?: PendingTextStyle, seen?: (edit: TextEdit) => void): boolean {
   const known = lastCanonical.get(tb)
   const fmt = readTextFormatting(tb, { caret: caretOffset(tb), pending, seen })
   const want = stylesFor(tb, fmt, tb.fontSize)

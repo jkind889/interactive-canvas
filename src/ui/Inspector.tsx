@@ -144,7 +144,7 @@ function TextPanel({ editor, selection, text, locked }: { editor: Editor; select
     <>
       <div className="inspector-row">
         <span id={`${id}-font`}>Font</span>
-        <span className="inspector-value">{FONT_LABELS[text.font]}</span>
+        <span className="inspector-value">{text.font === 'mixed' ? 'Mixed' : FONT_LABELS[text.font]}</span>
       </div>
       <div className="choice-row" role="group" aria-labelledby={`${id}-font`}>
         {FONT_IDS.map((f) => (

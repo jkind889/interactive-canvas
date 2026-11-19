@@ -472,7 +472,7 @@ describe('a pending bold and a heading line (a heading is always bold, so bold i
     const tb = ctx.canvas.objects.at(-1) as Tb
     withTextarea(tb)
     tb.selectionStart = tb.selectionEnd = 0
-    const pending = () => (ctx.editor as unknown as { pending: { marks: Record<string, boolean> } | null }).pending?.marks ?? {}
+    const pending = () => (ctx.editor as unknown as { pending: { style: Record<string, boolean> } | null }).pending?.style ?? {}
     return { ...ctx, tb, pending, made: () => ctx.scene()[0] as TextRecord }
   }
 
@@ -537,7 +537,7 @@ describe('a pending bold and a heading line (a heading is always bold, so bold i
     edit(canvas, tb)
     editor.toggleMark('bold') // off, for what is typed next
     editor.toggleMark('underline')
-    const pending = () => (editor as unknown as { pending: { marks: Record<string, boolean> } | null }).pending?.marks
+    const pending = () => (editor as unknown as { pending: { style: Record<string, boolean> } | null }).pending?.style
     expect(pending()).toStrictEqual({ bold: false, underline: true })
     editor.setHeading(2)
     expect(pending()).toStrictEqual({ underline: true })

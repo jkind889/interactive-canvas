@@ -33,6 +33,19 @@ import type { Mark, TextFormatting } from './richText.ts'
 const spans = (text: string, raw: unknown, headings?: number[]) => canonicalSpans(text, raw, headings)
 
 describe('canonical spans', () => {
+  it('keeps grapheme-wide font overrides and merges them with overlapping marks', () => {
+    expect(canonicalTextFormatting('a😀b', { font: 'mono', spans: [
+      { start: 0, end: 4, italic: true },
+      { start: 2, end: 3, font: 'sans' },
+      { start: 3, end: 4, font: 'mono' },
+      { start: 0, end: 1, font: 'unknown' },
+    ] })).toStrictEqual({ font: 'mono', spans: [
+      { start: 0, end: 1, italic: true },
+      { start: 1, end: 3, italic: true, font: 'sans' },
+      { start: 3, end: 4, italic: true },
+    ] })
+  })
+
   it('text without formatting has none', () => {
     expect(spans('abc', undefined)).toBeUndefined()
     expect(spans('abc', [])).toBeUndefined()

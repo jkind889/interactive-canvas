@@ -7,14 +7,14 @@ import type { FontId, TextRecord, TextSpan } from './types.ts'
  * texts that look the same are stored the same, and "a commit that changes nothing
  * records nothing" stays exact:
  * - spans: integer offsets with 0 <= start < end <= text.length, sorted, non-overlapping,
- *   adjacent spans with identical marks merged, every span with at least one mark, marks
- *   only ever `true`;
+ *   adjacent spans with identical formatting merged, every span carrying marks (only
+ *   ever `true`) or a font different from the box font;
  * - a span never starts or ends inside a character (a surrogate pair or any other
  *   grapheme cluster, the unit the canvas styles): a half-marked character counts as
  *   marked, so the span grows outwards to cover it whole;
  * - a line break is not a character of its own: it carries exactly the marks that the
  *   nearest characters on both sides of it share, so a bold run continues across a break
- *   only when both lines are bold there;
+ *   only when both lines are bold there. The same applies to font overrides;
  * - a heading line is always bold, so `bold` is never stored inside one;
  * - headings: levels 0 to 3, one per paragraph at most, trailing zeros trimmed.
  * Absent (undefined) means none.
@@ -29,6 +29,7 @@ export const FONT_LABELS: Readonly<Record<FontId, string>> = {
   display: 'Display',
 }
 export const DEFAULT_FONT: FontId = 'sans'
+const isFont = (value: unknown): value is FontId => FONT_IDS.includes(value as FontId)
 
 /** The default ink of a text. Never stored: a text in this colour has no `color`. */
 export const DEFAULT_TEXT_COLOR = '#1d2230'
@@ -124,13 +125,14 @@ export function canonicalHeadings(text: string, raw: unknown): number[] | undefi
  * spans (non-integer offsets, nothing marked, empty after trimming to the text) are dropped;
  * overlapping spans combine their marks.
  */
-export function canonicalSpans(text: string, raw: unknown, headings?: readonly number[]): TextSpan[] | undefined {
+export function canonicalSpans(text: string, raw: unknown, headings?: readonly number[], baseFont = DEFAULT_FONT): TextSpan[] | undefined {
   if (!Array.isArray(raw) || raw.length === 0 || text === '') return undefined
   // A canonical list has at most one span per code unit. A longer one was not written by
   // the app, and could be a huge sparse array that would take minutes to walk: drop it.
   if (raw.length > text.length) return undefined
   // How many valid spans cover each code unit, per mark (a difference array, summed below).
   const cover = MARKS.map(() => new Int32Array(text.length + 1))
+  const fontCover = new Map<FontId, Int32Array>()
   let any = false
   for (let i = 0; i < raw.length; i++) {
     const s: unknown = raw[i]
@@ -145,6 +147,13 @@ export function canonicalSpans(text: string, raw: unknown, headings?: readonly n
       c[b] = (c[b] ?? 0) - 1
       any = true
     })
+    if (isFont(s.font)) {
+      let counts = fontCover.get(s.font)
+      if (!counts) fontCover.set(s.font, (counts = new Int32Array(text.length + 1)))
+      counts[a] = (counts[a] ?? 0) + 1
+      counts[b] = (counts[b] ?? 0) - 1
+      any = true
+    }
   }
   if (!any) return undefined
   // Mask of the marks on each code unit.
@@ -156,22 +165,42 @@ export function canonicalSpans(text: string, raw: unknown, headings?: readonly n
       if (n > 0) unitMask[k] = (unitMask[k] ?? 0) | (1 << i)
     }
   })
-  return spansFromCharMasks(text, headings, (a, b) => {
+  // Conflicting fonts in malformed records use FONT_IDS order at each code unit.
+  const unitFont: Array<FontId | undefined> = []
+  for (const font of FONT_IDS) {
+    const counts = fontCover.get(font)
+    if (!counts) continue
+    let active = 0
+    for (let k = 0; k < text.length; k++) {
+      active += counts[k] ?? 0
+      if (active > 0) unitFont[k] ??= font
+    }
+  }
+  return spansFromCharStyles(text, headings, (a, b) => {
     let mask = 0
-    for (let k = a; k < b; k++) mask |= unitMask[k] ?? 0
-    return mask
+    let font: FontId | undefined
+    for (let k = a; k < b; k++) {
+      mask |= unitMask[k] ?? 0
+      font ??= unitFont[k]
+    }
+    return { mask, font: font === baseFont ? undefined : font }
   })
+}
+
+export interface CharStyle {
+  mask: number
+  /** An override of the box font. */
+  font?: FontId
 }
 
 /**
  * Builds canonical spans from the marks of each character (given as its UTF-16 range).
  * Shared by loading and by reading a text back from the canvas, so both agree exactly.
  */
-export function spansFromCharMasks(text: string, headings: readonly number[] | undefined, maskOf: (start: number, end: number) => number): TextSpan[] | undefined {
-  interface Unit {
+export function spansFromCharStyles(text: string, headings: readonly number[] | undefined, styleOf: (start: number, end: number) => CharStyle | undefined): TextSpan[] | undefined {
+  interface Unit extends CharStyle {
     start: number
     end: number
-    mask: number
     isBreak: boolean
   }
   const units: Unit[] = []
@@ -180,42 +209,47 @@ export function spansFromCharMasks(text: string, headings: readonly number[] | u
     const keep = (headings?.[pi] ?? 0) > 0 ? ~BIT.bold : ~0 // a heading is bold already
     p.chars.forEach((a, k) => {
       const b = p.chars[k + 1] ?? p.end
-      units.push({ start: a, end: b, mask: maskOf(a, b) & keep & 15, isBreak: false })
+      const style = styleOf(a, b)
+      units.push({ start: a, end: b, mask: (style?.mask ?? 0) & keep & 15, font: style?.font, isBreak: false })
     })
     const next = paras[pi + 1]
     if (next) units.push({ start: p.end, end: next.start, mask: 0, isBreak: true })
   })
   // A line break carries the marks shared by the nearest characters on either side of it.
-  const after = new Array<number>(units.length).fill(0)
-  for (let i = units.length - 1, m = 0; i >= 0; i--) {
-    after[i] = m
+  const after: Array<Unit | undefined> = []
+  let next: Unit | undefined
+  for (let i = units.length - 1; i >= 0; i--) {
+    after[i] = next
     const u = units[i] as Unit
-    if (!u.isBreak) m = u.mask
+    if (!u.isBreak) next = u
   }
-  let before = 0
+  let before: Unit | undefined
   units.forEach((u, i) => {
-    if (u.isBreak) u.mask = before & (after[i] ?? 0)
-    else before = u.mask
+    if (u.isBreak) {
+      u.mask = (before?.mask ?? 0) & (after[i]?.mask ?? 0)
+      u.font = before?.font === after[i]?.font ? before?.font : undefined
+    } else before = u
   })
 
   const out: TextSpan[] = []
   let lastMask = 0
   for (const u of units) {
-    if (u.mask === 0) continue
+    if (u.mask === 0 && !u.font) continue
     const last = out[out.length - 1]
-    if (last && last.end === u.start && lastMask === u.mask) {
+    if (last && last.end === u.start && lastMask === u.mask && last.font === u.font) {
       last.end = u.end
       continue
     }
     const span: TextSpan = { start: u.start, end: u.end }
     for (const m of MARKS) if (u.mask & BIT[m]) span[m] = true
+    if (u.font) span.font = u.font
     out.push(span)
     lastMask = u.mask
   }
   return out.length > 0 ? out : undefined
 }
 
-/** The marks of a span as a bit mask (see `spansFromCharMasks`). */
+/** The marks of a span as a bit mask (see `spansFromCharStyles`). */
 export function markMask(marks: Partial<Record<Mark, unknown>>): number {
   let mask = 0
   for (const m of MARKS) if (marks[m] === true) mask |= BIT[m]
@@ -232,11 +266,11 @@ const COLOR = /^#[0-9a-f]{6}$/i
 export function canonicalTextFormatting(text: string, raw: Record<string, unknown>): TextFormatting {
   const out: TextFormatting = {}
   const { font, align, color } = raw
-  if (FONT_IDS.includes(font as FontId) && font !== DEFAULT_FONT) out.font = font as FontId
+  if (isFont(font) && font !== DEFAULT_FONT) out.font = font
   if (align === 'center' || align === 'right') out.align = align
   if (typeof color === 'string' && COLOR.test(color) && color.toLowerCase() !== DEFAULT_TEXT_COLOR) out.color = color.toLowerCase()
   const headings = canonicalHeadings(text, raw.headings)
-  const spans = canonicalSpans(text, raw.spans, headings)
+  const spans = canonicalSpans(text, raw.spans, headings, out.font)
   if (spans) out.spans = spans
   if (headings) out.headings = headings
   return out
@@ -406,6 +440,7 @@ export function headingsAfterEdit(prevText: string, prevHeadings: readonly numbe
 export type MarkState = 'on' | 'off' | 'mixed'
 /** Marks chosen with only a caret, for what is typed next: true is on, false is off, absent is "as typed". */
 export type PendingMarks = Partial<Record<Mark, boolean>>
+export type PendingTextStyle = PendingMarks & { font?: FontId }
 export type TextAlign = 'left' | 'center' | 'right'
 
 /** The fixed colour choices, legible on a white frame or on an image. The first is the default ink (stored as nothing). */
@@ -420,39 +455,57 @@ export const TEXT_PALETTE: ReadonlyArray<{ color: string; name: string }> = [
   { color: '#7048e8', name: 'Purple' },
 ]
 
-interface CharMarks {
+interface StyledCharacter extends CharStyle {
   start: number
   end: number
   /** Paragraph index. */
   line: number
-  mask: number
 }
 
-/** Every character of the text with its paragraph and the marks its (canonical) spans give it. */
-function charMarks(text: string, spans: readonly TextSpan[] | undefined): CharMarks[] {
-  const out: CharMarks[] = []
+/** Every character of the text with its paragraph and its canonical span formatting. */
+function styledCharacters(text: string, spans: readonly TextSpan[] | undefined): StyledCharacter[] {
+  const out: StyledCharacter[] = []
   const list = spans ?? []
   let si = 0
   paragraphsOf(text).forEach((p, line) => {
     p.chars.forEach((a, k) => {
       const b = p.chars[k + 1] ?? p.end
-      while (si < list.length && (list[si] as TextSpan).end <= a) si++
-      let mask = 0
-      for (let j = si; j < list.length && (list[j] as TextSpan).start < b; j++) mask |= markMask(list[j] as TextSpan)
-      out.push({ start: a, end: b, line, mask })
+      while (si < list.length && list[si]!.end <= a) si++
+      const span = list[si]
+      const style = span && span.start < b ? span : undefined
+      out.push({ start: a, end: b, line, mask: style ? markMask(style) : 0, font: style?.font })
     })
   })
   return out
 }
 
-const overlaps = (c: CharMarks, start: number, end: number) => c.end > start && c.start < end
+const overlaps = (c: StyledCharacter, start: number, end: number) => c.end > start && c.start < end
 const isHeadingLine = (headings: readonly number[] | undefined, line: number) => (headings?.[line] ?? 0) > 0
 
-/** A text's formatting with the given character marks and headings, in canonical form. */
-function withMarks(text: string, fmt: TextFormatting, headings: readonly number[] | undefined, chars: readonly CharMarks[]): TextFormatting {
-  const byStart = new Map(chars.map((c) => [c.start, c.mask] as const))
-  const spans = spansFromCharMasks(text, headings, (a) => byStart.get(a) ?? 0)
+/** A text's formatting with the given character styles and headings, in canonical form. */
+function withStyles(text: string, fmt: TextFormatting, headings: readonly number[] | undefined, chars: readonly StyledCharacter[]): TextFormatting {
+  const byStart = new Map(chars.map((c) => [c.start, c] as const))
+  const spans = spansFromCharStyles(text, headings, (a) => byStart.get(a))
   return canonicalTextFormatting(text, { ...fmt, spans, headings })
+}
+
+/** Changes only the characters in the range, or the base and every character for a box selection. */
+export function setRangeFont(text: string, fmt: TextFormatting, font: FontId, range?: TextRange): TextFormatting {
+  const chars = styledCharacters(text, fmt.spans)
+  const base = (range ? fmt.font : font) ?? DEFAULT_FONT
+  for (const c of chars) {
+    if (!range || overlaps(c, range.start, range.end)) c.font = font === base ? undefined : font
+  }
+  return withStyles(text, { ...fmt, font: base }, fmt.headings, chars)
+}
+
+/** The effective font of a range or the whole box. Line breaks do not have a font of their own. */
+export function fontOfRange(text: string, fmt: TextFormatting, start: number, end: number): FontId | 'mixed' {
+  const base = fmt.font ?? DEFAULT_FONT
+  if (!fmt.spans?.some((span) => span.font)) return base
+  const chars = styledCharacters(text, fmt.spans).filter((c) => overlaps(c, start, end))
+  const font = chars[0]?.font ?? base
+  return chars.every((c) => (c.font ?? base) === font) ? font : 'mixed'
 }
 
 /**
@@ -463,14 +516,14 @@ function withMarks(text: string, fmt: TextFormatting, headings: readonly number[
  * characters changes nothing.
  */
 export function toggleMark(text: string, fmt: TextFormatting, mark: Mark, start: number, end: number): TextFormatting {
-  const chars = charMarks(text, fmt.spans)
+  const chars = styledCharacters(text, fmt.spans)
   const bit = BIT[mark]
-  const has = (c: CharMarks) => (c.mask & bit) !== 0 || (mark === 'bold' && isHeadingLine(fmt.headings, c.line))
+  const has = (c: StyledCharacter) => (c.mask & bit) !== 0 || (mark === 'bold' && isHeadingLine(fmt.headings, c.line))
   const hit = chars.filter((c) => overlaps(c, start, end))
   if (hit.length === 0) return fmt
   const on = !hit.every(has)
   for (const c of hit) c.mask = on ? c.mask | bit : c.mask & ~bit
-  return withMarks(text, fmt, fmt.headings, chars)
+  return withStyles(text, fmt, fmt.headings, chars)
 }
 
 /**
@@ -520,7 +573,7 @@ export function lastBoxLine(text: string): number {
 
 function setHeadingOfLines(text: string, fmt: TextFormatting, level: number, first: number, last: number): TextFormatting {
   const headings = Array.from({ length: paragraphCount(text) }, (_, i) => (i >= first && i <= last ? level : (fmt.headings?.[i] ?? 0)))
-  return withMarks(text, fmt, canonicalHeadings(text, headings), charMarks(text, fmt.spans))
+  return withStyles(text, fmt, canonicalHeadings(text, headings), styledCharacters(text, fmt.spans))
 }
 
 /** What the formatting controls show for a range, a caret or a whole box. */
@@ -546,8 +599,8 @@ export function formatOfText(text: string, fmt: TextFormatting): RangeFormat {
 }
 
 function formatOf(text: string, fmt: TextFormatting, start: number, end: number, first: number, last: number): RangeFormat {
-  const hit = charMarks(text, fmt.spans).filter((c) => overlaps(c, start, end))
-  const onHeading = (c: CharMarks) => isHeadingLine(fmt.headings, c.line)
+  const hit = styledCharacters(text, fmt.spans).filter((c) => overlaps(c, start, end))
+  const onHeading = (c: StyledCharacter) => isHeadingLine(fmt.headings, c.line)
   const marks = markStates((m) => {
     const n = hit.filter((c) => (c.mask & BIT[m]) !== 0 || (m === 'bold' && onHeading(c))).length
     return n === 0 ? 'off' : n === hit.length ? 'on' : 'mixed'
@@ -557,19 +610,23 @@ function formatOf(text: string, fmt: TextFormatting, start: number, end: number,
   return { marks, heading: levels.size === 1 ? ([...levels][0] as number) : 'mixed', boldFromHeading: hit.length > 0 && hit.every(onHeading) }
 }
 
-/**
- * The marks a character typed at the caret gets when nothing is pending: those of the
- * character before it on its line, at the start of a line those of the character after it,
- * none on an empty line. The canvas copies the neighbouring character's style the same way
- * (fabric 7.4.0, ITextBehavior.mjs `insertCharStyleObject`). On a heading line bold is the
- * heading's.
- */
-export function marksAtCaret(text: string, fmt: TextFormatting, caret: number): Record<Mark, boolean> {
+/** The neighbouring character whose style Fabric normally copies (ITextBehavior.mjs `insertCharStyleObject`). */
+function characterAtCaret(text: string, fmt: TextFormatting, caret: number): StyledCharacter | undefined {
   const line = lineAt(lineBounds(text), caret)
-  const chars = charMarks(text, fmt.spans).filter((c) => c.line === line)
-  const mask = (chars.find((c) => c.end === caret) ?? chars.find((c) => c.start === caret))?.mask ?? 0
+  const chars = styledCharacters(text, fmt.spans).filter((c) => c.line === line)
+  return chars.find((c) => c.end === caret) ?? chars.find((c) => c.start === caret)
+}
+
+export function fontAtCaret(text: string, fmt: TextFormatting, caret: number): FontId {
+  if (!fmt.spans?.some((span) => span.font)) return fmt.font ?? DEFAULT_FONT
+  return characterAtCaret(text, fmt, caret)?.font ?? fmt.font ?? DEFAULT_FONT
+}
+
+/** The neighbouring character's marks, with bold implied on a heading line. */
+export function marksAtCaret(text: string, fmt: TextFormatting, caret: number): Record<Mark, boolean> {
+  const mask = characterAtCaret(text, fmt, caret)?.mask ?? 0
   return {
-    bold: isHeadingLine(fmt.headings, line) || (mask & BIT.bold) !== 0,
+    bold: caretOnHeading(text, fmt, caret) || (mask & BIT.bold) !== 0,
     italic: (mask & BIT.italic) !== 0,
     underline: (mask & BIT.underline) !== 0,
     strike: (mask & BIT.strike) !== 0,
@@ -589,11 +646,11 @@ export function formatAtCaret(text: string, fmt: TextFormatting, caret: number, 
  * controls show now. A choice that matches what typing would give anyway is dropped, and bold
  * on a heading line cannot be changed. Returns the new pending marks ({}: none).
  */
-export function togglePendingMark(text: string, fmt: TextFormatting, caret: number, pending: PendingMarks, mark: Mark): PendingMarks {
+export function togglePendingMark(text: string, fmt: TextFormatting, caret: number, pending: PendingTextStyle, mark: Mark): PendingTextStyle {
   if (mark === 'bold' && caretOnHeading(text, fmt, caret)) return pending
   const natural = marksAtCaret(text, fmt, caret)
   const want = !(pending[mark] ?? natural[mark])
-  const next: PendingMarks = { ...pending }
+  const next = { ...pending }
   if (want === natural[mark]) delete next[mark]
   else next[mark] = want
   return next
@@ -607,7 +664,7 @@ const caretOnHeading = (text: string, fmt: TextFormatting, caret: number) => isH
  * dropped, because a heading line is always bold; every other pending mark is kept as it is.
  * Returns `pending` itself when nothing is dropped.
  */
-export function pendingMarksAt(text: string, fmt: TextFormatting, caret: number, pending: PendingMarks): PendingMarks {
+export function pendingMarksAt(text: string, fmt: TextFormatting, caret: number, pending: PendingTextStyle): PendingTextStyle {
   if (pending.bold === undefined || !caretOnHeading(text, fmt, caret)) return pending
   const { bold: _dropped, ...rest } = pending
   void _dropped
@@ -750,14 +807,14 @@ export function applyTypingShortcut(text: string, fmt: TextFormatting, sc: Typin
   const headings = Array.from({ length: lines }, (_, i) => fmt.headings?.[i] ?? 0)
   if (sc.kind === 'heading') headings[paragraphCount(text.slice(0, sc.line.start)) - 1] = sc.level ?? 0
   const bit = sc.kind === 'bold' ? BIT.bold : sc.kind === 'italic' ? BIT.italic : 0
-  const marks = new Map<number, number>() // start of a kept character in the new text -> its marks
-  for (const c of charMarks(text, fmt.spans)) {
+  const styles = new Map<number, CharStyle>() // start of a kept character in the new text -> its style
+  for (const c of styledCharacters(text, fmt.spans)) {
     if (removed.some((r) => c.start < r.end && c.end > r.start)) continue
     const inContent = c.start >= sc.content.start && c.end <= sc.content.end
-    marks.set(shift(c.start), inContent ? c.mask | bit : c.mask)
+    styles.set(shift(c.start), { mask: inContent ? c.mask | bit : c.mask, font: c.font })
   }
   const canonical = canonicalHeadings(next, headings)
-  const spans = spansFromCharMasks(next, canonical, (a) => marks.get(a) ?? 0)
+  const spans = spansFromCharStyles(next, canonical, (a) => styles.get(a))
   const out = canonicalTextFormatting(next, { ...fmt, spans, headings: canonical })
   const content = { start: shift(sc.content.start), end: shift(sc.content.end) }
   return { text: next, fmt: out, caret: sc.kind === 'heading' ? sc.line.start : content.end, content }

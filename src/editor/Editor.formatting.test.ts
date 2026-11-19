@@ -264,7 +264,7 @@ describe('formatting while a text is being edited', () => {
     expect(rec().headings).toEqual([3, 3, 3])
   })
 
-  it('font, alignment and colour apply to the whole box while editing; the edit and its range go on', async () => {
+  it('font applies to the range, alignment and colour to the box; the edit and its range go on', async () => {
     const { editor, store, canvas, tb, saved } = await setup()
     edit(canvas, tb, 2, 4)
     editor.setTextFont('mono')
@@ -273,7 +273,7 @@ describe('formatting while a text is being edited', () => {
     expect(tb.isEditing).toBe(true)
     expect([tb.selectionStart, tb.selectionEnd]).toEqual([2, 4])
     await flush()
-    expect(saved()).toStrictEqual(text({ font: 'mono', align: 'right', color: '#ffffff' }))
+    expect(saved()).toStrictEqual(text({ spans: [{ start: 2, end: 4, font: 'mono' }], align: 'right', color: '#ffffff' }))
     expect(store.saves).toHaveLength(1)
     tb.exitEditing()
   })

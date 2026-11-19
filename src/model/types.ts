@@ -29,9 +29,9 @@ export interface ImageRecord extends RecordBase {
 export type FontId = 'sans' | 'serif' | 'mono' | 'hand' | 'display'
 
 /**
- * Marks on a range of a text's characters. Offsets are UTF-16 code units into the text
- * (`text.slice(start, end)` is the marked text); a span may cross a line break. Only
- * marks that are on are present, always as `true`. See src/model/richText.ts for the
+ * Formatting on a range of a text's characters. Offsets are UTF-16 code units into the
+ * text; a span may cross a line break. Marks are present only when on, and a font only
+ * when different from the box font. See src/model/richText.ts for the
  * canonical form every stored and in-memory span list is in.
  */
 export interface TextSpan {
@@ -41,6 +41,7 @@ export interface TextSpan {
   italic?: true
   underline?: true
   strike?: true
+  font?: FontId
 }
 
 /**

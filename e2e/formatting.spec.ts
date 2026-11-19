@@ -418,9 +418,66 @@ test.describe('headings while editing', () => {
     expect(await editHasFocus(page)).toBe(true)
     await page.keyboard.type('going') // replaces the range that was selected before the clicks
     const done = await storedWhen(page, (d) => byId(d, 't').text === 'keep going')
-    expect(byId(done, 't')).toEqual({ ...rec, text: 'keep going', font: 'mono', align: 'right', color: '#1c6fd1' })
+    expect(byId(done, 't')).toEqual({ ...rec, text: 'keep going', spans: [{ start: 5, end: 10, font: 'mono' }], align: 'right', color: '#1c6fd1' })
     await page.keyboard.press('Escape')
     expect(errors).toEqual([])
+  })
+})
+
+test.describe('font on a text range or at the caret', () => {
+  test('keeps a wrapped Unicode range selected and preserves its marks through undo and reload', async ({ page }) => {
+    const word = '👩🏽‍🚀 two'
+    const rec = textRec('t', 100, 100, `one ${word} three four`, { width: 110, spans: [{ start: 4, end: 4 + word.length, italic: true }] })
+    const { errors, at } = await open(page, [rec])
+    await caretAt(page, at(110, 112), 4)
+    await selectRight(page, 5) // one emoji, a space and three letters
+    const range = () => page.locator('textarea[data-fabric=textarea]').evaluate((el: HTMLTextAreaElement) => el.value.slice(el.selectionStart, el.selectionEnd))
+    expect(await range()).toBe(word)
+    await button(page, 'Mono').click()
+    expect(await range()).toBe(word)
+    expect(await editHasFocus(page)).toBe(true)
+    await expect(button(page, 'Mono')).toHaveAttribute('aria-pressed', 'true')
+    await selectRight(page, 2)
+    await expect(page.getByText('Mixed', { exact: true })).toBeVisible()
+    const want = { ...rec, spans: [{ ...rec.spans![0], font: 'mono' }] }
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    expect(byId(await storedDoc(page), 't')).toEqual(want)
+    await undoButton(page).click()
+    await waitSaved(page)
+    expect(byId(await storedDoc(page), 't')).toEqual(rec)
+    await redoButton(page).click()
+    await waitSaved(page)
+    await page.reload()
+    await expect(status(page)).toContainText('Saved on this device')
+    await caretAt(page, at(110, 112), 4)
+    await selectRight(page, 5)
+    await expect(button(page, 'Mono')).toHaveAttribute('aria-pressed', 'true')
+    expect(byId(await storedDoc(page), 't')).toEqual(want)
+    await page.keyboard.press('Escape')
+    await button(page, 'Serif').click()
+    await waitSaved(page)
+    expect(byId(await storedDoc(page), 't')).toEqual({ ...rec, font: 'serif' })
+    expect(errors).toEqual([])
+  })
+
+  test('a caret font affects typing and Markdown conversion until the caret moves', async ({ page }) => {
+    const rec = textRec('t', 100, 100, 'one two')
+    const { at } = await open(page, [rec])
+    await caretAt(page, at(110, 112), 4)
+    await button(page, 'Serif').click()
+    await expect(button(page, 'Serif')).toHaveAttribute('aria-pressed', 'true')
+    await expect(undoButton(page)).toBeDisabled()
+    await page.keyboard.type('*it* ')
+    await page.keyboard.press('ArrowLeft')
+    await page.keyboard.press('Control+a')
+    await page.keyboard.press('ArrowLeft')
+    await page.keyboard.type('X')
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    expect(byId(await storedDoc(page), 't')).toEqual({
+      ...rec, text: 'Xone it two', spans: [{ start: 5, end: 7, italic: true, font: 'serif' }, { start: 7, end: 8, font: 'serif' }],
+    })
   })
 })
 
