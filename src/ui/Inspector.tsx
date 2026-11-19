@@ -1,9 +1,28 @@
 import { useEffect, useId, useRef } from 'react'
-import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
-import type { Editor, SelectionInfo } from '../editor/Editor.ts'
+import type { KeyboardEvent as ReactKeyboardEvent, ReactElement } from 'react'
+import type { Editor, SelectionInfo, TextFormatInfo } from '../editor/Editor.ts'
+import { FONT_STACKS } from '../editor/fonts.ts'
 import { MAX_FONT_SIZE, MIN_FONT_SIZE } from '../model/doc.ts'
+import { FONT_IDS, FONT_LABELS, TEXT_PALETTE } from '../model/richText.ts'
+import type { Mark, MarkState, TextAlign } from '../model/richText.ts'
 import { IconButton } from './IconButton.tsx'
-import { BackwardIcon, ForwardIcon, LockIcon, SelectContentsIcon, ToBackIcon, ToFrontIcon, TrashIcon, UnlockIcon } from './icons.tsx'
+import {
+  AlignCenterIcon,
+  AlignLeftIcon,
+  AlignRightIcon,
+  BackwardIcon,
+  BoldIcon,
+  ForwardIcon,
+  ItalicIcon,
+  LockIcon,
+  SelectContentsIcon,
+  StrikeIcon,
+  ToBackIcon,
+  ToFrontIcon,
+  TrashIcon,
+  UnderlineIcon,
+  UnlockIcon,
+} from './icons.tsx'
 
 const kindHeading = (s: SelectionInfo) =>
   s.kind === 'multiple' ? `${s.count} objects` : s.kind === 'text' ? 'Text' : s.kind === 'frame' ? 'Frame' : 'Image'
@@ -170,35 +189,65 @@ function CropPanel({ editor }: { editor: Editor }) {
   )
 }
 
-export function Inspector({
-  editor,
-  selection,
-  cropping = false,
-  onReplace = () => {},
-}: {
-  editor: Editor
-  selection: SelectionInfo
-  cropping?: boolean
-  /** Replace image: the parent owns the file input, which must outlive this panel while the file dialog is open. */
-  onReplace?: () => void
-}) {
-  const sizeId = useId()
-  const isFrame = selection.kind === 'frame'
-  if (cropping) return <CropPanel editor={editor} />
+const MARKS: ReadonlyArray<{ mark: Mark; label: string; shortcut?: string; keys?: string; icon: () => ReactElement }> = [
+  { mark: 'bold', label: 'Bold', shortcut: 'Ctrl+B', keys: 'Control+B Meta+B', icon: BoldIcon },
+  { mark: 'italic', label: 'Italic', shortcut: 'Ctrl+I', keys: 'Control+I Meta+I', icon: ItalicIcon },
+  { mark: 'underline', label: 'Underline', shortcut: 'Ctrl+U', keys: 'Control+U Meta+U', icon: UnderlineIcon },
+  { mark: 'strike', label: 'Strikethrough', icon: StrikeIcon },
+]
+const ALIGNS: ReadonlyArray<{ align: TextAlign; label: string; icon: () => ReactElement }> = [
+  { align: 'left', label: 'Align left', icon: AlignLeftIcon },
+  { align: 'center', label: 'Align centre', icon: AlignCenterIcon },
+  { align: 'right', label: 'Align right', icon: AlignRightIcon },
+]
+/** `name`: the accessible name, which starts with the visible text. */
+const HEADINGS: ReadonlyArray<{ level: 0 | 1 | 2 | 3; text: string; label: string; name: string }> = [
+  { level: 0, text: 'Body', label: 'Body', name: 'Body' },
+  { level: 1, text: 'H1', label: 'Heading 1', name: 'H1 (Heading 1)' },
+  { level: 2, text: 'H2', label: 'Heading 2', name: 'H2 (Heading 2)' },
+  { level: 3, text: 'H3', label: 'Heading 3', name: 'H3 (Heading 3)' },
+]
+const pressedOf = (s: MarkState): boolean | 'mixed' => (s === 'mixed' ? 'mixed' : s === 'on')
+
+/**
+ * Formatting for the one selected text. Every control is a button, and the panel's buttons
+ * never take focus (see Overlays), so clicking one while the text is being edited keeps the
+ * edit, its caret and its selected range, and typing carries on in the text. Only the size
+ * field takes focus, as before.
+ */
+function TextPanel({ editor, selection, text, locked }: { editor: Editor; selection: SelectionInfo; text: TextFormatInfo; locked: boolean }) {
+  const id = useId()
+  const colourName = TEXT_PALETTE.find((p) => p.color === text.color)?.name ?? text.color
   return (
-    <aside className="floating inspector" aria-label="Selection">
-      <div className="inspector-title">{heading(selection)}</div>
+    <>
+      <div className="inspector-row">
+        <span id={`${id}-font`}>Font</span>
+        <span className="inspector-value">{text.font === 'mixed' ? 'Mixed' : FONT_LABELS[text.font]}</span>
+      </div>
+      <div className="choice-row" role="group" aria-labelledby={`${id}-font`}>
+        {FONT_IDS.map((f) => (
+          <button
+            key={f}
+            type="button"
+            className="choice-btn font-btn"
+            style={{ fontFamily: FONT_STACKS[f] }}
+            aria-label={FONT_LABELS[f]}
+            aria-pressed={text.font === f}
+            data-tip={FONT_LABELS[f]}
+            data-tip-side="bottom"
+            disabled={locked}
+            onClick={() => editor.setTextFont(f)}
+          >
+            Aa
+          </button>
+        ))}
+      </div>
 
-      {isFrame && <FramePanel editor={editor} selection={selection} />}
-
-      {selection.kind === 'image' && <ImageTools editor={editor} selection={selection} />}
-      {selection.kind === 'image' && <ReplaceButton selection={selection} onReplace={onReplace} />}
-
-      {selection.kind === 'text' && selection.fontSize !== null && (
+      {selection.fontSize !== null && (
         <div className="inspector-row">
-          <label htmlFor={sizeId}>Font size</label>
+          <label htmlFor={`${id}-size`}>Font size</label>
           <input
-            id={sizeId}
+            id={`${id}-size`}
             className="number-input"
             type="number"
             inputMode="numeric"
@@ -214,6 +263,118 @@ export function Inspector({
           />
         </div>
       )}
+
+      <div className="inspector-row">
+        <span id={`${id}-heading`}>Heading</span>
+        <div className="btn-group" role="group" aria-labelledby={`${id}-heading`}>
+          {HEADINGS.map((h) => (
+            <button
+              key={h.level}
+              type="button"
+              className="choice-btn heading-btn"
+              aria-label={h.name}
+              aria-pressed={text.heading === h.level}
+              data-tip={text.editing ? `${h.label}: the selected lines` : `${h.label}: every line`}
+              data-tip-side="bottom"
+              disabled={locked}
+              onClick={() => editor.setHeading(h.level)}
+            >
+              {h.text}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="inspector-row">
+        <span id={`${id}-style`}>Style</span>
+        <div className="btn-group" role="group" aria-labelledby={`${id}-style`}>
+          {MARKS.map(({ mark, label, shortcut, keys, icon: Icon }) => {
+            // In heading lines bold is the heading's own: shown as on, and not changeable there.
+            const fixed = mark === 'bold' && text.boldFromHeading
+            return (
+              <IconButton
+                key={mark}
+                label={label}
+                shortcut={shortcut}
+                keys={keys}
+                pressed={fixed ? true : pressedOf(text.marks[mark])}
+                disabled={locked || fixed}
+                // One tip that explains why it is greyed out (shown although the button is disabled).
+                tip={fixed ? 'Bold: headings are always bold' : undefined}
+                className={fixed ? 'tip-always' : undefined}
+                aria-description={fixed ? 'Headings are always bold' : undefined}
+                onClick={() => editor.toggleMark(mark)}
+              >
+                <Icon />
+              </IconButton>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="inspector-row">
+        <span id={`${id}-align`}>Align</span>
+        <div className="btn-group" role="group" aria-labelledby={`${id}-align`}>
+          {ALIGNS.map(({ align, label, icon: Icon }) => (
+            <IconButton key={align} label={label} pressed={text.align === align} disabled={locked} onClick={() => editor.setTextAlign(align)}>
+              <Icon />
+            </IconButton>
+          ))}
+        </div>
+      </div>
+
+      <div className="inspector-row">
+        <span id={`${id}-colour`}>Colour</span>
+        <span className="inspector-value">{colourName}</span>
+      </div>
+      <div className="swatch-row" role="group" aria-labelledby={`${id}-colour`}>
+        {TEXT_PALETTE.map((p) => (
+          <button
+            key={p.color}
+            type="button"
+            className="swatch"
+            style={{ background: p.color }}
+            aria-label={p.name}
+            aria-pressed={text.color === p.color}
+            data-tip={p.name}
+            data-tip-side="bottom"
+            disabled={locked}
+            onClick={() => editor.setTextColor(p.color)}
+          />
+        ))}
+      </div>
+    </>
+  )
+}
+
+export function Inspector({ editor, selection, cropping, onReplace }: {
+  editor: Editor
+  selection: SelectionInfo
+  cropping: boolean
+  /** The parent owns the file input, which stays mounted while the file dialog is open. */
+  onReplace: () => void
+}) {
+  const sizeId = useId()
+  const isFrame = selection.kind === 'frame'
+  if (cropping) return <CropPanel editor={editor} />
+  return (
+    <aside
+      className="floating inspector"
+      aria-label="Selection"
+      // A press on the panel itself (not on a field) must not take focus from a text being
+      // edited either: the edit would go on, but typing would no longer reach it.
+      onMouseDown={(e) => {
+        if (!(e.target as HTMLElement).closest('input, label, select, textarea')) e.preventDefault()
+      }}
+    >
+      <div className="inspector-title">{heading(selection)}</div>
+
+      {isFrame && <FramePanel editor={editor} selection={selection} />}
+
+      {selection.kind === 'image' && <ImageTools editor={editor} selection={selection} />}
+      {selection.kind === 'image' && <ReplaceButton selection={selection} onReplace={onReplace} />}
+
+      {selection.kind === 'text' && selection.text && <TextPanel editor={editor} selection={selection} text={selection.text} locked={selection.locked} />}
 
       <div className="inspector-row">
         <span id={`${sizeId}-layer`}>Layer</span>

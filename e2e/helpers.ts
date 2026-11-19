@@ -304,8 +304,14 @@ export interface StoredObject {
   scaleY?: number
   fontSize?: number
   width?: number
+  minHeight?: number
   text?: string
   crop?: { x: number; y: number; width: number; height: number }
+  font?: string
+  align?: string
+  color?: string
+  spans?: Array<{ start: number; end: number; bold?: true; italic?: true; underline?: true; strike?: true; font?: string }>
+  headings?: number[]
 }
 export interface StoredFrame {
   id: string

@@ -102,11 +102,27 @@ export class Textbox extends FakeObject {
   fontSize = 24
   /** Like Fabric: a text that is not editable never enters editing. */
   editable = true
+  fontFamily = 'Times New Roman'
+  textAlign = 'left'
+  fill: unknown = 'rgb(0,0,0)'
+  /** Fabric's per-character styles: paragraph index -> grapheme index -> style. Never shifted by the fake. */
+  styles: Record<number, Record<number, Record<string, unknown>>> = {}
   constructor(text: string, opts: Record<string, unknown> = {}) {
     super(opts)
     Object.assign(this, opts) // field initializers above ran after super(): apply the options again
     this.text = text
+    this.initDimensions()
+  }
+  initDimensions() {
     this.height = this.fontSize * 1.25
+  }
+  /** Same splitter as Fabric's (an Intl.Segmenter by grapheme). */
+  graphemeSplit(value: string): string[] {
+    return Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(value), (s) => s.segment)
+  }
+  /** The point named by an origin pair (the fake has no rotation). */
+  getPositionByOrigin(originX: Origin, originY: Origin) {
+    return this.translateToOriginPoint(this.getCenterPoint(), originX, originY)
   }
   private textBeforeEdit = ''
   enterEditing() {
@@ -123,9 +139,26 @@ export class Textbox extends FakeObject {
     this.canvas?.fire('text:editing:exited', { target: this })
     if (changed) this.canvas?.fire('object:modified', { target: this })
   }
-  /** Test helper: what typing does. */
-  type(text: string) {
+  /** Fabric's caret, in graphemes with one per line break; absent unless a test sets it. */
+  selectionStart?: number
+  selectionEnd?: number
+  /** Fabric's hidden editing textarea; null unless a test installs one. */
+  hiddenTextarea: HTMLTextAreaElement | null = null
+  /** True between Fabric's compositionstart and compositionend (a test sets it). */
+  inCompositionMode = false
+  /** Like Fabric: copies the grapheme selection onto the hidden textarea as UTF-16 offsets (unless composing). */
+  _updateTextarea() {
+    const ta = this.hiddenTextarea
+    if (!ta || this.inCompositionMode) return
+    const graphemes = this.text.split('\n').flatMap((line, i) => (i === 0 ? this.graphemeSplit(line) : ['\n', ...this.graphemeSplit(line)]))
+    const at = (g: number | undefined) => graphemes.slice(0, g ?? 0).join('').length
+    ta.selectionStart = at(this.selectionStart)
+    ta.selectionEnd = at(this.selectionEnd)
+  }
+  /** Test helper: what typing does (optionally leaving the caret at grapheme `caret`). */
+  type(text: string, caret?: number) {
     this.text = text
+    if (caret !== undefined) this.selectionStart = this.selectionEnd = caret
     this.canvas?.fire('text:changed', { target: this })
   }
 }

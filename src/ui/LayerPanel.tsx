@@ -130,7 +130,8 @@ export const LayerPanel = memo(function LayerPanel({
       if (e.key === 'Escape') endPress(true)
       else {
         if (!current.dragging) return
-        const ctx = { editingText: editor.getState().editingText }
+        const { editingText, selection } = editor.getState()
+        const ctx = { editingText, textSelected: selection?.kind === 'text' }
         const shortcut = resolveShortcut(e, ctx)
         if (shortcut?.startsWith('zoom-') || (!shortcut && !isPanHoldKey(e, ctx))) return
       }

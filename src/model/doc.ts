@@ -1,3 +1,4 @@
+import { canonicalTextFormatting } from './richText.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from './types.ts'
 import type { BoardDoc, CropRect, FrameRecord, ObjectRecord, Scene, StoredDoc, Viewport } from './types.ts'
 
@@ -46,9 +47,12 @@ function parseObject(raw: unknown): ObjectRecord | null {
     return { type, id, left, top, angle, assetId, scaleX, scaleY, ...cropOf(raw), ...lockOf(raw) }
   }
   if (type === 'text') {
-    const { text, fontSize, width } = raw
+    const { text, fontSize, width, minHeight } = raw
     if (!isStr(text) || !isNum(fontSize) || !isNum(width) || fontSize <= 0 || width <= 0) return null
-    return { type, id, left, top, angle, text, fontSize, width, ...lockOf(raw) }
+    // Formatting is read leniently, like a dangling owner: whatever is malformed is dropped
+    // or trimmed, and the text itself still loads.
+    const height = isNum(minHeight) && minHeight >= 0 ? { minHeight } : {}
+    return { type, id, left, top, angle, text, fontSize, width, ...height, ...canonicalTextFormatting(text, raw), ...lockOf(raw) }
   }
   return null
 }
@@ -109,11 +113,13 @@ export function parseDoc(raw: unknown): BoardDoc | null {
  * A copy without keys whose value is `undefined`, with `locked` only when it is `true`, and
  * with a fresh copy of an image's `crop` (never a reference shared with the live document).
  */
-function storable<T extends { locked?: true; crop?: CropRect }>(rec: T): T {
+function storable<T extends ObjectRecord | FrameRecord>(rec: T): T {
   const out = { ...rec }
   for (const k of Object.keys(out) as Array<keyof T>) if (out[k] === undefined) delete out[k]
   if (out.locked !== true) delete out.locked // never store `locked: false`
-  if (out.crop) out.crop = { x: out.crop.x, y: out.crop.y, width: out.crop.width, height: out.crop.height }
+  if ('crop' in out && out.crop) out.crop = { ...out.crop }
+  if ('spans' in out && out.spans) out.spans = out.spans.map((span) => ({ ...span }))
+  if ('headings' in out && out.headings) out.headings = [...out.headings]
   return out
 }
 
@@ -155,31 +161,28 @@ export function objectsEqual(a: readonly ObjectRecord[], b: readonly ObjectRecor
   return JSON.stringify(a) === JSON.stringify(b)
 }
 
-/** Records hold only plain data (no dates, maps or class instances), possibly from another realm (IndexedDB, tests). */
-const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
-
 /**
- * Structural equality of record values: nested plain objects (such as an image's `crop`) and
- * arrays are compared by content, never by reference, so two snapshots of the same board
- * are equal. Key order and `undefined` vs absent do not matter, at any depth. NaN equals NaN
- * here, so a broken number can never look like an endless stream of changes.
+ * Structural equality of record values: plain objects field by field (key order and
+ * `undefined` vs absent do not matter), arrays element by element. A text's spans and
+ * headings are arrays, and two equal lists must not look like a change on every commit.
  */
 function valuesEqual(x: unknown, y: unknown): boolean {
   if (x === y) return true
-  if (typeof x === 'number' && typeof y === 'number') return Number.isNaN(x) && Number.isNaN(y)
-  if (Array.isArray(x) && Array.isArray(y)) return x.length === y.length && x.every((v, i) => valuesEqual(v, y[i]))
-  if (isPlainObject(x) && isPlainObject(y)) {
-    for (const k of new Set([...Object.keys(x), ...Object.keys(y)])) if (!valuesEqual(x[k], y[k])) return false
-    return true
+  // NaN equals NaN here, so a broken number can never look like an endless stream of changes.
+  if (Number.isNaN(x) && Number.isNaN(y)) return true
+  if (Array.isArray(x) || Array.isArray(y)) {
+    if (!Array.isArray(x) || !Array.isArray(y) || x.length !== y.length) return false
+    return x.every((v, i) => valuesEqual(v, y[i]))
   }
-  return false
+  if (typeof x !== 'object' || typeof y !== 'object' || x === null || y === null) return false
+  const a = x as Record<string, unknown>
+  const b = y as Record<string, unknown>
+  for (const k of new Set([...Object.keys(a), ...Object.keys(b)])) if (!valuesEqual(a[k], b[k])) return false
+  return true
 }
 
-/** Records compared field by field, structurally (see `valuesEqual`). */
 function recordsEqual(a: readonly object[], b: readonly object[]): boolean {
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) if (!valuesEqual(a[i], b[i])) return false
-  return true
+  return a.length === b.length && a.every((x, i) => valuesEqual(x, b[i]))
 }
 
 /** Structural equality of everything on the canvas, including z-order and ownership. */

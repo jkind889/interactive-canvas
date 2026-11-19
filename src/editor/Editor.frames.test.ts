@@ -564,6 +564,7 @@ describe('creating content inside a frame (O4)', () => {
   it('a new text is owned from the moment it exists: the first autosave during typing already stores the owner', async () => {
     const b = await board([F('A', 0, 0)], [img('i', 2000, 2000)])
     b.editor.setTool('text')
+    pressCanvas(b.canvas, 40, 40)
     b.canvas.fire('mouse:up', { e: { button: 0, clientX: 40, clientY: 40 }, isClick: true })
     await tick()
     const tb = b.canvas.objects.at(-1) as Textbox
@@ -592,6 +593,7 @@ describe('creating content inside a frame (O4)', () => {
     const b = await board([F('A', 0, 0)], [img('i', 2000, 2000)])
     const place = async (x: number, y: number) => {
       b.editor.setTool('text')
+      pressCanvas(b.canvas, x, y)
       b.canvas.fire('mouse:up', { e: { button: 0, clientX: x, clientY: y }, isClick: true })
       await tick()
       const tb = b.canvas.objects.at(-1) as Textbox
@@ -613,6 +615,7 @@ describe('creating content inside a frame (O4)', () => {
   it('a new text outside every frame is loose', async () => {
     const b = await board([F('A', 0, 0)], [img('i', 2000, 2000)])
     b.editor.setTool('text')
+    pressCanvas(b.canvas, 900, 900)
     b.canvas.fire('mouse:up', { e: { button: 0, clientX: 900, clientY: 900 }, isClick: true })
     await tick()
     const tb = b.canvas.objects.at(-1) as Textbox
@@ -624,6 +627,7 @@ describe('creating content inside a frame (O4)', () => {
   it('a new text is evaluated once more when its edit ends, because its box grew while typing', async () => {
     const b = await board([F('A', 0, 0)], [img('i', 2000, 2000)])
     b.editor.setTool('text')
+    pressCanvas(b.canvas, 40, 260)
     b.canvas.fire('mouse:up', { e: { button: 0, clientX: 40, clientY: 260 }, isClick: true }) // centre (160, 275): inside A
     await tick()
     const tb = b.canvas.objects.at(-1) as Textbox

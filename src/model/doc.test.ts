@@ -400,3 +400,86 @@ describe('round never turns a finite value into Infinity', () => {
     expect(parseDoc(saved)?.objects[0]).toMatchObject({ left: 1e307, top: -1e307 })
   })
 })
+
+
+describe('formatted text', () => {
+  /** A text with every formatting field, in canonical form. */
+  const rich: TextRecord = {
+    ...text,
+    id: 'r1',
+    text: 'Title\n\nsome bold 😀 tail',
+    font: 'serif',
+    align: 'center',
+    color: '#c0392b',
+    spans: [
+      { start: 12, end: 16, bold: true },
+      { start: 20, end: 24, italic: true, underline: true, strike: true },
+    ],
+    headings: [1, 2],
+  }
+
+  it('a plain text and a plain board are written in exactly the pre-existing shape, in both versions', () => {
+    const v1 = serializeDoc(good())
+    expect(Object.keys(v1.objects[1]!)).toEqual(['type', 'id', 'left', 'top', 'angle', 'text', 'fontSize', 'width'])
+    expect(JSON.stringify(v1)).toBe(JSON.stringify(wireV1()))
+    const v2 = serializeDoc(framed())
+    expect(Object.keys(v2.objects[1]!)).toEqual(['type', 'id', 'left', 'top', 'angle', 'text', 'fontSize', 'width'])
+    // Parsed from storage, a plain text gains no keys either.
+    expect(Object.keys(parseDoc(wireV1())!.objects[1]!)).toEqual(['type', 'id', 'left', 'top', 'angle', 'text', 'fontSize', 'width'])
+  })
+
+  it('never writes a formatting field that is undefined', () => {
+    const blankFields = { ...text, font: undefined, align: undefined, color: undefined, spans: undefined, headings: undefined }
+    for (const doc of [{ ...good(), objects: [blankFields] }, { ...framed(), objects: [blankFields] }]) {
+      expect(Object.keys(serializeDoc(doc).objects[0]!)).toEqual(['type', 'id', 'left', 'top', 'angle', 'text', 'fontSize', 'width'])
+    }
+  })
+
+  it('round-trips through storage in version 1 (no frames) and version 2 (with frames)', () => {
+    const v1 = { ...good(), objects: [image, rich] }
+    expect(serializeDoc(v1).version).toBe(1)
+    expect(parseDoc(wire(v1))).toEqual(v1)
+    const v2 = { ...framed(), objects: [image, { ...rich, frameId: 'f2' }] }
+    expect(serializeDoc(v2).version).toBe(2)
+    expect(parseDoc(wire(v2))).toEqual(v2)
+  })
+
+  it('reads formatting leniently: malformed fields are dropped or trimmed and the text still loads', () => {
+    const raw = {
+      ...text,
+      text: 'ab\ncd',
+      font: 'wingdings',
+      align: 'justify',
+      color: 'red',
+      spans: [{ start: 3, end: 99, italic: true }, { start: 0, end: 0, italic: true }, 'junk'],
+      headings: [7, 2, 1], // an invalid level, and one more than there are lines
+    }
+    const parsed = parseDoc({ ...wireV1(), objects: [raw] })
+    expect(parsed?.objects[0]).toStrictEqual({ ...text, text: 'ab\ncd', spans: [{ start: 3, end: 5, italic: true }], headings: [0, 2] })
+    const junk = parseDoc({ ...wireV1(), objects: [{ ...text, font: 3, align: null, color: {}, spans: 'bold', headings: { 0: 1 } }] })
+    expect(junk?.objects[0]).toStrictEqual(text)
+    // The same in a version 2 document.
+    const v2 = parseDoc({ ...wire(framed()), objects: [{ ...raw, frameId: 'f1' }] })
+    expect(v2?.objects[0]).toStrictEqual({ ...text, text: 'ab\ncd', spans: [{ start: 3, end: 5, italic: true }], headings: [0, 2], frameId: 'f1' })
+  })
+
+  it('everything that was strict about a text is still strict', () => {
+    for (const bad of [{ ...rich, text: 3 }, { ...rich, fontSize: 0 }, { ...rich, width: -1 }, { ...rich, id: '' }, { ...rich, angle: 'x' }]) {
+      expect(parseDoc({ ...wireV1(), objects: [bad] })).toBeNull()
+    }
+  })
+
+  it('scene equality compares spans and headings structurally', () => {
+    const scene = (o: TextRecord) => ({ frames: [], objects: [o] })
+    const copy = JSON.parse(JSON.stringify(rich)) as TextRecord
+    expect(copy.spans).not.toBe(rich.spans)
+    expect(sceneEqual(scene(rich), scene(copy))).toBe(true)
+    expect(sceneEqual(scene(rich), scene({ ...copy, spans: [{ ...copy.spans![0]!, end: 15 }, copy.spans![1]!] }))).toBe(false)
+    expect(sceneEqual(scene(rich), scene({ ...copy, spans: [copy.spans![0]!] }))).toBe(false)
+    expect(sceneEqual(scene(rich), scene({ ...copy, spans: [{ ...copy.spans![0]!, italic: true }, copy.spans![1]!] }))).toBe(false)
+    expect(sceneEqual(scene(rich), scene({ ...copy, headings: [1] }))).toBe(false)
+    expect(sceneEqual(scene(rich), scene({ ...copy, headings: [1, 3] }))).toBe(false)
+    expect(sceneEqual(scene(rich), scene({ ...copy, headings: undefined }))).toBe(false)
+    expect(sceneEqual(scene({ ...rich, headings: undefined }), scene({ ...copy, headings: undefined }))).toBe(true)
+  })
+})

@@ -6,14 +6,17 @@ interface Props extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'aria-labe
   shortcut?: string
   /** aria-keyshortcuts value, e.g. "V" or "Control+Z Meta+Z". */
   keys?: string
-  pressed?: boolean
+  /** 'mixed': part of what it applies to has it (a formatting mark over a range). */
+  pressed?: boolean | 'mixed'
   tipSide?: 'right' | 'top' | 'bottom' | 'left'
+  /** The hover/focus tip, when it should say more than the label and shortcut. */
+  tip?: string
   children: ReactNode
 }
 
 /** Icon-only button: always has an accessible name, and a hover/focus tip. */
-export function IconButton({ label, shortcut, keys, pressed, tipSide = 'top', className, children, ...rest }: Props) {
-  const tip = shortcut ? `${label} (${shortcut})` : label
+export function IconButton({ label, shortcut, keys, pressed, tipSide = 'top', tip: tipText, className, children, ...rest }: Props) {
+  const tip = tipText ?? (shortcut ? `${label} (${shortcut})` : label)
   return (
     <button
       type="button"

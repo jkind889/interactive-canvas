@@ -38,17 +38,35 @@ import {
 } from '../model/crop.ts'
 import type { CropHit, CropRect, Placement } from '../model/crop.ts'
 import { History } from '../model/history.ts'
+import {
+  DEFAULT_TEXT_COLOR,
+  applyTypingShortcut,
+  fontAtCaret,
+  fontOfRange,
+  formatAtCaret,
+  formatOfRange,
+  formatOfText,
+  marksAtCaret,
+  matchTypingShortcut,
+  pendingMarksAt,
+  setHeading as setHeadingOfRange,
+  setHeadingEverywhere,
+  setRangeFont,
+  toggleMark as toggleMarkOfRange,
+  togglePendingMark,
+} from '../model/richText.ts'
+import type { Mark, MarkState, PendingTextStyle, RangeFormat, TextAlign, TextFormatting } from '../model/richText.ts'
 import { canReorderLayered, reorderLayered } from '../model/layers.ts'
 import type { LayerDropSide, LayerOp } from '../model/layers.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from '../model/types.ts'
-import type { BoardDoc, FrameRecord, ImageRecord, SaveState, Scene, TextRecord, Viewport } from '../model/types.ts'
+import type { BoardDoc, FontId, FrameRecord, ImageRecord, SaveState, Scene, TextRecord, Viewport } from '../model/types.ts'
 import { fitImageScale, fitViewport, screenToScene, zoomAround } from '../model/viewport.ts'
 import type { Point, Rect, Size } from '../model/viewport.ts'
 import { Autosaver } from '../persistence/autosave.ts'
 import { ABSENT } from '../persistence/boardStore.ts'
 import type { BoardStore } from '../persistence/boardStore.ts'
 import { hydrateBoard } from '../persistence/hydrate.ts'
-import { isConfirmKey, isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
+import { isConfirmKey, isPanHoldKey, resolveEditingShortcut, resolveShortcut, typedCharacter } from '../input/shortcuts.ts'
 import type { ShortcutAction } from '../input/shortcuts.ts'
 import { AssetCache, isImageFile, readImageFile } from './assets.ts'
 import { CROP_HIT_TOLERANCE, cropCursor, cropOverlay, drawCropOverlay } from './cropLayer.ts'
@@ -71,14 +89,21 @@ import {
   newId,
   normalizeTextScale,
   ownerOf,
+  applyTextFormatting,
+  readTextFormatting,
+  reconcileTextFormatting,
+  replaceEditedText,
+  selectedRange,
   setFrameName,
   setImageCrop,
   setImageElement,
   setLocked,
   setOwner,
+  setTextFontSize,
   toFrameRecord,
   toRecord,
 } from './objects.ts'
+import type { TextEdit } from './objects.ts'
 
 export type Tool = 'select' | 'hand' | 'text' | 'frame'
 export type { LayerItem } from './layerList.ts'
@@ -107,6 +132,26 @@ export interface SelectionInfo {
    * anything (both false while it is locked or being cropped).
    */
   image: { cropped: boolean; canFit: boolean; canFill: boolean } | null
+  /** Only for a single text: what the formatting controls show. */
+  text: TextFormatInfo | null
+}
+
+/**
+ * The formatting of the one selected text, as the controls show it. While the text is being
+ * edited, marks and heading describe the selected range (or, with only a caret, what the
+ * next typed character gets, pending choices included); otherwise the whole box.
+ */
+export interface TextFormatInfo {
+  editing: boolean
+  font: FontId | 'mixed'
+  align: TextAlign
+  /** `#rrggbb`; the default ink when the text has no colour of its own. */
+  color: string
+  marks: Record<Mark, MarkState>
+  /** Heading level (0: body text) of every line concerned, or 'mixed'. */
+  heading: number | 'mixed'
+  /** Bold is the headings' own here and cannot be changed (every character concerned is on a heading line). */
+  boldFromHeading: boolean
 }
 
 export interface Notice {
@@ -159,8 +204,11 @@ interface Gesture {
   transform?: Transform
   /** A drag: the unselected members of the frames being moved, which follow them. */
   carry?: Carry
-  /** The Frame tool: the rectangle being drawn, in scene coordinates. */
-  draft?: { start: Point; end: Point }
+  /**
+   * The Frame tool, or the Text tool (`tool: 'text'`): the rectangle being drawn, in scene
+   * coordinates.
+   */
+  draft?: { start: Point; end: Point; tool?: 'text' }
 }
 
 /**
@@ -207,8 +255,10 @@ interface ReplaceJob {
   seq: number
 }
 
-/** A Frame-tool press that moves less than this many screen pixels is a click (default-sized frame). */
+/** A Frame- or Text-tool press that moves less than this many screen pixels is a click (default-sized frame or text). */
 const DRAFT_CLICK_SLOP = 4
+/** A Text-tool drag narrower than this many font sizes is no usable width: it gives the default box, as a click does. */
+const MIN_TEXT_DRAG_EMS = 2
 const NO_FRAMES: ReadonlySet<string> = new Set()
 
 const ZOOM_STEP = 1.25
@@ -269,6 +319,26 @@ export class Editor {
   private pressAppliedCrop = false
   /** The press that began the current double-click followed a press that applied a crop. */
   private dblClickAfterCrop = false
+  /**
+   * Marks and font chosen with only a caret in a text being edited, for what is typed next. Dropped
+   * when the caret moves for any other reason than typing, and when the edit ends.
+   */
+  private pending: { target: Textbox; style: PendingTextStyle } | null = null
+  /**
+   * The character a key is typing into the text being edited (a space or a `*`, see
+   * `typedCharacter`), from its keydown until the text change it causes or its keyup. Only a
+   * typed character can fire a typing shortcut: pasted, dropped and composed text cannot.
+   */
+  private typed: string | null = null
+  /**
+   * The typing shortcut that has just fired, with what puts its literal characters back (the
+   * text, formatting, caret and pending choices from just before it fired). Only "straight
+   * after": dropped by the next text change, any caret or selection move, any formatting
+   * command, the end of the edit and any rebuild from records (undo, redo, a cancelled gesture).
+   */
+  private shortcutRevert: { target: Textbox; text: string; fmt: TextFormatting; caret: number; pending: PendingTextStyle | null } | null = null
+  /** A selection-info refresh is queued (see `queueSelectionSync`). */
+  private selectionSyncQueued = false
 
   constructor(
     private readonly host: HTMLElement,
@@ -489,6 +559,8 @@ export class Editor {
   /** Rebuilds the canvas from records (frames behind content), preserving selection by id. */
   private applyRecords(scene: Scene) {
     this.applying = true
+    this.pending = null
+    this.shortcutRevert = null
     try {
       const selected = new Set(this.selectedIds())
       this.canvas.discardActiveObject()
@@ -577,6 +649,7 @@ export class Editor {
         back: !locked && canReorderLayered(order, ids, 'back'),
       },
       image: isImage(single) ? this.imageInfo(single, locked) : null,
+      text: single instanceof Textbox ? this.textFormatInfo(single) : null,
     }
   }
 
@@ -589,6 +662,72 @@ export class Editor {
     const size = imageSizeOf(img)
     const changes = (next: ImageRecord) => !sceneEqual({ frames: [], objects: [rec] }, { frames: [], objects: [next] })
     return { cropped: rec.crop !== undefined, canFit: changes(fitRecord(rec, size)), canFill: changes(fillRecord(rec, size)) }
+  }
+
+  private textFormatInfo(tb: Textbox): TextFormatInfo {
+    const fmt = readTextFormatting(tb)
+    const text = tb.text
+    const editing = tb.isEditing === true
+    const range = editing ? selectedRange(tb) : undefined
+    let state: RangeFormat
+    let font: TextFormatInfo['font']
+    if (range && range.start === range.end) {
+      const pending = this.pendingFor(tb)
+      state = formatAtCaret(text, fmt, range.start, pending)
+      font = pending.font ?? fontAtCaret(text, fmt, range.start)
+    } else {
+      state = range ? formatOfRange(text, fmt, range.start, range.end) : formatOfText(text, fmt)
+      font = fontOfRange(text, fmt, range?.start ?? 0, range?.end ?? text.length)
+    }
+    return { editing, font, align: fmt.align ?? 'left', color: fmt.color ?? DEFAULT_TEXT_COLOR, ...state }
+  }
+
+  private pendingFor(tb: Textbox): PendingTextStyle {
+    return this.pending?.target === tb ? this.pending.style : {}
+  }
+
+  private setPending(tb: Textbox, style: PendingTextStyle) {
+    this.pending = Object.keys(style).length > 0 ? { target: tb, style } : null
+  }
+
+  /**
+   * A heading line is always bold, so bold is never pending while the caret is on one: called
+   * wherever the caret's line can become a heading while marks are pending (the heading
+   * command, and every text change, which covers the `# ` shortcut and joining lines). Only a
+   * pending bold is dropped; italic, underline and strikethrough stay. It does not come back
+   * if the line goes back to body text.
+   */
+  private dropPendingBoldOnHeading(tb: Textbox) {
+    const p = this.pending
+    if (!p || p.target !== tb || !tb.isEditing) return
+    const caret = selectedRange(tb)?.end
+    if (caret === undefined) return
+    const style = pendingMarksAt(tb.text, readTextFormatting(tb), caret, p.style)
+    if (style !== p.style) this.setPending(tb, style)
+  }
+
+  /**
+   * Refreshes only the selection info, and only tells React when it really changed: the caret
+   * moving inside a text being edited fires often, mostly without changing what the
+   * formatting controls show.
+   */
+  private syncSelection() {
+    const selection = this.computeSelection()
+    if (JSON.stringify(selection) === JSON.stringify(this.state.selection)) return
+    this.setState({ selection })
+  }
+
+  /**
+   * After Fabric's own handling has returned: Fabric fires its text selection event before
+   * it has stored the new selection in some cases (IText.mjs `_updateAndFire`).
+   */
+  private queueSelectionSync() {
+    if (this.selectionSyncQueued) return
+    this.selectionSyncQueued = true
+    queueMicrotask(() => {
+      this.selectionSyncQueued = false
+      if (!this.disposed) this.syncSelection()
+    })
   }
 
   private syncState() {
@@ -686,6 +825,16 @@ export class Editor {
       const start = { x: p.x, y: p.y }
       this.gesture = { id: ++this.gestureSeq, kind: 'draft', base: this.snapshot(), draft: { start, end: start } }
     })
+    // The Text tool: a primary press on empty canvas (or a frame's click-through interior)
+    // starts dragging out a text box. A press on an object, or on a frame's label or outline,
+    // is Fabric's as before (it has a target). A plain click is this draft too, settled as a
+    // default box. Only facts are recorded here.
+    c.on('mouse:down', (opt) => {
+      if (!this.editable || this.gesture || this.state.tool !== 'text' || this.state.handActive || !isPrimary(opt.e) || opt.target) return
+      const p = c.getScenePoint(opt.e)
+      const start = { x: p.x, y: p.y }
+      this.gesture = { id: ++this.gestureSeq, kind: 'draft', base: this.snapshot(), draft: { start, end: start, tool: 'text' } }
+    })
     c.on('mouse:move', (opt) => {
       const g = this.gesture
       if (g?.kind !== 'draft' || !g.draft) return
@@ -718,11 +867,45 @@ export class Editor {
     })
 
     c.on('text:editing:entered', () => this.syncState())
-    c.on('text:changed', () => {
+    c.on('text:changed', ({ target }) => {
+      // Fabric fires this after it has changed the text, shifted its character styles and
+      // placed the caret, and does nothing to the text afterwards (fabric 7.4.0,
+      // ITextKeyBehavior.mjs onInput, DraggableTextDelegate.mjs drop/dragend; a drag also
+      // fires it on its source text, which may no longer be the one being edited). So the
+      // styles are made canonical right here, before the typing save is scheduled: each
+      // line keeps the level it had before the change (never one guessed from the sizes a
+      // paste brought), marks come from the styles, and a save can never store formatting
+      // that the canvas does not show.
+      // Marks and a font chosen with only a caret go to what was just typed (they last through every
+      // step of an IME composition, which fires this without moving the caret otherwise).
+      // Then a typed character that completes a typing shortcut converts the text, in the same
+      // callback, before the save below is scheduled (see `typingShortcut`).
+      const typed = this.typed
+      this.typed = null
+      this.shortcutRevert = null // any change of the text ends "straight after a shortcut"
+      if (target instanceof Textbox) {
+        let edit = undefined as TextEdit | undefined
+        reconcileTextFormatting(target, target.isEditing ? this.pendingFor(target) : undefined, (e) => (edit = e))
+        if (edit && typed !== null) this.typingShortcut(target, edit, typed)
+        // The change (a `# ` shortcut, or Backspace joining a line into the heading above it)
+        // may have left the caret on a heading line: no pending bold there.
+        this.dropPendingBoldOnHeading(target)
+      }
       if (!this.applying && this.editable) this.autosaver.markDirty() // keep typing durable; history commits on exit
       this.syncState() // the layer list follows typing (a text that is blank right now is not listed); marks nothing dirty
+      this.queueSelectionSync()
+    })
+    // The caret or the selected range moved for any other reason than typing (arrow keys, a
+    // click or drag in the text, select all). Typing moves it without this event (fabric
+    // 7.4.0, ITextBehavior.mjs `updateFromTextArea`), and so does an IME composition.
+    c.on('text:selection:changed', ({ target }) => {
+      if (this.pending?.target === target) this.pending = null
+      if (this.shortcutRevert?.target === target) this.shortcutRevert = null
+      this.queueSelectionSync()
     })
     c.on('text:editing:exited', ({ target }) => {
+      if (this.pending?.target === target) this.pending = null
+      if (this.shortcutRevert?.target === target) this.shortcutRevert = null
       // A press inside the text may still be held (it started no gesture, and the text could
       // not move while it was being edited). End it, or the text would now be dragged with
       // no gesture: visible to saves half-way and impossible to cancel.
@@ -800,13 +983,6 @@ export class Editor {
         const id = g.id
         queueMicrotask(() => this.settle(id))
       }
-      if (this.editable && !this.gesture && this.state.tool === 'text' && !this.state.handActive && !opt.target && opt.isClick) {
-        const p = c.getScenePoint(opt.e)
-        const at = { x: p.x, y: p.y }
-        queueMicrotask(() => {
-          if (this.editable && !this.gesture && this.state.tool === 'text') this.addTextAt(at, 'top-left')
-        })
-      }
       this.queueIdle()
     })
   }
@@ -839,7 +1015,8 @@ export class Editor {
   }
 
   /** The Frame tool's release: one new frame, selected, and back to the Select tool. A new frame owns nothing (rule O5). */
-  private settleDraft(draft: { start: Point; end: Point }) {
+  private settleDraft(draft: { start: Point; end: Point; tool?: 'text' }) {
+    if (draft.tool === 'text') return this.settleTextDraft(draft)
     this.canvas.draft = null
     const { start, end } = draft
     const zoom = this.getViewport().zoom
@@ -856,6 +1033,24 @@ export class Editor {
     }
     this.switchTool('select') // the tool is single-use
     this.insertFrame(box)
+  }
+
+  /**
+   * The Text tool's release: one new, blank text being edited, and back to the Select tool.
+   * Dragged (at least the slop long, in screen pixels): the box takes the drag's smaller x and
+   * y, its width and a minimum height, as long as the drag is at least `MIN_TEXT_DRAG_EMS`
+   * font sizes wide. A click, a shorter drag or a narrower one: the default
+   * box with its top-left at the press point (see `addTextAt`). An image import that
+   * finished during the drag is added first, as its own step, because adding it ends any edit
+   * and would discard the new text while it is still blank.
+   */
+  private settleTextDraft(draft: { start: Point; end: Point }) {
+    this.canvas.draft = null
+    const { start, end } = draft
+    const dragged = Math.hypot(end.x - start.x, end.y - start.y) * this.getViewport().zoom >= DRAFT_CLICK_SLOP
+    this.gesture = null
+    this.idle()
+    this.addTextAt(start, 'top-left', dragged ? end : undefined)
   }
 
   /** Adds a frame in front of every other frame and behind all content, and selects it. */
@@ -1208,6 +1403,7 @@ export class Editor {
 
     const onKeyDown = (e: KeyboardEvent) => this.handleKeyDown(e)
     const onKeyUp = (e: KeyboardEvent) => {
+      this.typed = null // what the key typed has arrived by now, if it typed anything
       if (e.code === 'Space' && this.spaceHeld) {
         this.spaceHeld = false
         this.applyToolState()
@@ -1287,7 +1483,11 @@ export class Editor {
 
   handleKeyDown(e: KeyboardEvent) {
     if (!this.live) return
-    const ctx = { editingText: this.state.editingText }
+    const active = this.canvas.getActiveObject()
+    const edited = active instanceof Textbox && active.isEditing ? active : null
+    const ctx = { editingText: this.state.editingText, textSelected: active instanceof Textbox && !active.isEditing }
+    const editing = { editedTextarea: edited?.hiddenTextarea ?? null, canRevertShortcut: edited !== null && this.shortcutRevert?.target === edited }
+    this.typed = this.busy ? null : typedCharacter(e, editing) // observed only, never claimed
     if (this.busy) {
       // Mid-gesture: Esc cancels it, zoom still works, everything else waits.
       const action = resolveShortcut(e, ctx)
@@ -1303,6 +1503,19 @@ export class Editor {
       } else if (action) {
         e.preventDefault() // a shortcut that is ignored: the browser must not act on it either (Ctrl+A would select the page's text)
       }
+      return
+    }
+    // Keys typed into the text being edited reach this window listener from Fabric's hidden
+    // textarea; Fabric does nothing with Ctrl/Cmd+B, I or U and lets them bubble (fabric
+    // 7.4.0, ITextKeyBehavior.mjs `onKeyDown`, constants.mjs `ctrlKeysMapDown`), so no capture
+    // listener is needed. Backspace is not Fabric's either: the textarea deletes and Fabric
+    // follows from its input event (constants.mjs `keysMap` has no Backspace), so preventing it
+    // here keeps anything from being deleted. Everything else typed there is left alone.
+    const claimed = resolveEditingShortcut(e, editing)
+    if (claimed) {
+      e.preventDefault()
+      if (claimed === 'revert-shortcut') this.revertShortcut()
+      else if (claimed !== 'ignore') this.toggleMark(claimed)
       return
     }
     if (isPanHoldKey(e, ctx)) {
@@ -1374,6 +1587,14 @@ export class Editor {
         return this.arrange('back')
       case 'toggle-lock':
         return this.toggleSelectionLock()
+      case 'format-bold':
+        return this.toggleMark('bold')
+      case 'format-italic':
+        return this.toggleMark('italic')
+      case 'format-underline':
+        return this.toggleMark('underline')
+      case 'ignore':
+        return
       case 'escape':
         if (this.busy) return
         if (this.state.tool !== 'select') this.setTool('select')
@@ -1726,23 +1947,32 @@ export class Editor {
     this.addTextAt(this.viewCenterScene(), 'center')
   }
 
-  private addTextAt(at: Point, anchor: 'center' | 'top-left') {
+  /**
+   * `dragTo`: the Text tool's box was dragged out from `at` to here: it takes the drag's
+   * width and minimum height and starts at the drag's smaller x and y, unless the drag is narrower than
+   * `MIN_TEXT_DRAG_EMS` font sizes, which is no usable width: then, as without `dragTo`, the
+   * default box (ten font sizes wide) at `at`.
+   */
+  private addTextAt(at: Point, anchor: 'center' | 'top-left', dragTo?: Point) {
     if (!this.editable || this.busy) return
     // Placement is single-use. Switch tools first: switching ends any editing.
     if (this.state.tool !== 'select') this.switchTool('select')
     this.finishEditing()
     const zoom = this.getViewport().zoom
     const fontSize = Math.round(clamp(24 / zoom, 12, 160))
-    const width = fontSize * 10
+    const box = dragTo ? rectFromDrag(at, dragTo) : undefined
+    const drag = box && box.width >= fontSize * MIN_TEXT_DRAG_EMS ? box : undefined
+    const width = drag?.width ?? fontSize * 10
     const rec: TextRecord = {
       id: newId(),
       type: 'text',
       text: '',
       fontSize,
       width,
+      ...(drag && { minHeight: drag.height }),
       angle: 0,
-      left: anchor === 'center' ? at.x - width / 2 : at.x,
-      top: anchor === 'center' ? at.y - fontSize * 0.625 : at.y,
+      left: drag?.left ?? (anchor === 'center' ? at.x - width / 2 : at.x),
+      top: drag?.top ?? (anchor === 'center' ? at.y - fontSize * 0.625 : at.y),
     }
     const obj = createObject(rec, () => undefined)
     if (!(obj instanceof Textbox)) return
@@ -1949,16 +2179,158 @@ export class Editor {
   }
 
   setFontSize(size: number) {
+    this.shortcutRevert = null
     if (!this.editable || this.busy) return
     const active = this.canvas.getActiveObject()
     if (!(active instanceof Textbox) || isLocked(active) || !Number.isFinite(size)) return
-    active.set({ fontSize: clamp(size, MIN_FONT_SIZE, MAX_FONT_SIZE) })
+    setTextFontSize(active, clamp(size, MIN_FONT_SIZE, MAX_FONT_SIZE)) // headings keep their ratio
     active.setCoords()
     this.canvas.requestRenderAll()
     // A text that is blank right now (emptied in the middle of an edit) is not in the scene:
     // committing would record "text removed" while it is still being typed into.
     if (active.text.trim() === '') return
     this.commit(`font-size:${idOf(active) ?? ''}`)
+  }
+
+  // ---- text formatting ----------------------------------------------------------------------
+  //
+  // Every command acts on the one selected text, and only while the board is editable and no
+  // gesture is unsettled. While the text is being edited, marks and headings act on the
+  // selected range (marks with only a caret: on what is typed next), and the change is saved
+  // as it happens and becomes part of the single undo step recorded when the edit ends; the
+  // edit, its caret and its selected range go on. On a selected box that is not being edited
+  // they act on the whole box, as an undo step of its own (quick repeats of the same kind
+  // coalesce, like the font size). None of them changes ownership.
+
+  /** The text a formatting command acts on, or null when there is none or the board may not change now. */
+  private formatTarget(): Textbox | null {
+    this.shortcutRevert = null // a formatting command ends "straight after a shortcut"
+    if (!this.editable || this.busy) return null
+    const active = this.canvas.getActiveObject()
+    return active instanceof Textbox && !isLocked(active) ? active : null
+  }
+
+  /** Applies a formatting change through the one canvas path, then saves or records it. */
+  private formatText(tb: Textbox, kind: string, change: (fmt: TextFormatting, text: string) => TextFormatting) {
+    if (!applyTextFormatting(tb, change)) return // nothing changed: nothing recorded, nothing saved
+    this.canvas.requestRenderAll()
+    if (tb.isEditing) {
+      // Saved as it happens, like typing. A blank text being typed into is not in the scene,
+      // so there is nothing to save (and a commit would record its removal).
+      if (tb.text.trim() !== '') this.autosaver.markDirty()
+      this.syncSelection()
+      return
+    }
+    this.commit(`format-${kind}:${idOf(tb) ?? ''}`)
+  }
+
+  /**
+   * Bold, italic, underline or strikethrough. Editing: toggled on the selected range (off if
+   * every character has it, otherwise on), or with only a caret, chosen for what is typed
+   * next. Not editing: the whole box. Bold never changes in heading lines.
+   */
+  toggleMark(mark: Mark) {
+    const tb = this.formatTarget()
+    if (!tb) return
+    const range = tb.isEditing ? (selectedRange(tb) ?? { start: 0, end: tb.text.length }) : { start: 0, end: tb.text.length }
+    if (tb.isEditing && range.start === range.end) {
+      this.setPending(tb, togglePendingMark(tb.text, readTextFormatting(tb), range.start, this.pendingFor(tb), mark))
+      this.syncSelection()
+      return
+    }
+    this.formatText(tb, `mark-${mark}`, (fmt, text) => toggleMarkOfRange(text, fmt, mark, range.start, range.end))
+  }
+
+  /** Heading level 1 to 3, or 0 for body text. Editing: every line the selection touches (the caret's line). Not editing: every line. */
+  setHeading(level: 0 | 1 | 2 | 3) {
+    const tb = this.formatTarget()
+    if (!tb) return
+    const range = tb.isEditing ? selectedRange(tb) : undefined
+    this.formatText(tb, 'heading', (fmt, text) => (range ? setHeadingOfRange(text, fmt, level, range.start, range.end) : setHeadingEverywhere(text, fmt, level)))
+    if (tb.isEditing) {
+      this.dropPendingBoldOnHeading(tb) // the caret's line may now be a heading
+      this.syncSelection()
+    }
+  }
+
+  /** The font of the selection or whole box, or the next characters typed at a caret. */
+  setTextFont(font: FontId) {
+    const tb = this.formatTarget()
+    if (!tb) return
+    const range = tb.isEditing ? selectedRange(tb) : undefined
+    if (tb.isEditing && !range) return
+    if (range && range.start === range.end) {
+      this.setPending(tb, { ...this.pendingFor(tb), font })
+      this.syncSelection()
+      return
+    }
+    this.formatText(tb, 'font', (fmt, text) => setRangeFont(text, fmt, font, range))
+  }
+
+  /** The alignment of the whole box, also while it is being edited. The box keeps its position and width. */
+  setTextAlign(align: TextAlign) {
+    const tb = this.formatTarget()
+    if (tb) this.formatText(tb, 'align', (fmt) => ({ ...fmt, align: align === 'left' ? undefined : align }))
+  }
+
+  /** The colour (`#rrggbb`) of the whole box, also while it is being edited. The default ink is stored as no colour. */
+  setTextColor(color: string) {
+    const tb = this.formatTarget()
+    if (tb) this.formatText(tb, 'color', (fmt) => ({ ...fmt, color }))
+  }
+
+  // ---- typing shortcuts ----------------------------------------------------------------------
+  //
+  // While a text is typed into, `# `, `## `, `### ` at the start of a line make it a heading,
+  // and a closing `**` or `*` makes the text since the opening marker bold or italic; the
+  // markers go (see `matchTypingShortcut`). Backspace straight afterwards puts the literal
+  // characters back. Like typing, a conversion is saved as it happens and is part of the one
+  // undo step recorded when the edit ends; it never changes ownership.
+
+  /**
+   * After a text change, in the `text:changed` callback, once its styles are canonical: when
+   * the change is exactly one character typed at the caret (`typed`, seen on its keydown),
+   * with nothing replaced, and it completes a typing shortcut, the text and its formatting are
+   * changed together in one step. Fabric 7.4 does nothing to the text after this callback
+   * (ITextKeyBehavior.mjs `onInput`: `updateAndFire` only asks for a render afterwards), and
+   * the save that typing schedules is scheduled after this returns, so no save can see the
+   * marker typed but not yet converted.
+   */
+  private typingShortcut(tb: Textbox, edit: TextEdit, typed: string) {
+    if (this.applying || !this.editable || this.busy || !tb.isEditing || this.canvas.getActiveObject() !== tb) return
+    if ((tb as unknown as { inCompositionMode?: boolean }).inCompositionMode) return
+    const { start, prevEnd, nextEnd } = edit.change
+    if (prevEnd !== start || nextEnd !== start + 1 || edit.text[start] !== typed) return
+    const caret = selectedRange(tb)
+    if (!caret || caret.start !== nextEnd || caret.end !== nextEnd) return
+    const sc = matchTypingShortcut(edit.text, nextEnd, typed)
+    if (!sc) return
+    const fmt = readTextFormatting(tb) // canonical: the reconcile has just remembered it
+    const pendingBefore = this.pending?.target === tb ? this.pending.style : null
+    const out = applyTypingShortcut(edit.text, fmt, sc)
+    replaceEditedText(tb, out.text, out.fmt, out.caret)
+    if (sc.kind !== 'heading') {
+      // What is typed next is plain again: a pending "off" (none where typing would not carry
+      // the mark anyway, nor for bold on a heading line, where it cannot change).
+      const mark = sc.kind
+      const style = { ...pendingBefore }
+      if (marksAtCaret(out.text, out.fmt, out.caret)[mark] && !(mark === 'bold' && formatAtCaret(out.text, out.fmt, out.caret).boldFromHeading)) style[mark] = false
+      else delete style[mark]
+      this.setPending(tb, style)
+    }
+    this.shortcutRevert = { target: tb, text: edit.text, fmt, caret: nextEnd, pending: pendingBefore }
+  }
+
+  /** Backspace straight after a typing shortcut fired: its literal characters come back, exactly as typed, and nothing is deleted. */
+  private revertShortcut() {
+    const r = this.shortcutRevert
+    this.shortcutRevert = null
+    if (!r || !this.editable || this.busy || !r.target.isEditing || this.canvas.getActiveObject() !== r.target) return
+    replaceEditedText(r.target, r.text, r.fmt, r.caret)
+    this.setPending(r.target, r.pending ?? {})
+    this.canvas.requestRenderAll()
+    this.autosaver.markDirty() // like typing (a blank text is out of the scene, so a save stores none)
+    this.syncSelection()
   }
 
   arrange(op: LayerOp) {
