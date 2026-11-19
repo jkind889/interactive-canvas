@@ -70,7 +70,7 @@ afterEach(() => {
 })
 
 describe('dragging out a text box', () => {
-  it('the box takes the drag\'s left, top and width, its height is its text\'s; blank and being edited; back to Select', async () => {
+  it('the box takes the drag\'s geometry; blank and being edited; back to Select', async () => {
     const { editor, canvas, scene, texts, busy } = await setup()
     editor.setTool('text')
     pressCanvas(canvas, 100, 100)
@@ -85,12 +85,12 @@ describe('dragging out a text box', () => {
     const tb = texts()[0] as Textbox
     expect(texts()).toHaveLength(1)
     expect(tb).toMatchObject({ left: 100, top: 100, width: 300, fontSize: 24, isEditing: true, text: '' })
-    expect(tb.height).toBe(24 * 1.25) // as tall as its (empty) text, not the 150 dragged
+    expect(tb.height).toBe(150)
     expect(editor.getState().tool).toBe('select')
     expect(canvas.getActiveObject()).toBe(tb)
     expect(scene().objects).toHaveLength(1) // blank: not in the scene
     tb.type('Hello')
-    expect(scene().objects.at(-1)).toMatchObject({ type: 'text', text: 'Hello', left: 100, top: 100, width: 300, fontSize: 24 })
+    expect(scene().objects.at(-1)).toMatchObject({ type: 'text', text: 'Hello', left: 100, top: 100, width: 300, minHeight: 150, fontSize: 24 })
   })
 
   it('runs from the smaller x and y whatever the direction', async () => {

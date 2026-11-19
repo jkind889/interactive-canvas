@@ -5,6 +5,7 @@ import { DEFAULT_TEXT_COLOR, canonicalHeadings, canonicalTextFormatting, heading
 import type { CharStyle, PendingTextStyle, TextChange, TextFormatting } from '../model/richText.ts'
 import type { FrameRecord, ImageRecord, ObjectRecord, TextRecord } from '../model/types.ts'
 import type { Point } from '../model/viewport.ts'
+import { DrawnTextbox } from './DrawnTextbox.ts'
 import { FONT_STACKS, fontIdOf } from './fonts.ts'
 
 export const ACCENT = '#6c7bf2'
@@ -79,7 +80,7 @@ export function createObject(rec: ObjectRecord, getImage: (assetId: string) => H
     meta.set(img, { id: rec.id, kind: 'image', assetId: rec.assetId, ...(rec.frameId !== undefined && { frameId: rec.frameId }) })
     return img
   }
-  const tb = new Textbox(rec.text, {
+  const textOptions = {
     ...SELECTION_STYLE,
     left: rec.left,
     top: rec.top,
@@ -89,7 +90,11 @@ export function createObject(rec: ObjectRecord, getImage: (assetId: string) => H
     fontFamily: FONT_FAMILY,
     fill: TEXT_COLOR,
     lineHeight: 1.25,
-  })
+  }
+  const tb = rec.minHeight === undefined ? new Textbox(rec.text, textOptions) : new DrawnTextbox('', textOptions, rec.minHeight)
+  // A drawn box's first text measurement must see its stored fonts and heading sizes.
+  // Measuring the words with defaults first could enlarge the saved width on load.
+  tb.text = rec.text
   writeTextFormatting(tb, rec)
   tb.setControlsVisibility({ mt: false, mb: false })
   meta.set(tb, { id: rec.id, kind: 'text', ...(rec.frameId !== undefined && { frameId: rec.frameId }) })
@@ -548,6 +553,7 @@ export function toRecord(obj: FabricObject): ObjectRecord | null {
       text: obj.text,
       fontSize: roundPositive(obj.fontSize * s, 2),
       width: roundPositive(obj.width * sx),
+      ...(obj instanceof DrawnTextbox && { minHeight: round(obj.minHeight * sy) }),
       ...fmt,
       ...owner,
     }
@@ -582,7 +588,7 @@ export function hasResidualScale(obj: FabricObject): boolean {
 }
 
 /**
- * Folds any residual scale on a text object into fontSize/width, with no limit of its
+ * Folds any residual scale on a text object into its size, with no limit of its
  * own: limits are decided once per gesture, before this runs. Headings are redrawn at
  * their ratio to the new size.
  */
@@ -591,6 +597,7 @@ export function normalizeTextScale(tb: Textbox): boolean {
   const sy = Math.abs(tb.scaleY)
   if (Math.abs(sx - 1) < 0.001 && Math.abs(sy - 1) < 0.001) return false
   const s = (sx + sy) / 2
+  if (tb instanceof DrawnTextbox) tb.minHeight = round(tb.minHeight * sy)
   setTextFontSize(tb, roundPositive(tb.fontSize * s, 2), { width: roundPositive(tb.width * sx, 2), scaleX: 1, scaleY: 1 })
   tb.setCoords()
   return true

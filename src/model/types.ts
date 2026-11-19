@@ -55,6 +55,8 @@ export interface TextRecord extends RecordBase {
   fontSize: number
   /** Wrapping width in scene units. */
   width: number
+  /** Drawn minimum height in scene units, possibly zero for a flat drag. Absent on click-created and older boxes. */
+  minHeight?: number
   /** Absent: 'sans'. */
   font?: FontId
   /** Absent: left. */

@@ -281,6 +281,7 @@ export interface StoredObject {
   scaleY?: number
   fontSize?: number
   width?: number
+  minHeight?: number
   text?: string
   font?: string
   align?: string

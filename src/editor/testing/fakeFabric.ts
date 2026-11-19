@@ -109,6 +109,9 @@ export class Textbox extends FakeObject {
     super(opts)
     Object.assign(this, opts) // field initializers above ran after super(): apply the options again
     this.text = text
+    this.initDimensions()
+  }
+  initDimensions() {
     this.height = this.fontSize * 1.25
   }
   /** Same splitter as Fabric's (an Intl.Segmenter by grapheme). */

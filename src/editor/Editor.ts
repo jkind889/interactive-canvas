@@ -164,7 +164,7 @@ interface Gesture {
   carry?: Carry
   /**
    * The Frame tool, or the Text tool (`tool: 'text'`): the rectangle being drawn, in scene
-   * coordinates. For a text only its width (and left and top) is used; its height is a guide.
+   * coordinates.
    */
   draft?: { start: Point; end: Point; tool?: 'text' }
 }
@@ -231,7 +231,7 @@ export class Editor {
   private primaryDown = false
   private pan: { button: number; end: () => void } | null = null
   /**
-   * Marks chosen with only a caret in a text being edited, for what is typed next. Dropped
+   * Marks and font chosen with only a caret in a text being edited, for what is typed next. Dropped
    * when the caret moves for any other reason than typing, and when the edit ends.
    */
   private pending: { target: Textbox; style: PendingTextStyle } | null = null
@@ -243,7 +243,7 @@ export class Editor {
   private typed: string | null = null
   /**
    * The typing shortcut that has just fired, with what puts its literal characters back (the
-   * text, formatting, caret and pending marks from just before it fired). Only "straight
+   * text, formatting, caret and pending choices from just before it fired). Only "straight
    * after": dropped by the next text change, any caret or selection move, any formatting
    * command, the end of the edit and any rebuild from records (undo, redo, a cancelled gesture).
    */
@@ -878,8 +878,8 @@ export class Editor {
   /**
    * The Text tool's release: one new, blank text being edited, and back to the Select tool.
    * Dragged (at least the slop long, in screen pixels): the box takes the drag's smaller x and
-   * y and its width, as long as that width is at least `MIN_TEXT_DRAG_EMS` font sizes; its
-   * height stays that of its text. A click, a shorter drag or a narrower one: today's default
+   * y, its width and a minimum height, as long as the drag is at least `MIN_TEXT_DRAG_EMS`
+   * font sizes wide. A click, a shorter drag or a narrower one: the default
    * box with its top-left at the press point (see `addTextAt`). An image import that
    * finished during the drag is added first, as its own step, because adding it ends any edit
    * and would discard the new text while it is still blank.
@@ -1448,7 +1448,7 @@ export class Editor {
 
   /**
    * `dragTo`: the Text tool's box was dragged out from `at` to here: it takes the drag's
-   * width and starts at the drag's smaller x and y, unless the drag is narrower than
+   * width and minimum height and starts at the drag's smaller x and y, unless the drag is narrower than
    * `MIN_TEXT_DRAG_EMS` font sizes, which is no usable width: then, as without `dragTo`, the
    * default box (ten font sizes wide) at `at`.
    */
@@ -1459,17 +1459,19 @@ export class Editor {
     this.finishEditing()
     const zoom = this.getViewport().zoom
     const fontSize = Math.round(clamp(24 / zoom, 12, 160))
-    const drag = dragTo && Math.abs(dragTo.x - at.x) >= fontSize * MIN_TEXT_DRAG_EMS ? dragTo : undefined
-    const width = drag ? Math.abs(drag.x - at.x) : fontSize * 10
+    const box = dragTo ? rectFromDrag(at, dragTo) : undefined
+    const drag = box && box.width >= fontSize * MIN_TEXT_DRAG_EMS ? box : undefined
+    const width = drag?.width ?? fontSize * 10
     const rec: TextRecord = {
       id: newId(),
       type: 'text',
       text: '',
       fontSize,
       width,
+      ...(drag && { minHeight: drag.height }),
       angle: 0,
-      left: drag ? Math.min(at.x, drag.x) : anchor === 'center' ? at.x - width / 2 : at.x,
-      top: drag ? Math.min(at.y, drag.y) : anchor === 'center' ? at.y - fontSize * 0.625 : at.y,
+      left: drag?.left ?? (anchor === 'center' ? at.x - width / 2 : at.x),
+      top: drag?.top ?? (anchor === 'center' ? at.y - fontSize * 0.625 : at.y),
     }
     const obj = createObject(rec, () => undefined)
     if (!(obj instanceof Textbox)) return

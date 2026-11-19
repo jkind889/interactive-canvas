@@ -1,6 +1,6 @@
 /**
  * Real-browser tests (real Fabric, real IndexedDB) for the Text tool's drag: pressing on empty
- * canvas and dragging out a box whose width becomes the wrapping width. What is stored, how
+ * canvas and dragging out a box with a wrapping width and minimum height. What is stored, how
  * the text wraps, the click that still gives the default box, cancelling, other buttons,
  * directions, the minimum width, frames, history and zoom.
  */
@@ -59,39 +59,41 @@ function inkIn(page: Page, left: number, top: number, width: number, height: num
 }
 
 /** Pixels of the accent colour (the dashed rectangle being drawn) in a page rectangle of the scene canvas. */
-function accentIn(page: Page, left: number, top: number, width: number, height: number) {
+function accentIn(page: Page, left: number, top: number, width: number, height: number, accent = [0x6c, 0x7b, 0xf2]) {
   return page.evaluate(
-    ({ left, top, width, height }) => {
+    ({ left, top, width, height, accent }) => {
       const canvas = document.querySelector<HTMLCanvasElement>('.canvas-container canvas.lower-canvas')!
       const r = canvas.getBoundingClientRect()
       const scale = canvas.width / canvas.clientWidth
       const d = canvas.getContext('2d')!.getImageData(Math.round((left - r.left) * scale), Math.round((top - r.top) * scale), Math.round(width * scale), Math.round(height * scale)).data
       let n = 0
-      for (let i = 0; i < d.length; i += 4) if (Math.abs(d[i]! - 0x6c) < 30 && Math.abs(d[i + 1]! - 0x7b) < 30 && Math.abs(d[i + 2]! - 0xf2) < 30) n++
+      for (let i = 0; i < d.length; i += 4) if (d[i + 3]! > 0 && accent.every((c, j) => Math.abs(d[i + j]! - c) < 30)) n++
       return n
     },
-    { left, top, width, height },
+    { left, top, width, height, accent },
   )
 }
 
 test.describe('dragging out a text box', () => {
-  test('the stored width is the dragged width in scene units; a long sentence wraps at it; the height is the text\'s', async ({ page }) => {
+  test('the dragged width and minimum height are stored in scene units, and words wrap to that width', async ({ page }) => {
     const { errors, at } = await open(page, [])
     await page.keyboard.press('t')
     await drag(page, at(100, 100), at(400, 400))
     await expect(tool(page, 'Select')).toHaveAttribute('aria-pressed', 'true') // single-use
     expect(await editing(page)).toBe(true)
+    const base = at(130, 400)
+    // Fabric's editing border is pale blue. It is still at the drafted bottom before typing.
+    await expect.poll(() => accentIn(page, base.x, base.y - 4, 240, 9, [102, 153, 255])).toBeGreaterThan(100)
     await page.keyboard.type('a long sentence that has to wrap several times inside this box')
     await page.keyboard.press('Escape')
     await page.keyboard.press('Escape')
     const done = await storedWhen(page, (d) => texts(d).length === 1)
-    expect(Object.keys(done.objects[0]!)).toEqual(['id', 'left', 'top', 'angle', 'type', 'text', 'fontSize', 'width'])
-    expect(done.objects[0]).toMatchObject({ left: 100, top: 100, width: 300, fontSize: 24 })
+    expect(done.objects[0]).toMatchObject({ left: 100, top: 100, width: 300, minHeight: 300, fontSize: 24 })
     const p0 = at(90, 90)
     const ink = await inkIn(page, p0.x, p0.y, 600, 400)
     expect(ink.right).toBeLessThanOrEqual(at(401, 0).x) // wrapped at the box's width
     expect(ink.bottom - ink.top).toBeGreaterThan(24 * 1.25 * 2.5) // on at least three lines
-    expect(ink.bottom).toBeLessThan(at(0, 100 + 24 * 1.25 * 5).y) // as tall as the text, whatever was dragged
+    expect(ink.bottom).toBeLessThan(at(0, 100 + 24 * 1.25 * 5).y) // text still starts at the top of the box
     expect(errors).toEqual([])
   })
 
@@ -136,7 +138,7 @@ test.describe('dragging out a text box', () => {
     await make(at(700, 600), at(748, 620), 'w48') // exactly two font sizes wide: the dragged width
     const done = await storedWhen(page, (d) => texts(d).length === 6)
     const by = (t: string) => done.objects.find((o) => o.text === t)
-    expect(by('up left')).toMatchObject({ left: 200, top: 150, width: 300 })
+    expect(by('up left')).toMatchObject({ left: 200, top: 150, width: 300, minHeight: 150 })
     expect(by('jitter')).toMatchObject({ left: 300, top: 400, width: 240 })
     expect(by('down')).toMatchObject({ left: 300, top: 500, width: 240 })
     expect(by('up')).toMatchObject({ left: 300, top: 800, width: 240 })
@@ -155,7 +157,7 @@ test.describe('dragging out a text box', () => {
     await page.keyboard.press('Escape')
     const done = await storedWhen(page, (d) => texts(d).length === 1)
     const host = (await page.locator('.canvas-host').boundingBox())!
-    expect(done.objects[0]).toMatchObject({ top: 300, width: Math.round((at(300, 0).x - over.x) * 100) / 100 })
+    expect(done.objects[0]).toMatchObject({ top: 300, minHeight: 0, width: Math.round((at(300, 0).x - over.x) * 100) / 100 })
     expect(done.objects[0]!.left).toBeCloseTo(over.x - host.x, 1)
     expect(errors).toEqual([])
   })
@@ -164,14 +166,14 @@ test.describe('dragging out a text box', () => {
     { zoom: 2, panX: 0, panY: 0 },
     { zoom: 0.5, panX: 100, panY: 50 },
   ]) {
-    test(`at zoom ${view.zoom}: the width is in scene units and the font size is chosen as for a click`, async ({ page }) => {
+    test(`at zoom ${view.zoom}: the width and minimum height are in scene units`, async ({ page }) => {
       const { errors, at } = await open(page, [], { view })
       await page.keyboard.press('t')
       await drag(page, at(100, 100), at(300, 150))
       await page.keyboard.type('zoomed')
       await page.keyboard.press('Escape')
       const done = await storedWhen(page, (d) => texts(d).length === 1)
-      expect(done.objects[0]).toMatchObject({ left: 100, top: 100, width: 200, fontSize: Math.round(Math.min(160, Math.max(12, 24 / view.zoom))) })
+      expect(done.objects[0]).toMatchObject({ left: 100, top: 100, width: 200, minHeight: 50, fontSize: Math.round(Math.min(160, Math.max(12, 24 / view.zoom))) })
       expect(errors).toEqual([])
     })
   }
@@ -186,6 +188,81 @@ test.describe('dragging out a text box', () => {
     await page.keyboard.press('Escape')
     const done = await storedWhen(page, (d) => texts(d).length === 1)
     expect(done.objects[0]).toMatchObject({ text: 'Title\na bold word', width: 400, headings: [1], spans: [{ start: 8, end: 12, bold: true }] })
+    expect(errors).toEqual([])
+  })
+
+  test('a long token grows the box downward, preserves graphemes and leaves existing boxes alone', async ({ page }) => {
+    const token = '👩🏽‍🚀ABCDEFGHIJKLMN👩🏽‍🚀OPQRSTUVWXYZ'
+    const legacy = textRec('legacy', 100, 440, 'legacy', { width: 100 })
+    const { errors, at } = await open(page, [legacy])
+    await page.keyboard.press('t')
+    await drag(page, at(100, 100), at(200, 150))
+    await page.getByRole('button', { name: 'Mono', exact: true }).click()
+    await page.keyboard.insertText(token)
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    const doc = await storedWhen(page, (d) => texts(d).length === 2)
+    expect(doc.objects.find((o) => o.text === token)).toMatchObject({ width: 100, minHeight: 50, spans: [{ start: 0, end: token.length, font: 'mono' }] })
+    const p = at(90, 90)
+    const ink = await inkIn(page, p.x, p.y, 650, 320)
+    expect(ink.right).toBeLessThanOrEqual(at(202, 0).x)
+    expect(ink.bottom).toBeGreaterThan(at(0, 175).y)
+
+    await page.mouse.dblclick(at(110, 112).x, at(110, 112).y)
+    await page.keyboard.press('Control+a')
+    await page.keyboard.insertText('short')
+    await page.keyboard.press('Escape')
+    await page.keyboard.press('Escape')
+    await page.mouse.click(at(150, 144).x, at(150, 144).y)
+    await expect(page.locator('.inspector-title')).toHaveText('Text') // shrinks back to the drawn floor
+    await page.mouse.click(at(150, 166).x, at(150, 166).y)
+    await expect(page.locator('.inspector-title')).toHaveCount(0)
+
+    await page.mouse.dblclick(at(110, 452).x, at(110, 452).y)
+    await page.keyboard.press('Control+a')
+    await page.keyboard.insertText('ABCDEFGHIJKLMNOPQRSTUVWXYZ')
+    await page.keyboard.press('Escape')
+    const withLegacy = await storedWhen(page, (d) => (d.objects.find((o) => o.id === 'legacy')?.width ?? 0) > 100)
+    expect(withLegacy.objects.find((o) => o.id === 'legacy')).not.toHaveProperty('minHeight')
+    expect(errors).toEqual([])
+  })
+
+  test('dragging from the empty lower area moves the box, and resizing keeps or scales the minimum height', async ({ page }) => {
+    const { errors, at } = await open(page, [])
+    await page.keyboard.press('t')
+    await drag(page, at(100, 100), at(300, 300))
+    await page.keyboard.type('Move me')
+    await page.keyboard.press('Escape')
+    await waitSaved(page)
+    await drag(page, at(150, 250), at(210, 300))
+    const moved = (await storedWhen(page, (d) => d.objects[0]?.left === 160)).objects[0]!
+    expect(moved).toMatchObject({ top: 150, width: 200, minHeight: 200 })
+
+    await drag(page, at(362, 250), at(422, 250)) // right side handle halfway down the drawn height
+    const widened = (await storedWhen(page, (d) => d.objects[0]?.width !== 200)).objects[0]!
+    expect(widened.width).toBeGreaterThan(250)
+    expect(widened.minHeight).toBe(200)
+
+    const corner = at(widened.left + widened.width! + 2, 352)
+    await drag(page, corner, { x: corner.x + 65, y: corner.y + 50 })
+    const scaled = (await storedWhen(page, (d) => d.objects[0]?.fontSize !== 24)).objects[0]!
+    const scale = scaled.width! / widened.width!
+    expect(scale).toBeGreaterThan(1.2)
+    expect(scaled.minHeight).toBeCloseTo(200 * scale, 1)
+    await undoButton(page).click()
+    expect((await storedWhen(page, (d) => d.objects[0]?.fontSize === 24)).objects[0]).toEqual(widened)
+    await redoButton(page).click()
+    expect((await storedWhen(page, (d) => d.objects[0]?.fontSize === scaled.fontSize)).objects[0]).toEqual(scaled)
+    expect(errors).toEqual([])
+  })
+
+  test('reopening a narrow drawn box measures its saved font before settling its width', async ({ page }) => {
+    // At 40px a mono W fits inside 30px, while the default Sans W does not.
+    const rec = textRec('t', 100, 100, 'WWW', { width: 30, fontSize: 40, minHeight: 200, spans: [{ start: 0, end: 3, font: 'mono' }] })
+    const { errors, at } = await open(page, [rec])
+    await drag(page, at(110, 270), at(130, 270))
+    const moved = (await storedWhen(page, (d) => d.objects[0]?.left === 120)).objects[0]
+    expect(moved).toEqual({ ...rec, left: 120 })
     expect(errors).toEqual([])
   })
 })
@@ -273,6 +350,21 @@ test.describe('cancelling, other buttons, single use', () => {
 })
 
 test.describe('ownership and history', () => {
+  test('the drawn minimum height contributes to the centre used for frame ownership', async ({ page }) => {
+    const frame = { id: 'F', name: 'Spread', left: 50, top: 50, width: 600, height: 250 }
+    const { errors, at } = await open(page, [], { frames: [frame] })
+    await page.keyboard.press('t')
+    await drag(page, at(100, 240), at(300, 400))
+    await page.keyboard.type('One line')
+    await page.keyboard.press('Escape')
+    const loose = (await storedWhen(page, (d) => texts(d).length === 1)).objects[0]!
+    expect(loose).not.toHaveProperty('frameId') // the minimum height puts its centre at y 320
+    await drag(page, at(150, 350), at(150, 270))
+    const owned = (await storedWhen(page, (d) => d.objects[0]?.frameId === 'F')).objects[0]
+    expect(owned).toMatchObject({ top: 160, minHeight: 160 })
+    expect(errors).toEqual([])
+  })
+
   test('a box dragged inside a frame belongs to it; one dragged mostly outside does not', async ({ page }) => {
     const frame = { id: 'F', name: 'Spread', left: 100, top: 100, width: 400, height: 300 }
     const { errors, at } = await open(page, [], { frames: [frame] })
@@ -349,7 +441,7 @@ test.describe('ownership and history', () => {
     await page.keyboard.press('Escape')
     const done = await storedWhen(page, (d) => texts(d).length === 2)
     const made = done.objects.find((o) => o.text === 'Sized')!
-    expect(made).toMatchObject({ width: 160 })
+    expect(made).toMatchObject({ width: 160, minHeight: 60 })
     await waitSaved(page)
     await undoButton(page).click()
     await storedWhen(page, (d) => texts(d).length === 1)
@@ -361,6 +453,8 @@ test.describe('ownership and history', () => {
     await page.reload()
     await expect(status(page)).toContainText('Saved on this device')
     expect((await storedDoc(page)).objects.find((o) => o.text === 'Sized')).toEqual(made)
+    await page.mouse.click(at(170, 150).x, at(170, 150).y)
+    await expect(page.locator('.inspector-title')).toHaveText('Text') // the restored lower area can be hit
     expect(errors).toEqual([])
   })
 

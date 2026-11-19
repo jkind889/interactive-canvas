@@ -30,11 +30,12 @@ function parseObject(raw: unknown): ObjectRecord | null {
     return { type, id, left, top, angle, assetId, scaleX, scaleY }
   }
   if (type === 'text') {
-    const { text, fontSize, width } = raw
+    const { text, fontSize, width, minHeight } = raw
     if (!isStr(text) || !isNum(fontSize) || !isNum(width) || fontSize <= 0 || width <= 0) return null
     // Formatting is read leniently, like a dangling owner: whatever is malformed is dropped
     // or trimmed, and the text itself still loads.
-    return { type, id, left, top, angle, text, fontSize, width, ...canonicalTextFormatting(text, raw) }
+    const height = isNum(minHeight) && minHeight >= 0 ? { minHeight } : {}
+    return { type, id, left, top, angle, text, fontSize, width, ...height, ...canonicalTextFormatting(text, raw) }
   }
   return null
 }
