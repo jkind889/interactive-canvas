@@ -56,6 +56,10 @@ export class FakeObject {
   private box() {
     return { left: this.left, top: this.top, right: this.left + this.width * this.scaleX, bottom: this.top + this.height * this.scaleY }
   }
+  getBoundingRect() {
+    const { left, top, right, bottom } = this.box()
+    return { left, top, width: right - left, height: bottom - top }
+  }
   containsPoint(p: { x: number; y: number }) {
     const b = this.box()
     return p.x >= b.left && p.x <= b.right && p.y >= b.top && p.y <= b.bottom

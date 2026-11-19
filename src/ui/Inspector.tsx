@@ -3,6 +3,7 @@ import type { KeyboardEvent as ReactKeyboardEvent, ReactElement } from 'react'
 import type { Editor, SelectionInfo, TextFormatInfo } from '../editor/Editor.ts'
 import { FONT_STACKS } from '../editor/fonts.ts'
 import { MAX_FONT_SIZE, MIN_FONT_SIZE } from '../model/doc.ts'
+import type { Align } from '../model/layout.ts'
 import { FONT_IDS, FONT_LABELS, TEXT_PALETTE } from '../model/richText.ts'
 import type { Mark, MarkState, TextAlign } from '../model/richText.ts'
 import { IconButton } from './IconButton.tsx'
@@ -347,6 +348,44 @@ function TextPanel({ editor, selection, text, locked }: { editor: Editor; select
   )
 }
 
+const POSITION_ALIGNS: ReadonlyArray<{ op: Align; label: string; short: string }> = [
+  { op: 'left', label: 'Align left edges', short: 'Left' },
+  { op: 'center-x', label: 'Align horizontal centers', short: 'Center X' },
+  { op: 'right', label: 'Align right edges', short: 'Right' },
+  { op: 'top', label: 'Align top edges', short: 'Top' },
+  { op: 'center-y', label: 'Align vertical centers', short: 'Center Y' },
+  { op: 'bottom', label: 'Align bottom edges', short: 'Bottom' },
+]
+
+function LayoutPanel({ editor, layout }: { editor: Editor; layout: NonNullable<SelectionInfo['layout']> }) {
+  const label = useId()
+  return (
+    <>
+      <div className="layout-group" role="group" aria-labelledby={label}>
+        <span id={label}>Align</span>
+        <div className="layout-buttons">
+          {POSITION_ALIGNS.map(({ op, label, short }) => (
+            <button type="button" key={op} className="secondary-btn" aria-label={label} title={label} onClick={() => editor.layoutSelection(op)}>
+              {short}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="layout-group" role="group" aria-labelledby={label + '-distribute'}>
+        <span id={label + '-distribute'}>Distribute</span>
+        <div className="layout-buttons layout-distribute">
+          <button type="button" className="secondary-btn" aria-label="Distribute horizontally" title="Equal gaps between three or more items" disabled={!layout.spaceX} onClick={() => editor.layoutSelection('space-x')}>
+            Horizontal
+          </button>
+          <button type="button" className="secondary-btn" aria-label="Distribute vertically" title="Equal gaps between three or more items" disabled={!layout.spaceY} onClick={() => editor.layoutSelection('space-y')}>
+            Vertical
+          </button>
+        </div>
+      </div>
+    </>
+  )
+}
+
 export function Inspector({ editor, selection, cropping, onReplace }: {
   editor: Editor
   selection: SelectionInfo
@@ -375,6 +414,8 @@ export function Inspector({ editor, selection, cropping, onReplace }: {
       {selection.kind === 'image' && <ReplaceButton selection={selection} onReplace={onReplace} />}
 
       {selection.kind === 'text' && selection.text && <TextPanel editor={editor} selection={selection} text={selection.text} locked={selection.locked} />}
+
+      {selection.layout && <LayoutPanel editor={editor} layout={selection.layout} />}
 
       <div className="inspector-row">
         <span id={`${sizeId}-layer`}>Layer</span>

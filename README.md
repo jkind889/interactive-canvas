@@ -93,6 +93,12 @@ While you type in a text, three markers turn into formatting, as a quicker way t
 - **Backspace straight after a shortcut fired puts the characters back exactly as you typed them**, with the markers, and deletes nothing. It does so only as the very next thing you do: once you type, move the caret, use the panel or leave the text, Backspace deletes as usual.
 - Like typing, a shortcut is saved straight away and is part of the one undo step recorded when you leave the text.
 
+## Align and distribute
+
+Select two or more items and use **Align** in the Inspector to line up their edges or centers. Alignment uses the displayed boxes, including cropped and rotated images. **Distribute** spaces the gaps between three or more items on one axis, keeping the outer items where they are. The axis is available when the items fit between those endpoints.
+
+Aligning a frame moves its unselected contents along with it. Selected contents move according to their own alignment. Undo and redo each take one step for the whole layout change.
+
 ## Layers
 
 The **Layers** panel at the bottom right lists everything on the board, front-most first: all images and texts from front to back, then all frames from front to back (frames always sit behind content). Its header collapses and expands it.

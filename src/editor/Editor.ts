@@ -38,6 +38,8 @@ import {
 } from '../model/crop.ts'
 import type { CropHit, CropRect, Placement } from '../model/crop.ts'
 import { History } from '../model/history.ts'
+import { layoutOffsets } from '../model/layout.ts'
+import type { Layout } from '../model/layout.ts'
 import {
   DEFAULT_TEXT_COLOR,
   applyTypingShortcut,
@@ -127,6 +129,8 @@ export interface SelectionInfo {
    */
   locked: boolean
   layer: Record<LayerOp, boolean>
+  /** Multi-selection only: which axes have enough room to space its displayed boxes. */
+  layout: { spaceX: boolean; spaceY: boolean } | null
   /**
    * Only for a single image: whether it is cropped, and whether Fit and Fill would change
    * anything (both false while it is locked or being cropped).
@@ -635,6 +639,7 @@ export class Editor {
     const frame = single && isFrame(single) ? single : undefined
     const frameId = frame ? idOf(frame) : undefined
     const locked = single !== undefined && isLocked(single)
+    const bounds = objs.length >= 3 ? this.layoutBounds(objs) : []
     return {
       kind: objs.length > 1 ? 'multiple' : frame ? 'frame' : single instanceof Textbox ? 'text' : 'image',
       count: objs.length,
@@ -648,6 +653,7 @@ export class Editor {
         backward: !locked && canReorderLayered(order, ids, 'backward'),
         back: !locked && canReorderLayered(order, ids, 'back'),
       },
+      layout: objs.length < 2 ? null : { spaceX: layoutOffsets(bounds, 'space-x') !== null, spaceY: layoutOffsets(bounds, 'space-y') !== null },
       image: isImage(single) ? this.imageInfo(single, locked) : null,
       text: single instanceof Textbox ? this.textFormatInfo(single) : null,
     }
@@ -1097,13 +1103,15 @@ export class Editor {
     return { left: target.left, top: target.top, followers }
   }
 
+  private placeObject(obj: FabricObject, left: number, top: number) {
+    obj.set({ left, top })
+    obj.setCoords()
+  }
+
   private placeFollowers(carry: Carry, target: FabricObject) {
     const dx = target.left - carry.left
     const dy = target.top - carry.top
-    for (const f of carry.followers) {
-      f.obj.set({ left: f.left + dx, top: f.top + dy })
-      f.obj.setCoords()
-    }
+    for (const f of carry.followers) this.placeObject(f.obj, f.left + dx, f.top + dy)
   }
 
   /**
@@ -2331,6 +2339,46 @@ export class Editor {
     this.canvas.requestRenderAll()
     this.autosaver.markDirty() // like typing (a blank text is out of the scene, so a save stores none)
     this.syncSelection()
+  }
+
+  private layoutBounds(objects: readonly FabricObject[]) {
+    return objects.map((o) => {
+      const { left, top, width, height } = o.getBoundingRect()
+      return { left, top, right: left + width, bottom: top + height }
+    })
+  }
+
+  /** Translates each selected object independently, leaving its shape and stacking alone. */
+  layoutSelection(op: Layout) {
+    if (!this.editable || this.busy || this.selectionLocked() || this.canvas.getActiveObjects().length < 2) return
+    this.finishEditing()
+    const selected = new Set(this.canvas.getActiveObjects())
+    const all = this.canvas.getObjects()
+    const members = all.filter((o) => selected.has(o)) // stable distribution order for tied bounds
+    const offsets = layoutOffsets(this.layoutBounds(members), op)
+    if (!offsets) return
+    const moves = new Map<FabricObject, number>()
+    const frameMoves = new Map<string, number>()
+    members.forEach((o, i) => {
+      const delta = offsets.amounts[i]!
+      if (delta === 0) return
+      moves.set(o, delta)
+      if (isFrame(o)) frameMoves.set(idOf(o) ?? '', delta)
+    })
+    if (moves.size === 0) return
+
+    const base = this.snapshot()
+    this.canvas.discardActiveObject() // members now have absolute coordinates
+    for (const o of all) {
+      const owner = ownerOf(o)
+      const delta = moves.get(o) ?? (selected.has(o) || owner === undefined ? undefined : frameMoves.get(owner))
+      if (delta === undefined) continue
+      this.placeObject(o, o.left + (offsets.axis === 'x' ? delta : 0), o.top + (offsets.axis === 'y' ? delta : 0))
+    }
+    this.applyOwnership(base, [...moves.keys()])
+    this.selectByIds(members)
+    this.canvas.requestRenderAll()
+    this.commit()
   }
 
   arrange(op: LayerOp) {

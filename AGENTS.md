@@ -115,6 +115,11 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 - A multi-selection can be moved, scaled proportionally from a corner, and (if it contains no frame) rotated. There is no free-aspect stretch or skew of a group, and Shift does not unlock one. Every reachable canvas state must be representable in the stored records.
 - One scale factor per proportional gesture: limits (text 6 to 400 px, a frame's smaller side at least 24 units) are computed from pre-gesture values and applied once to the whole selection, never per member, and an out-of-range member is never snapped into range. No transform is applied twice.
 
+## Selection layout
+
+- Align moves two or more unlocked selected items on one scene axis, using their displayed axis-aligned bounds. Left, top, right and bottom use the selection's outer edge. Center uses the midpoint of the selection's span. Distribute keeps the two outer items in place and spaces the gaps between three or more items. If there is insufficient room, that axis is disabled. Moves use the normal stored position precision.
+- A moved frame carries its unselected members, including locked ones. A selected member takes only its own layout displacement. Apply the ordinary ownership rules to moved items and leave stationary items alone. One changed layout is one history step. Shape, angle, z-order and selection are preserved.
+
 ## Layers (settled)
 
 - The layer list (`EditorState.layers`) is derived from the canvas and never stored. It is flat and front-most first: all content front to back, then all frames front to back. Content is never grouped under its frame, because stacking order is global and independent of ownership; an owned item only names its owner, taken from stored ownership.
