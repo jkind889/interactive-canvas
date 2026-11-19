@@ -120,6 +120,11 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 - Align moves two or more unlocked selected items on one scene axis, using their displayed axis-aligned bounds. Left, top, right and bottom use the selection's outer edge. Center uses the midpoint of the selection's span. Distribute keeps the two outer items in place and spaces the gaps between three or more items. If there is insufficient room, that axis is disabled. Moves use the normal stored position precision.
 - A moved frame carries its unselected members, including locked ones. A selected member takes only its own layout displacement. Apply the ordinary ownership rules to moved items and leave stationary items alone. One changed layout is one history step. Shape, angle, z-order and selection are preserved.
 
+## Duplication
+
+- Duplicate is inert before load, on a read-only board, during a canvas gesture and for a locked selection. A valid command finishes an edit before it snapshots the scene. Each copy has a fresh id and starts unlocked. Source image bytes are shared. One command, including a frame with its owned items, is one history step.
+- Copy explicitly selected objects and the owned contents of selected frames exactly once, preserving relative stacking within each band and bringing the copies to its front. Remap ownership to matching copied frames; other content copies use the ordinary placement rule against existing frames. Select the counterparts of the items explicitly selected.
+
 ## Layers (settled)
 
 - The layer list (`EditorState.layers`) is derived from the canvas and never stored. It is flat and front-most first: all content front to back, then all frames front to back. Content is never grouped under its frame, because stacking order is global and independent of ownership; an owned item only names its owner, taken from stored ownership.

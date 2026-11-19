@@ -438,6 +438,17 @@ export function Inspector({ editor, selection, cropping, onReplace }: {
       <button
         type="button"
         className="secondary-btn inspector-btn"
+        aria-keyshortcuts="Control+D Meta+D"
+        title="Duplicate the selection (Ctrl+D)"
+        disabled={selection.locked}
+        onClick={() => editor.duplicateSelection()}
+      >
+        Duplicate
+      </button>
+
+      <button
+        type="button"
+        className="secondary-btn inspector-btn"
         aria-keyshortcuts="Control+Shift+L Meta+Shift+L"
         title={selection.locked ? 'Unlock, so that it can be moved and changed again (Ctrl+Shift+L)' : 'Lock against moving and changing by accident (Ctrl+Shift+L)'}
         onClick={() => editor.setSelectionLocked(!selection.locked)}

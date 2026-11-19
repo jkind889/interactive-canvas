@@ -1493,7 +1493,7 @@ export class Editor {
     if (!this.live) return
     const active = this.canvas.getActiveObject()
     const edited = active instanceof Textbox && active.isEditing ? active : null
-    const ctx = { editingText: this.state.editingText, textSelected: active instanceof Textbox && !active.isEditing }
+    const ctx = { editingText: this.state.editingText, textSelected: active instanceof Textbox && !active.isEditing, hasSelection: !!active }
     const editing = { editedTextarea: edited?.hiddenTextarea ?? null, canRevertShortcut: edited !== null && this.shortcutRevert?.target === edited }
     this.typed = this.busy ? null : typedCharacter(e, editing) // observed only, never claimed
     if (this.busy) {
@@ -1567,6 +1567,8 @@ export class Editor {
         return this.deleteSelection()
       case 'select-all':
         return this.selectAll()
+      case 'duplicate':
+        return this.duplicateSelection()
       case 'tool-select':
         return this.setTool('select')
       case 'tool-hand':
@@ -2339,6 +2341,47 @@ export class Editor {
     this.canvas.requestRenderAll()
     this.autosaver.markDirty() // like typing (a blank text is out of the scene, so a save stores none)
     this.syncSelection()
+  }
+
+  /** Duplicates selected objects and the contents of selected frames as one undo step. */
+  duplicateSelection() {
+    if (!this.editable || this.busy || this.selectionLocked() || this.canvas.getActiveObjects().length === 0) return
+    this.finishEditing()
+    const selected = new Set(this.selectedIds())
+    const scene = this.snapshot()
+    const offset = 24 / this.getViewport().zoom
+    const copiedOwners = new Map<string, string>()
+    const frames = scene.frames.filter((rec) => selected.has(rec.id)).map((rec) => {
+      const id = newId()
+      copiedOwners.set(rec.id, id)
+      const copy = { ...rec, id, name: normalizeFrameName(rec.name.slice(0, 75) + ' copy'), left: round(rec.left + offset), top: round(rec.top + offset) }
+      delete copy.locked
+      return copy
+    })
+    const content: FabricObject[] = []
+    const selection: FabricObject[] = []
+
+    for (const rec of scene.objects) {
+      const copiedOwner = rec.frameId === undefined ? undefined : copiedOwners.get(rec.frameId)
+      const explicit = selected.has(rec.id)
+      if (!explicit && copiedOwner === undefined) continue
+      const copy = { ...rec, id: newId(), left: round(rec.left + offset), top: round(rec.top + offset) }
+      delete copy.locked
+      const obj = createObject(copy, (id) => this.assets.get(id))
+      if (!obj) return // nothing has been added yet
+      setOwner(obj, copiedOwner ?? ownerAfterManipulation(rec.frameId, centerOf(obj), scene.frames, NO_FRAMES))
+      content.push(obj)
+      if (explicit) selection.push(obj)
+    }
+    if (frames.length === 0 && content.length === 0) return
+
+    const frameObjects = frames.map(createFrame)
+    this.canvas.discardActiveObject()
+    if (frameObjects.length) this.canvas.insertAt(scene.frames.length, ...frameObjects)
+    if (content.length) this.canvas.add(...content)
+    this.selectByIds([...frameObjects, ...selection])
+    this.canvas.requestRenderAll()
+    this.commit()
   }
 
   private layoutBounds(objects: readonly FabricObject[]) {

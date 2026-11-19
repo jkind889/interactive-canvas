@@ -99,6 +99,10 @@ Select two or more items and use **Align** in the Inspector to line up their edg
 
 Aligning a frame moves its unselected contents along with it. Selected contents move according to their own alignment. Undo and redo each take one step for the whole layout change.
 
+## Duplicate an item or spread
+
+Select an unlocked item and click **Duplicate** in the Inspector, or press `Ctrl/Cmd+D`. Copies retain text formatting and image crops, start slightly down and right, and share the source image file. A duplicated frame brings its owned items along, including ones you did not select. The copies start unlocked. Undo removes the entire duplication together.
+
 ## Layers
 
 The **Layers** panel at the bottom right lists everything on the board, front-most first: all images and texts from front to back, then all frames from front to back (frames always sit behind content). Its header collapses and expands it.

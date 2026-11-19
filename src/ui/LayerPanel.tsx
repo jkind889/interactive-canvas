@@ -131,7 +131,7 @@ export const LayerPanel = memo(function LayerPanel({
       else {
         if (!current.dragging) return
         const { editingText, selection } = editor.getState()
-        const ctx = { editingText, textSelected: selection?.kind === 'text' }
+        const ctx = { editingText, textSelected: selection?.kind === 'text', hasSelection: selection !== null }
         const shortcut = resolveShortcut(e, ctx)
         if (shortcut?.startsWith('zoom-') || (!shortcut && !isPanHoldKey(e, ctx))) return
       }

@@ -3,6 +3,7 @@ export type ShortcutAction =
   | 'redo'
   | 'delete'
   | 'select-all'
+  | 'duplicate'
   | 'tool-select'
   | 'tool-hand'
   | 'tool-text'
@@ -29,6 +30,7 @@ export interface ShortcutContext {
   editingText: boolean
   /** Exactly one text is selected (and not being edited): Ctrl/Cmd+B, I and U format it as a whole. */
   textSelected?: boolean
+  hasSelection?: boolean
 }
 
 export type KeyEventLike = Pick<
@@ -72,6 +74,7 @@ export function resolveShortcut(e: KeyEventLike, ctx: ShortcutContext): Shortcut
     if (key === 'z') return e.shiftKey ? 'redo' : 'undo'
     if (key === 'y' && !e.shiftKey) return 'redo'
     if (key === 'a' && !e.shiftKey) return 'select-all'
+    if (key === 'd' && !e.shiftKey && ctx.hasSelection) return 'duplicate'
     if (key === 'l' && e.shiftKey) return 'toggle-lock'
     if (key === ']') return 'layer-front'
     if (key === '[') return 'layer-back'
