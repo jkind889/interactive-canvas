@@ -236,6 +236,7 @@ Shortcuts never fire while you are typing in a field or editing text, except `Ct
 | `Ctrl/Cmd+Shift+Z`, `Ctrl+Y`| Redo                           |
 | `Delete` / `Backspace`      | Delete selection               |
 | `Ctrl/Cmd+A`                | Select all                     |
+| `Ctrl/Cmd+D`                | Duplicate the selection        |
 | `[` / `]`                   | Send backward / bring forward (frames stay behind content) |
 | `Ctrl/Cmd+[` / `]`          | Send to back / bring to front  |
 | `Ctrl/Cmd+Shift+L`          | Lock the selection; unlock a locked one |
