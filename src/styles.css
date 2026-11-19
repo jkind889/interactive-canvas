@@ -470,6 +470,7 @@ button:disabled {
   border-top: 1px solid var(--border);
 }
 .layer-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -479,6 +480,32 @@ button:disabled {
   font-size: 12px;
   cursor: pointer;
   user-select: none;
+}
+.layer-row:not(.is-locked, [aria-disabled='true']) {
+  cursor: grab;
+}
+.layer-row[data-dragging] {
+  opacity: 0.55;
+}
+.layer-row[data-dragging],
+.layer-row[data-insert] {
+  cursor: grabbing;
+}
+.layer-row[data-insert]::after {
+  content: '';
+  position: absolute;
+  z-index: 1;
+  inset-inline: 4px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--accent-strong);
+  pointer-events: none;
+}
+.layer-row[data-insert='before']::after {
+  top: -1px;
+}
+.layer-row[data-insert='after']::after {
+  bottom: -1px;
 }
 .layer-row:hover {
   background: var(--bg);

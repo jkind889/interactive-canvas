@@ -1,4 +1,5 @@
 export type LayerOp = 'front' | 'forward' | 'backward' | 'back'
+export type LayerDropSide = 'before' | 'after' // in the front-most-first layer list
 
 /**
  * Pure z-order reordering for a selection (order is back to front).

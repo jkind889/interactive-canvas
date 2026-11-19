@@ -481,3 +481,105 @@ describe('reordering, seen through the list', () => {
     expect(b.owners()).toEqual(owners)
   })
 })
+
+describe('moving a layer relative to another row', () => {
+  it('moves just the grabbed row in display order and preserves records and a mixed selection through history', async () => {
+    const b = await board(FRAMES, OBJECTS)
+    const original = b.doc()
+    b.editor.selectLayer('i1')
+    b.editor.selectLayer('A', { toggle: true })
+    b.editor.selectLayer('t1', { toggle: true })
+
+    expect(b.editor.canMoveLayer('i1', 'i2', 'before')).toBe(true)
+    b.editor.moveLayer('i1', 'i2', 'before')
+    expect(b.ids()).toEqual(['i1', 'i2', 't1', 'B', 'A'])
+    expect(b.activeIds()).toEqual(['A', 't1', 'i1'])
+    expect(b.doc()).toEqual({ ...original, objects: [OBJECTS[1], OBJECTS[2], OBJECTS[0]] })
+    expect(b.editor.canMoveLayer('i1', 'i2', 'before')).toBe(false)
+    await flush()
+    expect(b.store.attempts).toHaveLength(1)
+
+    b.editor.undo()
+    expect(b.doc()).toEqual(original)
+    expect(b.activeIds()).toEqual(['A', 'i1', 't1'])
+    expect(b.editor.getState().canUndo).toBe(false)
+    b.editor.redo()
+    expect(b.ids()).toEqual(['i1', 'i2', 't1', 'B', 'A'])
+    expect(b.activeIds()).toEqual(['A', 't1', 'i1'])
+
+    b.editor.moveLayer('i1', 't1', 'after')
+    expect(b.doc()).toEqual(original)
+    b.editor.moveLayer('A', 'B', 'before')
+    expect(b.doc()).toEqual({ ...original, frames: [FRAMES[1], FRAMES[0]] })
+  })
+
+  it('rejects missing, locked, cross-band, same-row and same-place moves without saving', async () => {
+    const b = await board(FRAMES, [OBJECTS[0]!, OBJECTS[1]!, { ...OBJECTS[2]!, locked: true }])
+    const original = b.doc()
+    const invalid = [
+      ['i1', 'missing', 'before'],
+      ['missing', 'i1', 'before'],
+      ['i2', 'i1', 'after'],
+      ['i1', 'A', 'before'],
+      ['A', 't1', 'after'],
+      ['i1', 'i1', 'before'],
+      ['i1', 't1', 'after'],
+    ] as const
+    for (const [source, target, side] of invalid) {
+      expect(b.editor.canMoveLayer(source, target, side)).toBe(false)
+      b.editor.moveLayer(source, target, side)
+    }
+    await flush()
+    expect(b.doc()).toEqual(original)
+    expect(b.editor.getState().canUndo).toBe(false)
+    expect(b.store.attempts).toHaveLength(0)
+  })
+
+  it('only moves on an editable, idle board', async () => {
+    const made = make(FRAMES, OBJECTS)
+    const init = made.editor.init()
+    expect(made.editor.canMoveLayer('i1', 'i2', 'before')).toBe(false)
+    made.editor.moveLayer('i1', 'i2', 'before')
+    made.store.releaseLoad()
+    await init
+    const b = helpers(made)
+    const order = b.ids()
+
+    b.select('i1')
+    const transform = press(b.canvas, b.obj('i1'))
+    expect(b.editor.canMoveLayer('i1', 'i2', 'before')).toBe(false)
+    b.editor.moveLayer('i1', 'i2', 'before')
+    release(b.canvas, transform)
+    await tick()
+    expect(b.ids()).toEqual(order)
+    expect(b.editor.canMoveLayer('i1', 'i2', 'before')).toBe(true)
+
+    ;(b.editor as unknown as { enterReadOnly: (m: string) => void }).enterReadOnly('gone read-only')
+    expect(b.editor.canMoveLayer('i1', 'i2', 'before')).toBe(false)
+    b.editor.moveLayer('i1', 'i2', 'before')
+    expect(b.ids()).toEqual(order)
+    await flush()
+    expect(b.store.attempts).toHaveLength(0)
+  })
+
+  it('leaves an edit open for a no-op and commits typed text separately before a valid drop', async () => {
+    const b = await board(FRAMES, OBJECTS)
+    b.select('t1')
+    const text = b.obj('t1') as Textbox
+    text.enterEditing()
+    text.type('edited text')
+    b.editor.moveLayer('i1', 't1', 'after')
+    expect(text.isEditing).toBe(true)
+
+    b.editor.moveLayer('i1', 't1', 'before')
+    expect(text.isEditing).toBe(false)
+    expect(b.selectedIds()).toEqual(['t1'])
+    expect(b.ids()).toEqual(['i2', 'i1', 't1', 'B', 'A'])
+    b.editor.undo()
+    expect(b.ids()).toEqual(['i2', 't1', 'i1', 'B', 'A'])
+    expect(b.layers()[1]?.label).toBe('edited text')
+    b.editor.undo()
+    expect(b.layers()[1]?.label).toBe('t1')
+    expect(b.editor.getState().canUndo).toBe(false)
+  })
+})

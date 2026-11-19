@@ -1,11 +1,29 @@
-import { memo, useId } from 'react'
+import { memo, useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from 'react'
 import type { Editor, LayerItem } from '../editor/Editor.ts'
+import { isPanHoldKey, resolveShortcut } from '../input/shortcuts.ts'
+import type { LayerDropSide } from '../model/layers.ts'
+import type { Point } from '../model/viewport.ts'
 import { ChevronIcon, FrameIcon, ImageIcon, LockIcon, TextIcon, UnlockIcon } from './icons.tsx'
 
 const KindIcon = ({ kind }: { kind: LayerItem['kind'] }) => (kind === 'frame' ? <FrameIcon /> : kind === 'text' ? <TextIcon /> : <ImageIcon />)
 
 const kindName = { image: 'Image', text: 'Text', frame: 'Frame' } as const
+
+const DRAG_THRESHOLD = 5
+
+interface RowPress {
+  sourceId: string
+  start: Point
+  last: Point
+  dragging: boolean
+  drop: Drop | null
+}
+
+interface Drop {
+  targetId: string
+  side: LayerDropSide
+}
 
 /**
  * A field in the chrome that keeps keystrokes for itself (the font size, a frame name, the
@@ -52,13 +70,106 @@ export const LayerPanel = memo(function LayerPanel({
   onToggleOpen: () => void
 }) {
   const listId = useId()
+  const listRef = useRef<HTMLUListElement>(null)
+  const press = useRef<RowPress | null>(null)
+  const suppressClick = useRef(false)
+  const [preview, setPreview] = useState<{ sourceId: string; drop: Drop | null } | null>(null)
+
+  const endPress = useCallback((cancelled = false) => {
+    if (!press.current) return
+    suppressClick.current = cancelled || press.current.dragging
+    press.current = null
+    setPreview(null)
+  }, [])
+
+  useEffect(() => {
+    function dropAt(sourceId: string, { x, y }: Point): Drop | null {
+      const row = document.elementFromPoint(x, y)?.closest<HTMLElement>('[data-layer-id]')
+      const targetId = row?.dataset.layerId
+      if (!row || targetId === undefined || !listRef.current?.contains(row)) return null
+      const box = row.getBoundingClientRect()
+      const side = y <= box.top + box.height / 2 ? 'before' : 'after'
+      return editor.canMoveLayer(sourceId, targetId, side) ? { targetId, side } : null
+    }
+    function showPreview(current: RowPress) {
+      const { sourceId, last } = current
+      const drop = dropAt(sourceId, last)
+      current.drop = drop
+      setPreview((previous) => {
+        if (previous?.sourceId === sourceId && previous.drop?.targetId === drop?.targetId && previous.drop?.side === drop?.side) return previous
+        return { sourceId, drop }
+      })
+    }
+    function onMove(e: MouseEvent) {
+      const current = press.current
+      if (!current) return
+      if (!(e.buttons & 1)) {
+        endPress(true) // the primary release may have happened outside the window
+        return
+      }
+      const last = { x: e.clientX, y: e.clientY }
+      if (!current.dragging && Math.hypot(last.x - current.start.x, last.y - current.start.y) < DRAG_THRESHOLD) return
+      current.dragging = true
+      current.last = last
+      showPreview(current)
+    }
+    function onUp(e: MouseEvent) {
+      const current = press.current
+      if (!current || e.button !== 0) return
+      const expected = current.drop
+      const drop = expected && dropAt(current.sourceId, { x: e.clientX, y: e.clientY })
+      endPress()
+      // A concurrent edit can shift the rows. Only commit the insertion we previewed.
+      if (drop && drop.targetId === expected?.targetId && drop.side === expected.side) {
+        editor.moveLayer(current.sourceId, drop.targetId, drop.side)
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      const current = press.current
+      if (!current) return
+      if (e.key === 'Escape') endPress(true)
+      else {
+        if (!current.dragging) return
+        const ctx = { editingText: editor.getState().editingText }
+        const shortcut = resolveShortcut(e, ctx)
+        if (shortcut?.startsWith('zoom-') || (!shortcut && !isPanHoldKey(e, ctx))) return
+      }
+      e.preventDefault()
+      e.stopPropagation()
+    }
+    function onScroll(e: Event) {
+      if (e.target === listRef.current && press.current?.dragging) showPreview(press.current)
+    }
+    function onContextMenu(e: MouseEvent) {
+      if (press.current?.dragging) e.preventDefault()
+    }
+    const cancel = () => endPress(true)
+    const unsubscribe = editor.subscribe(() => {
+      const current = press.current
+      if (!current) return
+      const { layers, readOnly } = editor.getState()
+      if (readOnly !== null || !layers.some((layer) => layer.id === current.sourceId && !layer.locked)) cancel()
+    })
+    const events = new AbortController()
+    const capture = { capture: true, signal: events.signal }
+    window.addEventListener('mousemove', onMove, capture)
+    window.addEventListener('mouseup', onUp, capture)
+    window.addEventListener('keydown', onKeyDown, capture)
+    window.addEventListener('scroll', onScroll, capture)
+    window.addEventListener('contextmenu', onContextMenu, capture)
+    window.addEventListener('blur', cancel, { signal: events.signal })
+    return () => {
+      unsubscribe()
+      events.abort()
+    }
+  }, [editor, endPress])
 
   const choose = (id: string, toggle: boolean) => {
     if (readOnly) return
     editor.selectLayer(id, { toggle })
   }
   const onClick = (e: ReactMouseEvent<HTMLLIElement>, id: string) => {
-    if (e.button !== 0) return
+    if (e.button !== 0 || (e.detail !== 0 && suppressClick.current)) return
     choose(id, e.ctrlKey || e.metaKey || e.shiftKey)
   }
   const onKey = (e: ReactKeyboardEvent<HTMLLIElement>, id: string) => {
@@ -77,7 +188,10 @@ export const LayerPanel = memo(function LayerPanel({
         aria-expanded={open}
         aria-controls={listId}
         title={open ? 'Hide the layer list' : 'Show the layer list'}
-        onClick={onToggleOpen}
+        onClick={() => {
+          endPress(true)
+          onToggleOpen()
+        }}
       >
         <span className="layers-title">Layers</span>
         <span className="layers-count">{layers.length}</span>
@@ -86,7 +200,7 @@ export const LayerPanel = memo(function LayerPanel({
         </span>
       </button>
       {open && (
-        <ul id={listId} className="layers-list" role="listbox" aria-label="Layers" aria-multiselectable="true" aria-disabled={readOnly || undefined}>
+        <ul ref={listRef} id={listId} className="layers-list" role="listbox" aria-label="Layers" aria-multiselectable="true" aria-disabled={readOnly || undefined}>
           {layers.map((item) => (
             <li
               key={item.id}
@@ -96,6 +210,8 @@ export const LayerPanel = memo(function LayerPanel({
               data-layer-id={item.id}
               data-layer-kind={item.kind}
               data-layer-locked={item.locked || undefined}
+              data-dragging={preview?.sourceId === item.id || undefined}
+              data-insert={preview?.drop?.targetId === item.id ? preview.drop.side : undefined}
               className={`layer-row${item.selected ? ' is-selected' : ''}${item.locked ? ' is-locked' : ''}`}
               tabIndex={readOnly ? undefined : 0}
               title={item.frameName ? `${item.label} (in ${item.frameName})` : item.label}
@@ -104,7 +220,13 @@ export const LayerPanel = memo(function LayerPanel({
                 // size, frame name, title) focused, and its keys would then act on the newly
                 // selected object. Let it go first, as any other click would; its blur commits
                 // what was typed. A read-only board's rows do nothing, focus included.
-                if (!readOnly && e.button === 0) focusToRelease()?.blur()
+                if (!readOnly && e.button === 0) {
+                  focusToRelease()?.blur()
+                  endPress()
+                  suppressClick.current = false
+                  const point = { x: e.clientX, y: e.clientY }
+                  press.current = item.locked ? null : { sourceId: item.id, start: point, last: point, dragging: false, drop: null }
+                }
                 // A mouse press must not move focus here: Space (hold to pan) and the letter
                 // shortcuts would then act on the list instead of the board.
                 e.preventDefault()

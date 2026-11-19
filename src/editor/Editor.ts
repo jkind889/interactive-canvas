@@ -39,7 +39,7 @@ import {
 import type { CropHit, CropRect, Placement } from '../model/crop.ts'
 import { History } from '../model/history.ts'
 import { canReorderLayered, reorderLayered } from '../model/layers.ts'
-import type { LayerOp } from '../model/layers.ts'
+import type { LayerDropSide, LayerOp } from '../model/layers.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from '../model/types.ts'
 import type { BoardDoc, FrameRecord, ImageRecord, SaveState, Scene, TextRecord, Viewport } from '../model/types.ts'
 import { fitImageScale, fitViewport, screenToScene, zoomAround } from '../model/viewport.ts'
@@ -1976,6 +1976,40 @@ export class Editor {
       if (o) this.canvas.moveObjectTo(o, index)
     })
     this.selectByIds(objs.filter((o) => this.canvas.getObjects().includes(o)))
+    this.canvas.requestRenderAll()
+    this.commit()
+  }
+
+  /** Re-checks the live stack for both the insertion preview and the eventual drop. */
+  private layerMove(sourceId: string, targetId: string, side: LayerDropSide) {
+    if (!this.editable || this.busy || sourceId === targetId) return null
+    const all = this.canvas.getObjects()
+    const listed = (o: FabricObject) => !(o instanceof Textbox && o.text.trim() === '')
+    const sourceIndex = all.findIndex((o) => idOf(o) === sourceId && listed(o))
+    const targetIndex = all.findIndex((o) => idOf(o) === targetId && listed(o))
+    const source = all[sourceIndex]
+    const target = all[targetIndex]
+    if (!source || !target || isLocked(source) || isFrame(source) !== isFrame(target)) return null
+    // The canvas stack is back-to-front, and moveObjectTo removes the source before inserting.
+    const index = targetIndex + (side === 'before' ? 1 : 0) - (sourceIndex < targetIndex ? 1 : 0)
+    return index === sourceIndex ? null : { source, index }
+  }
+
+  canMoveLayer(sourceId: string, targetId: string, side: LayerDropSide): boolean {
+    return this.layerMove(sourceId, targetId, side) !== null
+  }
+
+  /** Moves just the grabbed row. Selection and ownership are independent of stacking. */
+  moveLayer(sourceId: string, targetId: string, side: LayerDropSide) {
+    if (!this.canMoveLayer(sourceId, targetId, side)) return
+    this.finishEditing()
+    const move = this.layerMove(sourceId, targetId, side)
+    if (!move) return
+    const active = this.canvas.getActiveObject()
+    const members = active instanceof ActiveSelection && active.getObjects().includes(move.source) ? new Set(active.getObjects()) : null
+    if (members) this.canvas.discardActiveObject()
+    this.canvas.moveObjectTo(move.source, move.index)
+    if (members) this.selectByIds(this.canvas.getObjects().filter((o) => members.has(o)))
     this.canvas.requestRenderAll()
     this.commit()
   }

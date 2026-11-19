@@ -3,7 +3,7 @@
  */
 import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
-import { drag, openApp, openBlank, sceneToPage, seedRaw, storedDoc, undoButton, waitSaved } from './helpers.ts'
+import { AUTOSAVE_QUIET_MS, drag, openApp, openBlank, redoButton, sceneToPage, seedRaw, snapshotIdb, storedDoc, undoButton, waitSaved } from './helpers.ts'
 import type { SeedAsset, StoredBoard, View } from './helpers.ts'
 
 const UNIT: View = { zoom: 1, panX: 0, panY: 0 }
@@ -54,6 +54,195 @@ async function storedWhen(page: Page, check: (doc: StoredBoard) => boolean): Pro
   await expect.poll(async () => check(await storedDoc(page)), { timeout: 5000 }).toBe(true)
   return storedDoc(page)
 }
+
+async function rowPoint(page: Page, id: string, part: 'before' | 'middle' | 'after' = 'middle') {
+  const layer = row(page, id)
+  await layer.scrollIntoViewIfNeeded()
+  const box = await layer.boundingBox()
+  if (!box) throw new Error(`missing row ${id}`)
+  return { x: box.x + 55, y: box.y + box.height * { before: 0.2, middle: 0.5, after: 0.8 }[part] }
+}
+
+test.describe('dragging layer rows', () => {
+  test('reorders two overlapping images in the same frame above and below, with undo, redo and reload', async ({ page }) => {
+    const frames = [frameRec('outer', 80, 80, 650, 460), frameRec('f1', 200, 120, 470, 360, 'Frame 1')]
+    const small = image('small', 300, 220, { frameId: 'f1' })
+    const big = image('big', 250, 150, { assetId: 'a2', frameId: 'f1' })
+    const o = await openSeeded(page, frames, [small, big], [PIC, BIG])
+    const original = ['big', 'small', 'f1', 'outer']
+    const reordered = ['small', 'big', 'f1', 'outer']
+    await expect.poll(() => rowIds(page)).toEqual(original)
+    await row(page, 'big').focus()
+
+    // A pending title save during the drag must still see the original order.
+    await page.getByRole('textbox', { name: 'Board title' }).fill('Overlap')
+    await drag(page, await rowPoint(page, 'small'), await rowPoint(page, 'big', 'before'), { hold: true })
+    await expect(row(page, 'big')).toHaveAttribute('data-insert', 'before')
+    await expect.poll(() => rowIds(page)).toEqual(original)
+    await expect.poll(async () => {
+      const doc = await storedDoc(page)
+      return [doc.title, doc.objects.map((item) => item.id)]
+    }).toEqual(['Overlap', ['small', 'big']])
+    await expect(undoButton(page)).toBeDisabled()
+    await page.mouse.up()
+    await expect.poll(() => rowIds(page)).toEqual(reordered)
+    await expect(list(page).locator('[data-insert]')).toHaveCount(0)
+    await expect.poll(() => selectedRows(page)).toEqual([])
+    await expect(page.locator('body')).toBeFocused()
+    const saved = await storedWhen(page, (d) => d.objects[0]?.id === 'big')
+    expect(saved.objects).toEqual([big, small])
+    expect(saved.frames).toEqual(frames)
+
+    const overlap = o.at(390, 275)
+    await page.mouse.click(overlap.x, overlap.y)
+    await expect.poll(() => selectedRows(page)).toEqual(['small'])
+    await undoButton(page).click()
+    await expect.poll(() => rowIds(page)).toEqual(original)
+    await expect(undoButton(page)).toBeDisabled()
+    await redoButton(page).click()
+    await expect.poll(() => rowIds(page)).toEqual(reordered)
+
+    await drag(page, await rowPoint(page, 'small'), await rowPoint(page, 'big', 'after'), { hold: true })
+    await expect(row(page, 'big')).toHaveAttribute('data-insert', 'after')
+    await page.mouse.up()
+    await expect.poll(() => rowIds(page)).toEqual(original)
+    await expect.poll(() => selectedRows(page)).toEqual(['small'])
+    await undoButton(page).click()
+    await expect.poll(() => rowIds(page)).toEqual(reordered)
+    await storedWhen(page, (d) => d.objects[0]?.id === 'big')
+    await waitSaved(page)
+    await page.reload()
+    await expect.poll(() => rowIds(page)).toEqual(reordered)
+    await page.mouse.click(overlap.x, overlap.y)
+    await expect.poll(() => selectedRows(page)).toEqual(['small'])
+    expect(o.errors).toEqual([])
+  })
+
+  test('invalid drops, Escape, blur and a lost release leave order, selection and storage alone', async ({ page }) => {
+    const o = await openSeeded(page, [frameRec('frame', 180, 110, 500, 370)], [image('a', 300, 220), image('b', 250, 150)])
+    const start = () => rowPoint(page, 'a')
+    const target = () => rowPoint(page, 'b', 'before')
+    const indicator = list(page).locator('[data-insert]')
+    await row(page, 'b').click()
+    const before = await snapshotIdb(page)
+    const source = await start()
+    const above = await target()
+    await page.mouse.move(source.x, source.y)
+    await page.mouse.down()
+    await page.keyboard.press('Escape') // also cancel before the pointer has crossed the drag threshold
+    await page.mouse.move(above.x, above.y)
+    await expect(indicator).toHaveCount(0)
+    await page.mouse.up()
+    for (const point of [await rowPoint(page, 'b', 'after'), await rowPoint(page, 'frame', 'before'), o.at(400, 260)]) {
+      await drag(page, await start(), point, { hold: true })
+      await expect(indicator).toHaveCount(0)
+      await page.mouse.up()
+    }
+    await drag(page, await start(), await target(), { hold: true })
+    await expect(indicator).toHaveCount(1)
+    await page.keyboard.press('Delete')
+    await expect.poll(() => rowIds(page)).toEqual(['b', 'a', 'frame'])
+    await page.keyboard.press('Escape')
+    await expect(indicator).toHaveCount(0)
+    // The release on the source must not turn a cancelled drag into a click.
+    await page.mouse.move(source.x, source.y)
+    await page.mouse.up()
+
+    await drag(page, await start(), await target(), { hold: true })
+    await expect(indicator).toHaveCount(1)
+    await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+    await expect(indicator).toHaveCount(0)
+    await page.mouse.up()
+
+    await drag(page, await start(), await target(), { hold: true })
+    await expect(indicator).toHaveCount(1)
+    await page.evaluate(() => window.dispatchEvent(new MouseEvent('mousemove', { buttons: 0 })))
+    await expect(indicator).toHaveCount(0)
+    await page.mouse.up()
+
+    await expect.poll(() => rowIds(page)).toEqual(['b', 'a', 'frame'])
+    await expect.poll(() => selectedRows(page)).toEqual(['b'])
+    await expect(undoButton(page)).toBeDisabled()
+    await page.waitForTimeout(AUTOSAVE_QUIET_MS)
+    expect(await snapshotIdb(page)).toEqual(before)
+
+    await drag(page, await start(), await target(), { hold: true })
+    await expect(indicator).toHaveCount(1)
+    await page.reload()
+    await page.mouse.up()
+    await expect.poll(() => rowIds(page)).toEqual(['b', 'a', 'frame'])
+    await expect(indicator).toHaveCount(0)
+    await expect(undoButton(page)).toBeDisabled()
+    expect(await snapshotIdb(page)).toEqual(before)
+    expect(o.errors).toEqual([])
+  })
+
+  test('a save conflict during a drag cancels the preview and leaves the newer board intact', async ({ page, context }) => {
+    const o = await openSeeded(page, [], [image('a', 300, 220), image('b', 250, 150)])
+    const writer = await context.newPage()
+    await openApp(writer)
+    const writerTitle = writer.getByRole('textbox', { name: 'Board title' })
+    await writerTitle.fill('Newer board')
+    await writerTitle.press('Enter')
+    await waitSaved(writer)
+    const saved = await snapshotIdb(writer)
+    await writer.close()
+    await page.bringToFront()
+
+    const from = await rowPoint(page, 'a')
+    const to = await rowPoint(page, 'b', 'before')
+    await page.getByRole('textbox', { name: 'Board title' }).fill('Stale title')
+    await drag(page, from, to, { hold: true })
+    await expect(row(page, 'b')).toHaveAttribute('data-insert', 'before')
+    await expect(page.getByTestId('readonly-banner')).toBeVisible()
+    await expect(list(page).locator('[data-insert]')).toHaveCount(0)
+    await page.mouse.up()
+    await expect.poll(() => rowIds(page)).toEqual(['b', 'a'])
+    expect(await snapshotIdb(page)).toEqual(saved)
+    expect(o.errors).toEqual([])
+  })
+
+  test('locks stay intact, frames move only among frames, and keyboard and inspector order still work', async ({ page }) => {
+    const a = image('a', 300, 220, { frameId: 'inner' })
+    const b = image('b', 250, 150, { frameId: 'inner', locked: true })
+    const outer = frameRec('outer', 80, 80, 650, 460)
+    const inner = { ...frameRec('inner', 200, 120, 470, 360), locked: true }
+    const o = await openSeeded(page, [outer, inner], [a, b])
+    await drag(page, await rowPoint(page, 'b'), await rowPoint(page, 'a', 'after'))
+    await drag(page, await rowPoint(page, 'inner'), await rowPoint(page, 'outer', 'after'))
+    await drag(page, await rowPoint(page, 'outer'), await rowPoint(page, 'a', 'before'))
+    await expect.poll(() => rowIds(page)).toEqual(['b', 'a', 'inner', 'outer'])
+    await expect(undoButton(page)).toBeDisabled()
+
+    await row(page, 'b').focus()
+    await page.keyboard.press('Space')
+    await expect.poll(() => selectedRows(page)).toEqual(['b'])
+    await drag(page, await rowPoint(page, 'a'), await rowPoint(page, 'b', 'before'), { hold: true })
+    await expect(row(page, 'b')).toHaveAttribute('data-insert', 'before')
+    await page.mouse.down({ button: 'right' })
+    await page.mouse.up({ button: 'right' })
+    await expect(row(page, 'b')).toHaveAttribute('data-insert', 'before')
+    await expect.poll(() => rowIds(page)).toEqual(['b', 'a', 'inner', 'outer'])
+    await page.mouse.up()
+    await expect.poll(() => rowIds(page)).toEqual(['a', 'b', 'inner', 'outer'])
+    await expect.poll(() => selectedRows(page)).toEqual(['b'])
+    await expect(page.locator('body')).toBeFocused()
+    await drag(page, await rowPoint(page, 'outer'), await rowPoint(page, 'inner', 'before'))
+    await expect.poll(() => rowIds(page)).toEqual(['a', 'b', 'outer', 'inner'])
+
+    await row(page, 'a').focus()
+    await page.keyboard.press('Enter')
+    await page.keyboard.press('[')
+    await expect.poll(() => rowIds(page)).toEqual(['b', 'a', 'outer', 'inner'])
+    await page.getByRole('button', { name: 'Bring forward', exact: true }).click()
+    await expect.poll(() => rowIds(page)).toEqual(['a', 'b', 'outer', 'inner'])
+    const saved = await storedWhen(page, (d) => d.frames?.[0]?.id === 'inner' && d.objects[0]?.id === 'b')
+    await waitSaved(page)
+    expect(saved.objects).toEqual([b, a])
+    expect(saved.frames).toEqual([inner, outer])
+    expect(o.errors).toEqual([])
+  })
+})
 
 test.describe('the layer list', () => {
   test('selects an image that another one covers completely; ] then brings it forward, and the order survives a reload', async ({ page }) => {
