@@ -1,3 +1,5 @@
+import type { BoardAppearance } from './appearance.ts'
+
 /** In-memory document version. The wire format may be older; see `StoredDoc`. */
 export const DOC_VERSION = 2
 export const DEFAULT_TITLE = 'Untitled board'
@@ -118,6 +120,7 @@ export interface BoardDoc {
   frames: FrameRecord[]
   objects: ObjectRecord[]
   viewport: Viewport
+  appearance?: BoardAppearance
 }
 
 /** What undo/redo and gestures snapshot: everything on the canvas, nothing about the view. */
@@ -129,6 +132,7 @@ export interface StoredDocV1 {
   title: string
   objects: Array<Omit<ImageRecord, 'frameId'> | Omit<TextRecord, 'frameId'>>
   viewport: Viewport
+  appearance?: BoardAppearance
 }
 
 export interface StoredDocV2 {
@@ -137,6 +141,7 @@ export interface StoredDocV2 {
   frames: FrameRecord[]
   objects: ObjectRecord[]
   viewport: Viewport
+  appearance?: BoardAppearance
 }
 
 /** The document as stored on disk. */

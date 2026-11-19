@@ -1,3 +1,4 @@
+import { boardAppearance } from './appearance.ts'
 import { canonicalTextFormatting } from './richText.ts'
 import { DEFAULT_TITLE, DOC_VERSION } from './types.ts'
 import type { BoardDoc, CropRect, FrameRecord, ObjectRecord, Scene, StoredDoc, Viewport } from './types.ts'
@@ -106,7 +107,8 @@ export function parseDoc(raw: unknown): BoardDoc | null {
       viewport = { zoom, panX, panY }
     }
   }
-  return { version: DOC_VERSION, title, frames, objects, viewport }
+  const appearance = boardAppearance(raw.appearance)
+  return { version: DOC_VERSION, title, frames, objects, viewport, ...(appearance && { appearance }) }
 }
 
 /**
@@ -130,6 +132,7 @@ function storable<T extends ObjectRecord | FrameRecord>(rec: T): T {
  * versions, and only when set: a key whose value is undefined is never stored.
  */
 export function serializeDoc(doc: BoardDoc): StoredDoc {
+  const appearance = boardAppearance(doc.appearance)
   if (doc.frames.length === 0) {
     return {
       version: 1,
@@ -140,6 +143,7 @@ export function serializeDoc(doc: BoardDoc): StoredDoc {
         return rest
       }),
       viewport: { ...doc.viewport },
+      ...(appearance && { appearance }),
     }
   }
   return {
@@ -148,6 +152,7 @@ export function serializeDoc(doc: BoardDoc): StoredDoc {
     frames: doc.frames.map((f) => storable(f)),
     objects: doc.objects.map((o) => storable(o)), // never stores an explicit undefined owner
     viewport: { ...doc.viewport },
+    ...(appearance && { appearance }),
   }
 }
 

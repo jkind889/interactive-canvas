@@ -1,5 +1,7 @@
 import { ActiveSelection, Textbox } from 'fabric'
 import type { FabricImage, FabricObject, Transform } from 'fabric'
+import { boardAppearance, boardStyle, DEFAULT_BOARD_STYLE, normalizePresetName, sameBoardStyle } from '../model/appearance.ts'
+import type { BoardAppearance, BoardStyle } from '../model/appearance.ts'
 import {
   DEFAULT_VIEWPORT,
   MAX_FONT_SIZE,
@@ -191,6 +193,7 @@ export interface EditorState {
   canRedo: boolean
   save: SaveState
   title: string
+  appearance: BoardAppearance
   notice: Notice | null
 }
 
@@ -390,6 +393,7 @@ export class Editor {
       canRedo: false,
       save: { kind: 'loading' },
       title: DEFAULT_TITLE,
+      appearance: {},
       notice: null,
     }
 
@@ -493,7 +497,7 @@ export class Editor {
 
   private showStoredBoard(doc: BoardDoc) {
     this.applyRecords(doc)
-    this.setState({ title: doc.title })
+    this.setState({ title: doc.title, appearance: doc.appearance ?? {} })
     this.setViewport(doc.viewport, false)
   }
 
@@ -547,7 +551,8 @@ export class Editor {
     // The autosaver never asks then; refusing makes sure no save can ever store that.
     if (this.disposed) throw new Error('The editor has been disposed.')
     const scene = this.gesture ? this.gesture.base : this.crop ? this.crop.base : this.snapshot()
-    return { version: DOC_VERSION, title: this.state.title, frames: scene.frames, objects: scene.objects, viewport: this.getViewport() }
+    const { appearance, title } = this.state
+    return { version: DOC_VERSION, title, ...scene, viewport: this.getViewport(), ...((appearance.style || appearance.presets) && { appearance }) }
   }
 
   /**
@@ -2552,6 +2557,44 @@ export class Editor {
     this.applyRecords(scene)
     this.autosaver.markDirty()
     this.syncState()
+  }
+
+  /** Opening a panel with its own fields leaves a canvas edit, like other chrome commands. */
+  prepareAppearance(): boolean {
+    if (!this.editable || this.busy) return false
+    this.finishEditing()
+    return true
+  }
+
+  /** Appearance is live board metadata, independent of object undo and redo. */
+  setBoardStyle(style: BoardStyle) {
+    if (!this.editable || this.busy) return
+    const next = boardStyle(style)
+    const current = this.state.appearance
+    if (!next || sameBoardStyle(next, current.style ?? DEFAULT_BOARD_STYLE)) return
+    this.saveAppearance(boardAppearance({ ...current, style: next }))
+  }
+
+  addAppearancePreset(rawName: string): boolean {
+    if (!this.editable || this.busy) return false
+    const name = normalizePresetName(rawName)
+    const current = this.state.appearance
+    const presets = current.presets ?? []
+    if (!name || presets.some((p) => p.name.toLowerCase() === name.toLowerCase())) return false
+    this.saveAppearance(boardAppearance({ ...current, presets: [...presets, { name, style: current.style ?? DEFAULT_BOARD_STYLE }] }))
+    return true
+  }
+
+  removeAppearancePreset(name: string) {
+    if (!this.editable || this.busy) return
+    const current = this.state.appearance
+    if (!current.presets?.some((p) => p.name === name)) return
+    this.saveAppearance(boardAppearance({ ...current, presets: current.presets.filter((p) => p.name !== name) }))
+  }
+
+  private saveAppearance(appearance: BoardAppearance | undefined) {
+    this.setState({ appearance: appearance ?? {} })
+    this.autosaver.markDirty()
   }
 
   setTitle(raw: string) {

@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
 import type { Editor } from '../editor/Editor.ts'
 import type { SaveState } from '../model/types.ts'
+import { AppearanceMenu } from './AppearanceMenu.tsx'
 import { useEditorState } from './useEditorState.ts'
 
 interface StatusView {
@@ -68,6 +69,7 @@ export function Header({ editor }: { editor: Editor | null }) {
         onFocus={(e) => e.currentTarget.select()}
       />
       <div className="save-area">
+        {editor && state?.ready && <AppearanceMenu editor={editor} appearance={state.appearance} disabled={state.readOnly !== null} />}
         <div className={`save-status tone-${status.tone}`} role="status" aria-live="polite" title={status.detail}>
           <span className="save-dot" aria-hidden="true" />
           <span>{status.label}</span>

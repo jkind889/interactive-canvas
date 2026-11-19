@@ -164,6 +164,11 @@ Yuriful is a desktop-first freeform reference canvas: you lay out images and tex
 - Replace image, assets: the new picture's bytes are stored by the first save whose document references them, in the same transaction (`writeBoard` in `boardStore.ts` stores any referenced asset that is not stored yet, from the session's cache, and refuses to write a document whose reference has no bytes). The old picture's bytes stay stored until a load prunes what the stored document does not reference, and stay in the session's memory, so an undo can bring the old picture back and the next save re-stores its bytes if another tab pruned them. A replacement that is abandoned (target gone or locked, read-only, disposed) leaves its picture decoded in memory but never referenced, so its bytes are never stored.
 - Ownership: applying a crop and Fit change the image's box, so they count as resizing it: its owner is decided by `ownerAfterManipulation` with its current owner, its new centre and no co-transformed frames. Fill leaves the box alone and never changes ownership. None of them changes z-order, id or lock.
 
+## Board appearance
+
+- The backdrop is board metadata like the title. It is rendered behind the canvas and its pattern follows pan and zoom. Frames and content keep their own colors. Opening the Appearance panel finishes a canvas edit first. Appearance changes are editable-board commands, outside scene history, and go through autosave's normal revision check.
+- Optional `appearance` rides on both wire versions. No version or database upgrade. Missing or invalid settings fall back to the original background and dots, and valid named presets survive independently. Reset drops the custom style and keeps the presets. Omit the entire field when it has neither. Built-in presets are included in the app, and custom ones are local to the board.
+
 ## Storage and migration
 
 - Everything is stored locally in IndexedDB database `yuriful`: one board row, and image bytes in a separate store. Document and bytes are written in one transaction.
